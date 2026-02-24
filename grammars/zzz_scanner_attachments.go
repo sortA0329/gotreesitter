@@ -118,6 +118,7 @@ func init() {
 		"crystal":         CrystalExternalScanner{},
 		"djot":            DjotExternalScanner{},
 		"cpp":             CppExternalScanner{},
+		"caddy":           CaddyExternalScanner{},
 	}
 
 	for i := range registry {

@@ -147,10 +147,6 @@ func defaultTokenSourceFactory(name string) func(src []byte, lang *gotreesitter.
 		return func(src []byte, lang *gotreesitter.Language) gotreesitter.TokenSource {
 			return NewGenericTokenSourceOrEOF(src, lang)
 		}
-	case "caddy":
-		return func(src []byte, lang *gotreesitter.Language) gotreesitter.TokenSource {
-			return NewGenericTokenSourceOrEOF(src, lang)
-		}
 	case "haskell":
 		return func(src []byte, lang *gotreesitter.Language) gotreesitter.TokenSource {
 			return NewGenericTokenSourceOrEOF(src, lang)
