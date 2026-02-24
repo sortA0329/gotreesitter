@@ -122,10 +122,10 @@ func (ts *LuaTokenSource) Next() gotreesitter.Token {
 			return tok
 		}
 
-		if ts.varargSymbol != 0 && ts.matchLiteralAtCurrent("...") {
+		if ts.varargSymbol != 0 && ts.cur.matchLiteralAtCurrent("...") {
 			start := ts.cur.offset
 			startPt := ts.cur.point()
-			ts.advanceBytes(3)
+			ts.cur.advanceBytes(3)
 			return makeToken(ts.varargSymbol, ts.src, start, ts.cur.offset, startPt, ts.cur.point())
 		}
 
@@ -231,13 +231,13 @@ func (ts *LuaTokenSource) shebangToken() (gotreesitter.Token, bool) {
 }
 
 func (ts *LuaTokenSource) commentToken() (gotreesitter.Token, bool) {
-	if !ts.matchLiteralAtCurrent("--") {
+	if !ts.cur.matchLiteralAtCurrent("--") {
 		return gotreesitter.Token{}, false
 	}
 
 	start := ts.cur.offset
 	startPt := ts.cur.point()
-	ts.advanceBytes(2)
+	ts.cur.advanceBytes(2)
 	commentDash := makeToken(firstNonZeroSymbol(ts.commentDashSym, ts.literalSymbols["--"]), ts.src, start, ts.cur.offset, startPt, ts.cur.point())
 
 	contentStart := ts.cur.offset
@@ -284,7 +284,7 @@ func (ts *LuaTokenSource) stringToken() (gotreesitter.Token, bool) {
 }
 
 func (ts *LuaTokenSource) longStringToken() (gotreesitter.Token, bool) {
-	if !ts.matchLiteralAtCurrent("[[") {
+	if !ts.cur.matchLiteralAtCurrent("[[") {
 		return gotreesitter.Token{}, false
 	}
 
@@ -296,19 +296,19 @@ func (ts *LuaTokenSource) longStringToken() (gotreesitter.Token, bool) {
 
 	start := ts.cur.offset
 	startPt := ts.cur.point()
-	ts.advanceBytes(2)
+	ts.cur.advanceBytes(2)
 	openTok := makeToken(open, ts.src, start, ts.cur.offset, startPt, ts.cur.point())
 
 	contentStart := ts.cur.offset
 	contentPt := ts.cur.point()
 	for !ts.cur.eof() {
-		if ts.matchLiteralAtCurrent("]]") {
+		if ts.cur.matchLiteralAtCurrent("]]") {
 			if ts.stringContentSym != 0 && contentStart < ts.cur.offset {
 				ts.pending = append(ts.pending, makeToken(ts.stringContentSym, ts.src, contentStart, ts.cur.offset, contentPt, ts.cur.point()))
 			}
 			closeStart := ts.cur.offset
 			closePt := ts.cur.point()
-			ts.advanceBytes(2)
+			ts.cur.advanceBytes(2)
 			if close != 0 {
 				ts.pending = append(ts.pending, makeToken(close, ts.src, closeStart, ts.cur.offset, closePt, ts.cur.point()))
 			}
@@ -428,7 +428,7 @@ func (ts *LuaTokenSource) literalToken() (gotreesitter.Token, bool) {
 	}
 	start := ts.cur.offset
 	startPt := ts.cur.point()
-	ts.advanceBytes(n)
+	ts.cur.advanceBytes(n)
 	return makeToken(sym, ts.src, start, ts.cur.offset, startPt, ts.cur.point()), true
 }
 
@@ -450,24 +450,6 @@ func (ts *LuaTokenSource) matchLiteral() (gotreesitter.Symbol, int) {
 		return sym, n
 	}
 	return 0, 0
-}
-
-func (ts *LuaTokenSource) matchLiteralAtCurrent(lexeme string) bool {
-	if ts.cur.offset+len(lexeme) > len(ts.src) {
-		return false
-	}
-	for i := 0; i < len(lexeme); i++ {
-		if ts.src[ts.cur.offset+i] != lexeme[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func (ts *LuaTokenSource) advanceBytes(n int) {
-	for i := 0; i < n && !ts.cur.eof(); i++ {
-		ts.cur.advanceByte()
-	}
 }
 
 func (ts *LuaTokenSource) eofToken() gotreesitter.Token {

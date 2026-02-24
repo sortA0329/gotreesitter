@@ -256,10 +256,10 @@ func (ts *TomlTokenSource) SkipToByte(offset uint32) gotreesitter.Token {
 }
 
 func (ts *TomlTokenSource) punctToken() (gotreesitter.Token, bool) {
-	if ts.matchLiteralAtCurrent("[[") && ts.lbrack2Sym != 0 {
+	if ts.cur.matchLiteralAtCurrent("[[") && ts.lbrack2Sym != 0 {
 		return ts.makeLiteralToken(ts.lbrack2Sym, 2), true
 	}
-	if ts.matchLiteralAtCurrent("]]") && ts.rbrack2Sym != 0 {
+	if ts.cur.matchLiteralAtCurrent("]]") && ts.rbrack2Sym != 0 {
 		return ts.makeLiteralToken(ts.rbrack2Sym, 2), true
 	}
 
@@ -383,9 +383,9 @@ func (ts *TomlTokenSource) numberToken() gotreesitter.Token {
 
 	isFloat := false
 
-	if ts.matchLiteralAtCurrent("0x") || ts.matchLiteralAtCurrent("0X") ||
-		ts.matchLiteralAtCurrent("0o") || ts.matchLiteralAtCurrent("0O") ||
-		ts.matchLiteralAtCurrent("0b") || ts.matchLiteralAtCurrent("0B") {
+	if ts.cur.matchLiteralAtCurrent("0x") || ts.cur.matchLiteralAtCurrent("0X") ||
+		ts.cur.matchLiteralAtCurrent("0o") || ts.cur.matchLiteralAtCurrent("0O") ||
+		ts.cur.matchLiteralAtCurrent("0b") || ts.cur.matchLiteralAtCurrent("0B") {
 		ts.cur.advanceByte()
 		ts.cur.advanceByte()
 		for !ts.cur.eof() && (isASCIIHex(ts.cur.peekByte()) || ts.cur.peekByte() == '_') {
@@ -421,18 +421,6 @@ func (ts *TomlTokenSource) numberToken() gotreesitter.Token {
 		sym = firstNonZeroSymbol(ts.floatSym, ts.intSym)
 	}
 	return makeToken(sym, ts.src, start, ts.cur.offset, startPt, ts.cur.point())
-}
-
-func (ts *TomlTokenSource) matchLiteralAtCurrent(lexeme string) bool {
-	if ts.cur.offset+len(lexeme) > len(ts.src) {
-		return false
-	}
-	for i := 0; i < len(lexeme); i++ {
-		if ts.src[ts.cur.offset+i] != lexeme[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func (ts *TomlTokenSource) eofToken() gotreesitter.Token {

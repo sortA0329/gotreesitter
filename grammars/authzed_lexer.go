@@ -272,7 +272,7 @@ func (ts *AuthzedTokenSource) Next() gotreesitter.Token {
 
 	for {
 		// Skip only spaces and tabs (NOT newlines — they are significant tokens)
-		ts.skipSpacesAndTabs()
+		ts.cur.skipSpacesAndTabs()
 
 		if ts.cur.eof() {
 			ts.done = true
@@ -364,17 +364,6 @@ func (ts *AuthzedTokenSource) SkipToByte(offset uint32) gotreesitter.Token {
 		return ts.eofToken()
 	}
 	return ts.Next()
-}
-
-func (ts *AuthzedTokenSource) skipSpacesAndTabs() {
-	for !ts.cur.eof() {
-		b := ts.cur.peekByte()
-		if b == ' ' || b == '\t' {
-			ts.cur.advanceByte()
-		} else {
-			return
-		}
-	}
 }
 
 func (ts *AuthzedTokenSource) newlineToken() gotreesitter.Token {

@@ -87,6 +87,24 @@ func (c *sourceCursor) skipSpacesAndTabs() {
 	}
 }
 
+func (c *sourceCursor) matchLiteralAtCurrent(lexeme string) bool {
+	if c.offset+len(lexeme) > len(c.src) {
+		return false
+	}
+	for i := 0; i < len(lexeme); i++ {
+		if c.src[c.offset+i] != lexeme[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *sourceCursor) advanceBytes(n int) {
+	for i := 0; i < n && !c.eof(); i++ {
+		c.advanceByte()
+	}
+}
+
 func isASCIIAlpha(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
@@ -125,7 +143,20 @@ func isTokenNameWord(name string) bool {
 }
 
 func isSyntheticTokenName(name string) bool {
-	return strings.Contains(name, "_token")
+	idx := strings.LastIndex(name, "_token")
+	if idx < 0 {
+		return false
+	}
+	suffix := name[idx+len("_token"):]
+	if len(suffix) == 0 {
+		return false
+	}
+	for i := 0; i < len(suffix); i++ {
+		if suffix[i] < '0' || suffix[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeTokenLexeme(name string) string {

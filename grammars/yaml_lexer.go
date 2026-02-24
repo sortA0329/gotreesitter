@@ -74,6 +74,11 @@ type YAMLTokenSource struct {
 	errRecSym    gotreesitter.Symbol // sym 113 "_err_rec"
 
 	emittedYAMLEOF bool
+
+	// Incremental position tracking for pointAtOffset.
+	lastPtOffset int
+	lastPtRow    uint32
+	lastPtCol    uint32
 }
 
 // NewYAMLTokenSource creates a token source for YAML source text.
@@ -293,10 +298,10 @@ func (ts *YAMLTokenSource) Next() gotreesitter.Token {
 		}
 
 		// Document markers
-		if ch == '-' && ts.matchLiteralAtCurrent("---") && ts.isDocMarkerBoundary(3) {
+		if ch == '-' && ts.cur.matchLiteralAtCurrent("---") && ts.isDocMarkerBoundary(3) {
 			return ts.makeLiteralToken(ts.docStartSym, 3)
 		}
-		if ch == '.' && ts.matchLiteralAtCurrent("...") && ts.isDocMarkerBoundary(3) {
+		if ch == '.' && ts.cur.matchLiteralAtCurrent("...") && ts.isDocMarkerBoundary(3) {
 			return ts.makeLiteralToken(ts.docEndSym, 3)
 		}
 
@@ -391,6 +396,9 @@ func (ts *YAMLTokenSource) SkipToByte(offset uint32) gotreesitter.Token {
 
 	if target < ts.cur.offset {
 		ts.cur = newSourceCursor(ts.src)
+		ts.lastPtOffset = 0
+		ts.lastPtRow = 0
+		ts.lastPtCol = 0
 	}
 	for ts.cur.offset < target {
 		ts.cur.advanceRune()
@@ -679,18 +687,6 @@ func (ts *YAMLTokenSource) skipSpacesAndTabs() {
 	}
 }
 
-func (ts *YAMLTokenSource) matchLiteralAtCurrent(lexeme string) bool {
-	if ts.cur.offset+len(lexeme) > len(ts.src) {
-		return false
-	}
-	for i := 0; i < len(lexeme); i++ {
-		if ts.src[ts.cur.offset+i] != lexeme[i] {
-			return false
-		}
-	}
-	return true
-}
-
 func (ts *YAMLTokenSource) isDocMarkerBoundary(n int) bool {
 	end := ts.cur.offset + n
 	if end >= len(ts.src) {
@@ -722,17 +718,28 @@ func (ts *YAMLTokenSource) eofToken() gotreesitter.Token {
 }
 
 func (ts *YAMLTokenSource) pointAtOffset(offset int) gotreesitter.Point {
-	// Approximate: scan from beginning
-	row := uint32(0)
-	col := uint32(0)
-	for i := 0; i < offset && i < len(ts.src); i++ {
+	if offset < ts.lastPtOffset {
+		// Backward seek — reset to start.
+		ts.lastPtOffset = 0
+		ts.lastPtRow = 0
+		ts.lastPtCol = 0
+	}
+
+	i := ts.lastPtOffset
+	row := ts.lastPtRow
+	col := ts.lastPtCol
+	for i < offset && i < len(ts.src) {
 		if ts.src[i] == '\n' {
 			row++
 			col = 0
 		} else {
 			col++
 		}
+		i++
 	}
+	ts.lastPtOffset = i
+	ts.lastPtRow = row
+	ts.lastPtCol = col
 	return gotreesitter.Point{Row: row, Column: col}
 }
 

@@ -297,15 +297,15 @@ func (ts *GenericTokenSource) shebangToken() (gotreesitter.Token, bool) {
 }
 
 func (ts *GenericTokenSource) commentToken() (gotreesitter.Token, bool) {
-	if ts.matchLiteralAtCurrent("//") {
+	if ts.cur.matchLiteralAtCurrent("//") {
 		sym := firstNonZeroSymbol(ts.lineCommentSym, ts.commentSym, ts.literalSymbols["//"])
 		return ts.lineCommentWithPrefix(2, sym), true
 	}
-	if ts.matchLiteralAtCurrent("/*") {
+	if ts.cur.matchLiteralAtCurrent("/*") {
 		sym := firstNonZeroSymbol(ts.blockCommentSym, ts.commentSym)
 		return ts.blockCommentWithPrefix(sym), true
 	}
-	if ts.matchLiteralAtCurrent("--") {
+	if ts.cur.matchLiteralAtCurrent("--") {
 		sym := firstNonZeroSymbol(ts.lineCommentSym, ts.commentSym, ts.literalSymbols["--"])
 		if sym != ts.literalSymbols["--"] {
 			return ts.lineCommentWithPrefix(2, sym), true
@@ -326,7 +326,7 @@ func (ts *GenericTokenSource) commentToken() (gotreesitter.Token, bool) {
 func (ts *GenericTokenSource) lineCommentWithPrefix(prefixLen int, sym gotreesitter.Symbol) gotreesitter.Token {
 	start := ts.cur.offset
 	startPt := ts.cur.point()
-	ts.advanceBytes(prefixLen)
+	ts.cur.advanceBytes(prefixLen)
 	for !ts.cur.eof() && ts.cur.peekByte() != '\n' {
 		ts.cur.advanceRune()
 	}
@@ -339,10 +339,10 @@ func (ts *GenericTokenSource) lineCommentWithPrefix(prefixLen int, sym gotreesit
 func (ts *GenericTokenSource) blockCommentWithPrefix(sym gotreesitter.Symbol) gotreesitter.Token {
 	start := ts.cur.offset
 	startPt := ts.cur.point()
-	ts.advanceBytes(2)
+	ts.cur.advanceBytes(2)
 	for !ts.cur.eof() {
-		if ts.matchLiteralAtCurrent("*/") {
-			ts.advanceBytes(2)
+		if ts.cur.matchLiteralAtCurrent("*/") {
+			ts.cur.advanceBytes(2)
 			break
 		}
 		ts.cur.advanceRune()
@@ -354,7 +354,7 @@ func (ts *GenericTokenSource) blockCommentWithPrefix(sym gotreesitter.Symbol) go
 }
 
 func (ts *GenericTokenSource) stringToken() (gotreesitter.Token, bool) {
-	if ts.tripleQuoteSym != 0 && ts.matchLiteralAtCurrent("\"\"\"") {
+	if ts.tripleQuoteSym != 0 && ts.cur.matchLiteralAtCurrent("\"\"\"") {
 		return ts.scanQuotedString("\"\"\"", ts.tripleQuoteSym, ts.stringContent, ts.escapeSym)
 	}
 	if ts.doubleQuoteSym != 0 && ts.cur.peekByte() == '"' {
@@ -421,25 +421,25 @@ func (ts *GenericTokenSource) scanQuotedString(quote string, quoteSym, contentSy
 }
 
 func (ts *GenericTokenSource) scanSplitString(quote string, quoteSym, contentSym, escapeSym gotreesitter.Symbol) (gotreesitter.Token, bool) {
-	if !ts.matchLiteralAtCurrent(quote) {
+	if !ts.cur.matchLiteralAtCurrent(quote) {
 		return gotreesitter.Token{}, false
 	}
 
 	start := ts.cur.offset
 	startPt := ts.cur.point()
-	ts.advanceBytes(len(quote))
+	ts.cur.advanceBytes(len(quote))
 	openTok := makeToken(quoteSym, ts.src, start, ts.cur.offset, startPt, ts.cur.point())
 
 	segStart := ts.cur.offset
 	segPt := ts.cur.point()
 	for !ts.cur.eof() {
-		if ts.matchLiteralAtCurrent(quote) {
+		if ts.cur.matchLiteralAtCurrent(quote) {
 			if contentSym != 0 && segStart < ts.cur.offset {
 				ts.pending = append(ts.pending, makeToken(contentSym, ts.src, segStart, ts.cur.offset, segPt, ts.cur.point()))
 			}
 			closeStart := ts.cur.offset
 			closePt := ts.cur.point()
-			ts.advanceBytes(len(quote))
+			ts.cur.advanceBytes(len(quote))
 			ts.pending = append(ts.pending, makeToken(quoteSym, ts.src, closeStart, ts.cur.offset, closePt, ts.cur.point()))
 			return openTok, true
 		}
@@ -544,7 +544,7 @@ func (ts *GenericTokenSource) literalToken() (gotreesitter.Token, bool) {
 	}
 	start := ts.cur.offset
 	startPt := ts.cur.point()
-	ts.advanceBytes(n)
+	ts.cur.advanceBytes(n)
 	return makeToken(sym, ts.src, start, ts.cur.offset, startPt, ts.cur.point()), true
 }
 
@@ -566,24 +566,6 @@ func (ts *GenericTokenSource) matchLiteral() (gotreesitter.Symbol, int) {
 		return sym, n
 	}
 	return 0, 0
-}
-
-func (ts *GenericTokenSource) matchLiteralAtCurrent(lexeme string) bool {
-	if ts.cur.offset+len(lexeme) > len(ts.src) {
-		return false
-	}
-	for i := 0; i < len(lexeme); i++ {
-		if ts.src[ts.cur.offset+i] != lexeme[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func (ts *GenericTokenSource) advanceBytes(n int) {
-	for i := 0; i < n && !ts.cur.eof(); i++ {
-		ts.cur.advanceByte()
-	}
 }
 
 func (ts *GenericTokenSource) eofToken() gotreesitter.Token {

@@ -310,7 +310,7 @@ func (ts *CTokenSource) stringToken() (gotreesitter.Token, bool) {
 		}
 		start := ts.cur.offset
 		startPt := ts.cur.point()
-		ts.advanceBytes(len(opener.lexeme))
+		ts.cur.advanceBytes(len(opener.lexeme))
 		openTok := makeToken(opener.sym, ts.src, start, ts.cur.offset, startPt, ts.cur.point())
 		closeSym := ts.quoteSymbol
 		if closeSym == 0 {
@@ -329,7 +329,7 @@ func (ts *CTokenSource) charToken() (gotreesitter.Token, bool) {
 		}
 		start := ts.cur.offset
 		startPt := ts.cur.point()
-		ts.advanceBytes(len(opener.lexeme))
+		ts.cur.advanceBytes(len(opener.lexeme))
 		openTok := makeToken(opener.sym, ts.src, start, ts.cur.offset, startPt, ts.cur.point())
 		closeSym := ts.apostropheSymbol
 		if closeSym == 0 {
@@ -476,7 +476,7 @@ func (ts *CTokenSource) literalToken() (gotreesitter.Token, bool) {
 	}
 	start := ts.cur.offset
 	startPt := ts.cur.point()
-	ts.advanceBytes(n)
+	ts.cur.advanceBytes(n)
 	return makeToken(sym, ts.src, start, ts.cur.offset, startPt, ts.cur.point()), true
 }
 
@@ -514,12 +514,6 @@ func (ts *CTokenSource) matchAt(lexeme string) bool {
 		return false
 	}
 	return true
-}
-
-func (ts *CTokenSource) advanceBytes(n int) {
-	for i := 0; i < n && !ts.cur.eof(); i++ {
-		ts.cur.advanceByte()
-	}
 }
 
 func (ts *CTokenSource) eofToken() gotreesitter.Token {

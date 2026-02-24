@@ -116,13 +116,13 @@ func (ts *HTMLTokenSource) Next() gotreesitter.Token {
 			if tok, ok := ts.commentToken(); ok {
 				return tok
 			}
-			if ts.matchLiteralAtCurrent("</") {
+			if ts.cur.matchLiteralAtCurrent("</") {
 				ts.inTag = true
 				ts.inEndTag = true
 				ts.expectTagName = true
 				return ts.literalToken(ts.ltSlashSym, 2)
 			}
-			if ts.matchLiteralAtCurrent("<") {
+			if ts.cur.matchLiteralAtCurrent("<") {
 				ts.inTag = true
 				ts.inEndTag = false
 				ts.expectTagName = true
@@ -137,19 +137,19 @@ func (ts *HTMLTokenSource) Next() gotreesitter.Token {
 			continue
 		}
 
-		if ts.matchLiteralAtCurrent("/>") && ts.slashGtSym != 0 {
+		if ts.cur.matchLiteralAtCurrent("/>") && ts.slashGtSym != 0 {
 			ts.inTag = false
 			ts.inEndTag = false
 			ts.expectTagName = false
 			return ts.literalToken(ts.slashGtSym, 2)
 		}
-		if ts.matchLiteralAtCurrent(">") {
+		if ts.cur.matchLiteralAtCurrent(">") {
 			ts.inTag = false
 			ts.inEndTag = false
 			ts.expectTagName = false
 			return ts.literalToken(ts.gtSym, 1)
 		}
-		if ts.matchLiteralAtCurrent("=") && ts.eqSym != 0 {
+		if ts.cur.matchLiteralAtCurrent("=") && ts.eqSym != 0 {
 			return ts.literalToken(ts.eqSym, 1)
 		}
 		if ts.cur.peekByte() == '"' || ts.cur.peekByte() == '\'' {
@@ -174,11 +174,11 @@ func (ts *HTMLTokenSource) SkipToByte(offset uint32) gotreesitter.Token {
 	}
 
 	ts.done = false
+	ts.inTag = false
+	ts.inEndTag = false
+	ts.expectTagName = false
 	if target < ts.cur.offset {
 		ts.cur = newSourceCursor(ts.src)
-		ts.inTag = false
-		ts.inEndTag = false
-		ts.expectTagName = false
 	}
 	for ts.cur.offset < target {
 		ts.cur.advanceRune()
@@ -191,15 +191,15 @@ func (ts *HTMLTokenSource) SkipToByte(offset uint32) gotreesitter.Token {
 }
 
 func (ts *HTMLTokenSource) commentToken() (gotreesitter.Token, bool) {
-	if ts.commentSym == 0 || !ts.matchLiteralAtCurrent("<!--") {
+	if ts.commentSym == 0 || !ts.cur.matchLiteralAtCurrent("<!--") {
 		return gotreesitter.Token{}, false
 	}
 	start := ts.cur.offset
 	startPt := ts.cur.point()
-	ts.advanceBytes(4)
+	ts.cur.advanceBytes(4)
 	for !ts.cur.eof() {
-		if ts.matchLiteralAtCurrent("-->") {
-			ts.advanceBytes(3)
+		if ts.cur.matchLiteralAtCurrent("-->") {
+			ts.cur.advanceBytes(3)
 			break
 		}
 		ts.cur.advanceRune()
@@ -255,26 +255,8 @@ func (ts *HTMLTokenSource) nameToken() gotreesitter.Token {
 func (ts *HTMLTokenSource) literalToken(sym gotreesitter.Symbol, n int) gotreesitter.Token {
 	start := ts.cur.offset
 	startPt := ts.cur.point()
-	ts.advanceBytes(n)
+	ts.cur.advanceBytes(n)
 	return makeToken(sym, ts.src, start, ts.cur.offset, startPt, ts.cur.point())
-}
-
-func (ts *HTMLTokenSource) matchLiteralAtCurrent(lexeme string) bool {
-	if ts.cur.offset+len(lexeme) > len(ts.src) {
-		return false
-	}
-	for i := 0; i < len(lexeme); i++ {
-		if ts.src[ts.cur.offset+i] != lexeme[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func (ts *HTMLTokenSource) advanceBytes(n int) {
-	for i := 0; i < n && !ts.cur.eof(); i++ {
-		ts.cur.advanceByte()
-	}
 }
 
 func (ts *HTMLTokenSource) eofToken() gotreesitter.Token {

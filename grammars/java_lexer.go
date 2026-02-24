@@ -261,13 +261,13 @@ func (ts *JavaTokenSource) commentToken() (gotreesitter.Token, bool) {
 }
 
 func (ts *JavaTokenSource) textBlockStringToken() (gotreesitter.Token, bool) {
-	if ts.textBlockQuoteSymbol == 0 || !ts.matchLiteralAtCurrent("\"\"\"") {
+	if ts.textBlockQuoteSymbol == 0 || !ts.cur.matchLiteralAtCurrent("\"\"\"") {
 		return gotreesitter.Token{}, false
 	}
 
 	start := ts.cur.offset
 	startPt := ts.cur.point()
-	ts.advanceBytes(3)
+	ts.cur.advanceBytes(3)
 	openTok := makeToken(ts.textBlockQuoteSymbol, ts.src, start, ts.cur.offset, startPt, ts.cur.point())
 
 	fragmentSym := ts.multilineStringFragmentToken
@@ -278,13 +278,13 @@ func (ts *JavaTokenSource) textBlockStringToken() (gotreesitter.Token, bool) {
 	segStart := ts.cur.offset
 	segStartPt := ts.cur.point()
 	for !ts.cur.eof() {
-		if ts.matchLiteralAtCurrent("\"\"\"") {
+		if ts.cur.matchLiteralAtCurrent("\"\"\"") {
 			if fragmentSym != 0 && segStart < ts.cur.offset {
 				ts.pending = append(ts.pending, makeToken(fragmentSym, ts.src, segStart, ts.cur.offset, segStartPt, ts.cur.point()))
 			}
 			closeStart := ts.cur.offset
 			closePt := ts.cur.point()
-			ts.advanceBytes(3)
+			ts.cur.advanceBytes(3)
 			ts.pending = append(ts.pending, makeToken(ts.textBlockQuoteSymbol, ts.src, closeStart, ts.cur.offset, closePt, ts.cur.point()))
 			return openTok, true
 		}
@@ -563,7 +563,7 @@ func (ts *JavaTokenSource) literalToken() (gotreesitter.Token, bool) {
 	}
 	start := ts.cur.offset
 	startPt := ts.cur.point()
-	ts.advanceBytes(n)
+	ts.cur.advanceBytes(n)
 	return makeToken(sym, ts.src, start, ts.cur.offset, startPt, ts.cur.point()), true
 }
 
@@ -586,24 +586,6 @@ func (ts *JavaTokenSource) matchLiteral() (gotreesitter.Symbol, int) {
 		return sym, n
 	}
 	return 0, 0
-}
-
-func (ts *JavaTokenSource) matchLiteralAtCurrent(lexeme string) bool {
-	if ts.cur.offset+len(lexeme) > len(ts.src) {
-		return false
-	}
-	for i := 0; i < len(lexeme); i++ {
-		if ts.src[ts.cur.offset+i] != lexeme[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func (ts *JavaTokenSource) advanceBytes(n int) {
-	for i := 0; i < n && !ts.cur.eof(); i++ {
-		ts.cur.advanceByte()
-	}
 }
 
 func (ts *JavaTokenSource) eofToken() gotreesitter.Token {
