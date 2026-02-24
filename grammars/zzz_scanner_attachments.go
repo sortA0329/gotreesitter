@@ -125,6 +125,9 @@ func init() {
 		"hcl":             HclExternalScanner{},
 		"rescript":        RescriptExternalScanner{},
 		"svelte":          SvelteExternalScanner{},
+		"rst":             RstExternalScanner{},
+		"haskell":         HaskellExternalScanner{},
+		"vhdl":            VhdlExternalScanner{},
 	}
 
 	for i := range registry {

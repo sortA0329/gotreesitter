@@ -135,18 +135,6 @@ func defaultTokenSourceFactory(name string) func(src []byte, lang *gotreesitter.
 		return func(src []byte, lang *gotreesitter.Language) gotreesitter.TokenSource {
 			return NewLuaTokenSourceOrEOF(src, lang)
 		}
-	case "haskell":
-		return func(src []byte, lang *gotreesitter.Language) gotreesitter.TokenSource {
-			return NewGenericTokenSourceOrEOF(src, lang)
-		}
-	case "vhdl":
-		return func(src []byte, lang *gotreesitter.Language) gotreesitter.TokenSource {
-			return NewGenericTokenSourceOrEOF(src, lang)
-		}
-	case "rst":
-		return func(src []byte, lang *gotreesitter.Language) gotreesitter.TokenSource {
-			return NewGenericTokenSourceOrEOF(src, lang)
-		}
 	case "toml":
 		return func(src []byte, lang *gotreesitter.Language) gotreesitter.TokenSource {
 			return NewTomlTokenSourceOrEOF(src, lang)
