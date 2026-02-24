@@ -119,6 +119,9 @@ func init() {
 		"djot":            DjotExternalScanner{},
 		"cpp":             CppExternalScanner{},
 		"caddy":           CaddyExternalScanner{},
+		"javascript":      JavaScriptExternalScanner{},
+		"typescript":      TypeScriptExternalScanner{},
+		"rust":            RustExternalScanner{},
 	}
 
 	for i := range registry {

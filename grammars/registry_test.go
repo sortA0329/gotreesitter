@@ -178,7 +178,7 @@ func TestAuditParseSupportIncludesLuaCustomTokenSource(t *testing.T) {
 	}
 }
 
-func TestAuditParseSupportIncludesJavaScriptGenericTokenSource(t *testing.T) {
+func TestAuditParseSupportIncludesJavaScriptDFA(t *testing.T) {
 	reports := AuditParseSupport()
 	if len(reports) == 0 {
 		t.Fatal("expected parse support reports")
@@ -194,12 +194,12 @@ func TestAuditParseSupportIncludesJavaScriptGenericTokenSource(t *testing.T) {
 	if jsReport == nil {
 		t.Fatal("expected javascript parse support report")
 	}
-	if jsReport.Backend != ParseBackendTokenSource {
-		t.Fatalf("expected javascript backend %q, got %q", ParseBackendTokenSource, jsReport.Backend)
+	if jsReport.Backend != ParseBackendDFA {
+		t.Fatalf("expected javascript backend %q, got %q", ParseBackendDFA, jsReport.Backend)
 	}
 }
 
-func TestAuditParseSupportIncludesTypeScriptGenericTokenSource(t *testing.T) {
+func TestAuditParseSupportIncludesTypeScriptDFA(t *testing.T) {
 	reports := AuditParseSupport()
 	if len(reports) == 0 {
 		t.Fatal("expected parse support reports")
@@ -215,12 +215,12 @@ func TestAuditParseSupportIncludesTypeScriptGenericTokenSource(t *testing.T) {
 	if tsReport == nil {
 		t.Fatal("expected typescript parse support report")
 	}
-	if tsReport.Backend != ParseBackendTokenSource {
-		t.Fatalf("expected typescript backend %q, got %q", ParseBackendTokenSource, tsReport.Backend)
+	if tsReport.Backend != ParseBackendDFA {
+		t.Fatalf("expected typescript backend %q, got %q", ParseBackendDFA, tsReport.Backend)
 	}
 }
 
-func TestAuditParseSupportIncludesRustGenericTokenSource(t *testing.T) {
+func TestAuditParseSupportIncludesRustDFA(t *testing.T) {
 	reports := AuditParseSupport()
 	if len(reports) == 0 {
 		t.Fatal("expected parse support reports")
@@ -236,8 +236,8 @@ func TestAuditParseSupportIncludesRustGenericTokenSource(t *testing.T) {
 	if rustReport == nil {
 		t.Fatal("expected rust parse support report")
 	}
-	if rustReport.Backend != ParseBackendTokenSource {
-		t.Fatalf("expected rust backend %q, got %q", ParseBackendTokenSource, rustReport.Backend)
+	if rustReport.Backend != ParseBackendDFA {
+		t.Fatalf("expected rust backend %q, got %q", ParseBackendDFA, rustReport.Backend)
 	}
 }
 

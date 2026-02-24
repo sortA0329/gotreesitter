@@ -127,10 +127,6 @@ func defaultTokenSourceFactory(name string) func(src []byte, lang *gotreesitter.
 		return func(src []byte, lang *gotreesitter.Language) gotreesitter.TokenSource {
 			return NewJavaTokenSourceOrEOF(src, lang)
 		}
-	case "javascript":
-		return func(src []byte, lang *gotreesitter.Language) gotreesitter.TokenSource {
-			return NewGenericTokenSourceOrEOF(src, lang)
-		}
 	case "json":
 		return func(src []byte, lang *gotreesitter.Language) gotreesitter.TokenSource {
 			return NewJSONTokenSourceOrEOF(src, lang)
@@ -138,14 +134,6 @@ func defaultTokenSourceFactory(name string) func(src []byte, lang *gotreesitter.
 	case "lua":
 		return func(src []byte, lang *gotreesitter.Language) gotreesitter.TokenSource {
 			return NewLuaTokenSourceOrEOF(src, lang)
-		}
-	case "rust":
-		return func(src []byte, lang *gotreesitter.Language) gotreesitter.TokenSource {
-			return NewGenericTokenSourceOrEOF(src, lang)
-		}
-	case "typescript":
-		return func(src []byte, lang *gotreesitter.Language) gotreesitter.TokenSource {
-			return NewGenericTokenSourceOrEOF(src, lang)
 		}
 	case "haskell":
 		return func(src []byte, lang *gotreesitter.Language) gotreesitter.TokenSource {
