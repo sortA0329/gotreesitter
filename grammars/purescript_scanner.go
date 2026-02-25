@@ -63,9 +63,6 @@ var psSymMap = [15]gotreesitter.Symbol{
 	0, // FAIL has no real symbol
 }
 
-// Maximum serialization buffer size (matches TREE_SITTER_SERIALIZATION_BUFFER_SIZE).
-const psMaxSerialize = 1024
-
 // psScannerState holds the indent stack for the PureScript external scanner.
 // The stack tracks layout indentation levels. Each entry is a column number (uint16).
 type psScannerState struct {
@@ -130,9 +127,9 @@ func psResFinish(sym int) psResult {
 
 // psState bundles the scanner state, lexer, and valid symbols for convenient passing.
 type psState struct {
-	lexer       *gotreesitter.ExternalLexer
-	symbols     []bool
-	indents     *psScannerState
+	lexer   *gotreesitter.ExternalLexer
+	symbols []bool
+	indents *psScannerState
 }
 
 func psValid(symbols []bool, idx int) bool {
@@ -184,21 +181,6 @@ func (st *psState) allSyms() bool {
 
 func psVaridStartChar(c rune) bool {
 	return c == '_' || unicode.IsLower(c)
-}
-
-func psVaridChar(c rune) bool {
-	if c == '_' || c == '\'' {
-		return true
-	}
-	return unicode.IsLetter(c) || unicode.IsDigit(c)
-}
-
-func psIsWS(c rune) bool {
-	switch c {
-	case ' ', '\f', '\n', '\r', '\t', '\v':
-		return true
-	}
-	return false
 }
 
 func psIsNewline(c rune) bool {
@@ -383,25 +365,6 @@ func psCountIndent(st *psState) uint32 {
 			indent += 8
 		default:
 			return indent
-		}
-	}
-}
-
-// psConsumeUntil advances until the target sequence is found.
-func psConsumeUntil(target string, st *psState) {
-	if len(target) == 0 {
-		return
-	}
-	first := rune(target[0])
-	for st.peek() != 0 {
-		if psSeq(target, st) {
-			return
-		}
-		for st.peek() != 0 && st.peek() != first {
-			st.advance()
-		}
-		if st.peek() == first {
-			st.markEnd()
 		}
 	}
 }
