@@ -22,6 +22,7 @@ type Parser struct {
 	reuseScratch      reuseScratch
 	reuseMu           sync.Mutex
 	fullArenaHint     uint32
+	hasRecoverState   []bool
 	forceRawSpanAll   bool
 	forceRawSpanTable []bool
 	included          []Range
@@ -58,6 +59,11 @@ type IncrementalParseProfile struct {
 	ReusedSubtrees    uint64
 	ReusedBytes       uint64
 	NewNodesAllocated uint64
+	RecoverSearches   uint64
+	RecoverStateChecks uint64
+	RecoverStateSkips uint64
+	RecoverLookups    uint64
+	RecoverHits       uint64
 	MaxStacksSeen     int
 	EntryScratchPeak  uint64
 }
@@ -68,6 +74,11 @@ type incrementalParseTiming struct {
 	reusedSubtrees   uint64
 	reusedBytes      uint64
 	newNodes         uint64
+	recoverSearches  uint64
+	recoverStateChecks uint64
+	recoverStateSkips uint64
+	recoverLookups   uint64
+	recoverHits      uint64
 	maxStacksSeen    int
 	entryScratchPeak uint64
 }
@@ -116,6 +127,11 @@ func (t *incrementalParseTiming) toProfile() IncrementalParseProfile {
 		ReusedSubtrees:    t.reusedSubtrees,
 		ReusedBytes:       t.reusedBytes,
 		NewNodesAllocated: t.newNodes,
+		RecoverSearches:   t.recoverSearches,
+		RecoverStateChecks: t.recoverStateChecks,
+		RecoverStateSkips: t.recoverStateSkips,
+		RecoverLookups:    t.recoverLookups,
+		RecoverHits:       t.recoverHits,
 		MaxStacksSeen:     t.maxStacksSeen,
 		EntryScratchPeak:  t.entryScratchPeak,
 	}
@@ -174,8 +190,114 @@ func NewParser(lang *Language) *Parser {
 		if len(lang.SmallParseTableMap) > 0 && len(lang.SmallParseTable) > 0 {
 			p.smallLookup = buildSmallLookup(lang)
 		}
+		p.hasRecoverState = buildStateRecoverTable(lang)
 	}
 	return p
+}
+
+func buildStateRecoverTable(lang *Language) []bool {
+	if lang == nil {
+		return nil
+	}
+	if len(lang.ParseActions) == 0 {
+		return nil
+	}
+
+	hasRecoverAction := make([]bool, len(lang.ParseActions))
+	anyRecoverAction := false
+	for i := range lang.ParseActions {
+		hasRecoverAction[i] = parseActionEntryHasRecover(&lang.ParseActions[i])
+		if hasRecoverAction[i] {
+			anyRecoverAction = true
+		}
+	}
+	if !anyRecoverAction {
+		return nil
+	}
+
+	stateCount := int(lang.StateCount)
+	if stateCount <= 0 {
+		stateCount = len(lang.ParseTable)
+	}
+	if smallCount := int(lang.LargeStateCount) + len(lang.SmallParseTableMap); smallCount > stateCount {
+		stateCount = smallCount
+	}
+	if stateCount <= 0 {
+		return nil
+	}
+
+	out := make([]bool, stateCount)
+	for state := 0; state < len(lang.ParseTable) && state < stateCount; state++ {
+		row := lang.ParseTable[state]
+		for _, idx := range row {
+			if int(idx) < len(hasRecoverAction) && hasRecoverAction[idx] {
+				out[state] = true
+				break
+			}
+		}
+	}
+
+	if len(lang.SmallParseTableMap) > 0 && len(lang.SmallParseTable) > 0 {
+		base := int(lang.LargeStateCount)
+		table := lang.SmallParseTable
+		for smallIdx, offset := range lang.SmallParseTableMap {
+			state := base + smallIdx
+			if state < 0 || state >= stateCount {
+				continue
+			}
+			pos := int(offset)
+			if pos >= len(table) {
+				continue
+			}
+			groupCount := table[pos]
+			pos++
+			for i := uint16(0); i < groupCount; i++ {
+				if pos+1 >= len(table) {
+					break
+				}
+				sectionValue := table[pos]
+				symbolCount := int(table[pos+1])
+				pos += 2
+				if int(sectionValue) < len(hasRecoverAction) && hasRecoverAction[sectionValue] {
+					out[state] = true
+					break
+				}
+				pos += symbolCount
+			}
+		}
+	}
+
+	anyState := false
+	for i := range out {
+		if out[i] {
+			anyState = true
+			break
+		}
+	}
+	if !anyState {
+		return nil
+	}
+	return out
+}
+
+func parseActionEntryHasRecover(entry *ParseActionEntry) bool {
+	if entry == nil {
+		return false
+	}
+	for _, act := range entry.Actions {
+		if act.Type == ParseActionRecover {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Parser) stateCanRecover(state StateID) bool {
+	if len(p.hasRecoverState) == 0 {
+		return true
+	}
+	idx := int(state)
+	return idx >= 0 && idx < len(p.hasRecoverState) && p.hasRecoverState[idx]
 }
 
 func buildSmallLookup(lang *Language) [][]smallActionPair {
@@ -1373,7 +1495,7 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 
 				// Try grammar-directed recovery by searching the stack for
 				// the nearest state that can recover on this lookahead.
-				if depth, recoverAct, ok := p.findRecoverActionOnStack(s, tok.Symbol); ok {
+				if depth, recoverAct, ok := p.findRecoverActionOnStack(s, tok.Symbol, timing); ok {
 					if !s.truncate(depth + 1) {
 						s.dead = true
 						continue
@@ -1931,17 +2053,35 @@ func recoverAction(entry *ParseActionEntry) (ParseAction, bool) {
 	return ParseAction{}, false
 }
 
-func (p *Parser) findRecoverActionOnStack(s *glrStack, sym Symbol) (int, ParseAction, bool) {
+func (p *Parser) findRecoverActionOnStack(s *glrStack, sym Symbol, timing *incrementalParseTiming) (int, ParseAction, bool) {
 	if s == nil {
 		return 0, ParseAction{}, false
+	}
+	if timing != nil {
+		timing.recoverSearches++
 	}
 
 	if len(s.entries) > 0 {
 		entries := s.entries
 		for depth := len(entries) - 1; depth >= 0; depth-- {
 			state := entries[depth].state
+			if timing != nil {
+				timing.recoverStateChecks++
+			}
+			if !p.stateCanRecover(state) {
+				if timing != nil {
+					timing.recoverStateSkips++
+				}
+				continue
+			}
+			if timing != nil {
+				timing.recoverLookups++
+			}
 			action := p.lookupAction(state, sym)
 			if act, ok := recoverAction(action); ok {
+				if timing != nil {
+					timing.recoverHits++
+				}
 				return depth, act, true
 			}
 		}
@@ -1955,8 +2095,24 @@ func (p *Parser) findRecoverActionOnStack(s *glrStack, sym Symbol) (int, ParseAc
 	depth := s.gss.len() - 1
 	for n := s.gss.head; n != nil; n = n.prev {
 		state := n.entry.state
+		if timing != nil {
+			timing.recoverStateChecks++
+		}
+		if !p.stateCanRecover(state) {
+			if timing != nil {
+				timing.recoverStateSkips++
+			}
+			depth--
+			continue
+		}
+		if timing != nil {
+			timing.recoverLookups++
+		}
 		action := p.lookupAction(state, sym)
 		if act, ok := recoverAction(action); ok {
+			if timing != nil {
+				timing.recoverHits++
+			}
 			return depth, act, true
 		}
 		depth--

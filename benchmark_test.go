@@ -225,6 +225,11 @@ func BenchmarkGoParseIncrementalSingleByteEditDFA(b *testing.B) {
 	var reusedSubtrees uint64
 	var reusedBytes uint64
 	var newNodesAllocated uint64
+	var recoverSearches uint64
+	var recoverStateChecks uint64
+	var recoverStateSkips uint64
+	var recoverLookups uint64
+	var recoverHits uint64
 	var entryScratchPeak uint64
 	maxStacksSeen := 0
 
@@ -278,6 +283,11 @@ func BenchmarkGoParseIncrementalSingleByteEditDFA(b *testing.B) {
 			reusedSubtrees += prof.ReusedSubtrees
 			reusedBytes += prof.ReusedBytes
 			newNodesAllocated += prof.NewNodesAllocated
+			recoverSearches += prof.RecoverSearches
+			recoverStateChecks += prof.RecoverStateChecks
+			recoverStateSkips += prof.RecoverStateSkips
+			recoverLookups += prof.RecoverLookups
+			recoverHits += prof.RecoverHits
 			if prof.EntryScratchPeak > entryScratchPeak {
 				entryScratchPeak = prof.EntryScratchPeak
 			}
@@ -299,8 +309,8 @@ func BenchmarkGoParseIncrementalSingleByteEditDFA(b *testing.B) {
 	}
 	if statsEnabled {
 		fmt.Printf(
-			"STATS edits=%d edit_ns=%d reuse_ns=%d parse_ns=%d reused_subtrees=%d reused_bytes=%d new_nodes=%d max_stacks=%d\n",
-			b.N, editTotalNS, reuseTotalNS, parseTotalNS, reusedSubtrees, reusedBytes, newNodesAllocated, maxStacksSeen,
+			"STATS edits=%d edit_ns=%d reuse_ns=%d parse_ns=%d reused_subtrees=%d reused_bytes=%d new_nodes=%d recover_searches=%d recover_state_checks=%d recover_state_skips=%d recover_lookups=%d recover_hits=%d max_stacks=%d\n",
+			b.N, editTotalNS, reuseTotalNS, parseTotalNS, reusedSubtrees, reusedBytes, newNodesAllocated, recoverSearches, recoverStateChecks, recoverStateSkips, recoverLookups, recoverHits, maxStacksSeen,
 		)
 		fmt.Printf(
 			"STATS scratch_peak_entries=%d\n",

@@ -512,6 +512,31 @@ func TestParserRecoverAction(t *testing.T) {
 	}
 }
 
+func TestBuildStateRecoverTableNilWhenNoRecoverActions(t *testing.T) {
+	lang := buildArithmeticLanguage()
+	table := buildStateRecoverTable(lang)
+	if table != nil {
+		t.Fatalf("expected nil recover table when grammar has no recover actions, got len=%d", len(table))
+	}
+}
+
+func TestBuildStateRecoverTableMarksRecoverStates(t *testing.T) {
+	lang := buildArithmeticRecoverLanguage()
+	table := buildStateRecoverTable(lang)
+	if len(table) == 0 {
+		t.Fatal("expected recover table to be populated")
+	}
+	if len(table) != int(lang.StateCount) {
+		t.Fatalf("recover table len = %d, want %d", len(table), lang.StateCount)
+	}
+	if table[0] {
+		t.Fatal("state 0 should not be marked recoverable")
+	}
+	if !table[2] {
+		t.Fatal("state 2 should be marked recoverable")
+	}
+}
+
 func TestFindRecoverActionOnStackUsesNearestAncestor(t *testing.T) {
 	lang := buildArithmeticRecoverLanguage()
 	parser := NewParser(lang)
@@ -519,7 +544,7 @@ func TestFindRecoverActionOnStackUsesNearestAncestor(t *testing.T) {
 	s.push(2, nil, nil, nil)
 	s.push(3, nil, nil, nil)
 
-	depth, act, ok := parser.findRecoverActionOnStack(&s, Symbol(3)) // STAR
+	depth, act, ok := parser.findRecoverActionOnStack(&s, Symbol(3), nil) // STAR
 	if !ok {
 		t.Fatal("expected recover action on stack for STAR")
 	}
