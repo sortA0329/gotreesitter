@@ -180,10 +180,10 @@ func nodeBytesEqual(start, end uint32, oldSource, newSource []byte) bool {
 // tryReuseSubtree attempts to reuse an old subtree at the current lookahead.
 // On success it appends the reused node to the stack and returns the first
 // lookahead token that begins at or after the node's end byte.
-func (p *Parser) tryReuseSubtree(s *glrStack, lookahead Token, ts TokenSource, idx *reuseCursor, entryScratch *glrEntryScratch, gssScratch *gssScratch) (Token, bool) {
+func (p *Parser) tryReuseSubtree(s *glrStack, lookahead Token, ts TokenSource, idx *reuseCursor, entryScratch *glrEntryScratch, gssScratch *gssScratch) (Token, uint32, bool) {
 	candidates := idx.candidates(lookahead.StartByte)
 	if len(candidates) == 0 {
-		return lookahead, false
+		return lookahead, 0, false
 	}
 
 	state := s.top().state
@@ -204,6 +204,7 @@ func (p *Parser) tryReuseSubtree(s *glrStack, lookahead Token, ts TokenSource, i
 		}
 
 		s.push(nextState, n, entryScratch, gssScratch)
+		reusedBytes := n.EndByte() - n.StartByte()
 
 		// If the reused node reaches EOF, we can synthesize EOF directly
 		// instead of consuming every trailing token.
@@ -215,26 +216,26 @@ func (p *Parser) tryReuseSubtree(s *glrStack, lookahead Token, ts TokenSource, i
 				EndByte:    idx.sourceLen,
 				StartPoint: pt,
 				EndPoint:   pt,
-			}, true
+			}, reusedBytes, true
 		}
 
 		// dfaTokenSource fast skip does not preserve external-scanner state.
 		// Advance token-by-token in that case to keep scanner payload in sync.
 		if dts, ok := ts.(*dfaTokenSource); ok && dts.language != nil && dts.language.ExternalScanner != nil {
-			return advanceTokenSourceTo(ts, lookahead, n.EndByte()), true
+			return advanceTokenSourceTo(ts, lookahead, n.EndByte()), reusedBytes, true
 		}
 
 		if skipper, ok := ts.(PointSkippableTokenSource); ok {
-			return skipper.SkipToByteWithPoint(n.EndByte(), n.EndPoint()), true
+			return skipper.SkipToByteWithPoint(n.EndByte(), n.EndPoint()), reusedBytes, true
 		}
 		if skipper, ok := ts.(ByteSkippableTokenSource); ok {
-			return skipper.SkipToByte(n.EndByte()), true
+			return skipper.SkipToByte(n.EndByte()), reusedBytes, true
 		}
 
-		return advanceTokenSourceTo(ts, lookahead, n.EndByte()), true
+		return advanceTokenSourceTo(ts, lookahead, n.EndByte()), reusedBytes, true
 	}
 
-	return lookahead, false
+	return lookahead, 0, false
 }
 
 func advanceTokenSourceTo(ts TokenSource, lookahead Token, endByte uint32) Token {

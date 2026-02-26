@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 )
 
@@ -47,6 +48,46 @@ var parserScratchPool = sync.Pool{
 	},
 }
 
+// IncrementalParseProfile attributes incremental parse time into coarse buckets.
+//
+// ReuseCursorNanos includes reuse-cursor setup and subtree-candidate checks.
+// ReparseNanos includes the remainder of incremental parsing/rebuild work.
+type IncrementalParseProfile struct {
+	ReuseCursorNanos  int64
+	ReparseNanos      int64
+	ReusedSubtrees    uint64
+	ReusedBytes       uint64
+	NewNodesAllocated uint64
+	MaxStacksSeen     int
+}
+
+type incrementalParseTiming struct {
+	totalNanos     int64
+	reuseNanos     int64
+	reusedSubtrees uint64
+	reusedBytes    uint64
+	newNodes       uint64
+	maxStacksSeen  int
+}
+
+func (t *incrementalParseTiming) toProfile() IncrementalParseProfile {
+	if t == nil {
+		return IncrementalParseProfile{}
+	}
+	reparse := t.totalNanos - t.reuseNanos
+	if reparse < 0 {
+		reparse = 0
+	}
+	return IncrementalParseProfile{
+		ReuseCursorNanos:  t.reuseNanos,
+		ReparseNanos:      reparse,
+		ReusedSubtrees:    t.reusedSubtrees,
+		ReusedBytes:       t.reusedBytes,
+		NewNodesAllocated: t.newNodes,
+		MaxStacksSeen:     t.maxStacksSeen,
+	}
+}
+
 func acquireParserScratch() *parserScratch {
 	return parserScratchPool.Get().(*parserScratch)
 }
@@ -58,16 +99,11 @@ func releaseParserScratch(s *parserScratch) {
 	if len(s.merge.result) > 0 {
 		clear(s.merge.result)
 	}
-	if len(s.merge.keys) > 0 {
-		clear(s.merge.keys)
-	}
 	s.merge.result = s.merge.result[:0]
-	s.merge.keys = s.merge.keys[:0]
-	if len(s.merge.bucketIndex) > 0 {
-		for k := range s.merge.bucketIndex {
-			delete(s.merge.bucketIndex, k)
-		}
+	if len(s.merge.slots) > 0 {
+		s.merge.slots = s.merge.slots[:0]
 	}
+	s.merge.perKeyCap = 0
 	if cap(s.tmpEntries) > 0 {
 		buf := s.tmpEntries[:cap(s.tmpEntries)]
 		clear(buf)
@@ -242,7 +278,7 @@ func (p *Parser) Parse(source []byte) (*Tree, error) {
 	if p.language.ExternalScanner != nil {
 		ts.externalPayload = p.language.ExternalScanner.Create()
 	}
-	return p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull), nil
+	return p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil), nil
 }
 
 // ParseWithTokenSource parses source using a custom token source.
@@ -252,7 +288,7 @@ func (p *Parser) ParseWithTokenSource(source []byte, ts TokenSource) (*Tree, err
 	if err := p.checkLanguageCompatible(); err != nil {
 		return nil, err
 	}
-	return p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull), nil
+	return p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil), nil
 }
 
 // ParseIncremental re-parses source after edits were applied to oldTree.
@@ -274,7 +310,7 @@ func (p *Parser) ParseIncremental(source []byte, oldTree *Tree) (*Tree, error) {
 	if p.language.ExternalScanner != nil {
 		ts.externalPayload = p.language.ExternalScanner.Create()
 	}
-	return p.parseIncrementalInternal(source, oldTree, p.wrapIncludedRanges(ts)), nil
+	return p.parseIncrementalInternal(source, oldTree, p.wrapIncludedRanges(ts), nil), nil
 }
 
 // ParseIncrementalWithTokenSource is like ParseIncremental but uses a custom
@@ -283,7 +319,41 @@ func (p *Parser) ParseIncrementalWithTokenSource(source []byte, oldTree *Tree, t
 	if err := p.checkLanguageCompatible(); err != nil {
 		return nil, err
 	}
-	return p.parseIncrementalInternal(source, oldTree, p.wrapIncludedRanges(ts)), nil
+	return p.parseIncrementalInternal(source, oldTree, p.wrapIncludedRanges(ts), nil), nil
+}
+
+// ParseIncrementalProfiled is like ParseIncremental and also returns runtime
+// attribution for incremental reuse work vs parse/rebuild work.
+func (p *Parser) ParseIncrementalProfiled(source []byte, oldTree *Tree) (*Tree, IncrementalParseProfile, error) {
+	if err := p.checkLanguageCompatible(); err != nil {
+		return nil, IncrementalParseProfile{}, err
+	}
+	if err := p.checkDFALexer(); err != nil {
+		return nil, IncrementalParseProfile{}, err
+	}
+	lexer := NewLexer(p.language.LexStates, source)
+	ts := &dfaTokenSource{
+		lexer:             lexer,
+		language:          p.language,
+		lookupActionIndex: p.lookupActionIndex,
+	}
+	if p.language.ExternalScanner != nil {
+		ts.externalPayload = p.language.ExternalScanner.Create()
+	}
+	timing := &incrementalParseTiming{}
+	tree := p.parseIncrementalInternal(source, oldTree, p.wrapIncludedRanges(ts), timing)
+	return tree, timing.toProfile(), nil
+}
+
+// ParseIncrementalWithTokenSourceProfiled is like ParseIncrementalWithTokenSource
+// and also returns runtime attribution for incremental reuse work vs parse/rebuild work.
+func (p *Parser) ParseIncrementalWithTokenSourceProfiled(source []byte, oldTree *Tree, ts TokenSource) (*Tree, IncrementalParseProfile, error) {
+	if err := p.checkLanguageCompatible(); err != nil {
+		return nil, IncrementalParseProfile{}, err
+	}
+	timing := &incrementalParseTiming{}
+	tree := p.parseIncrementalInternal(source, oldTree, p.wrapIncludedRanges(ts), timing)
+	return tree, timing.toProfile(), nil
 }
 
 // ErrNoLanguage is returned when a Parser has no language configured.
@@ -309,7 +379,7 @@ func (p *Parser) checkDFALexer() error {
 	return nil
 }
 
-func (p *Parser) parseIncrementalInternal(source []byte, oldTree *Tree, ts TokenSource) *Tree {
+func (p *Parser) parseIncrementalInternal(source []byte, oldTree *Tree, ts TokenSource, timing *incrementalParseTiming) *Tree {
 	// Fast path: unchanged source and no recorded edits.
 	if oldTree != nil &&
 		oldTree.language == p.language &&
@@ -322,26 +392,39 @@ func (p *Parser) parseIncrementalInternal(source []byte, oldTree *Tree, ts Token
 	// scanner state. All other backends parse incrementally with fresh-parse
 	// semantics to preserve correctness.
 	if _, isDFA := ts.(*dfaTokenSource); !isDFA {
-		return p.parseInternal(source, ts, nil, nil, arenaClassFull)
+		return p.parseInternal(source, ts, nil, nil, arenaClassFull, timing)
 	}
 	if p.language != nil && p.language.ExternalScanner != nil {
-		return p.parseInternal(source, ts, nil, nil, arenaClassFull)
+		return p.parseInternal(source, ts, nil, nil, arenaClassFull, timing)
 	}
 
 	p.reuseMu.Lock()
 	defer p.reuseMu.Unlock()
 
-	reuse := p.reuseCursor.reset(oldTree, source, &p.reuseScratch)
+	var reuse *reuseCursor
+	if timing != nil {
+		reuseStart := time.Now()
+		reuse = p.reuseCursor.reset(oldTree, source, &p.reuseScratch)
+		timing.reuseNanos += time.Since(reuseStart).Nanoseconds()
+	} else {
+		reuse = p.reuseCursor.reset(oldTree, source, &p.reuseScratch)
+	}
 	arenaClass := arenaClassIncremental
-	// Large files can quickly outgrow incremental arena defaults and trigger
-	// repeated fallback allocations; use full-parse slab sizing in that case.
-	const incrementalUseFullArenaThreshold = 128 * 1024
+	// Very large files can outgrow incremental defaults and trigger repeated
+	// fallback allocations; use full-parse slab sizing only beyond this point.
+	const incrementalUseFullArenaThreshold = 1 * 1024 * 1024
 	if len(source) >= incrementalUseFullArenaThreshold {
 		arenaClass = arenaClassFull
 	}
-	tree := p.parseInternal(source, ts, reuse, oldTree, arenaClass)
+	tree := p.parseInternal(source, ts, reuse, oldTree, arenaClass, timing)
 	if reuse != nil {
-		reuse.commitScratch(&p.reuseScratch)
+		if timing != nil {
+			reuseStart := time.Now()
+			reuse.commitScratch(&p.reuseScratch)
+			timing.reuseNanos += time.Since(reuseStart).Nanoseconds()
+		} else {
+			reuse.commitScratch(&p.reuseScratch)
+		}
 	}
 	return tree
 }
@@ -847,8 +930,8 @@ func parseFullArenaNodeCapacity(sourceLen, hint int) int {
 	}
 	// Conservative first-pass sizing. We refine this with adaptive hints
 	// from observed full-parse node usage.
-	estimate := sourceLen * 8
-	const maxPreallocNodes = 2_000_000
+	estimate := sourceLen * 6
+	const maxPreallocNodes = 1_500_000
 	if estimate > maxPreallocNodes {
 		estimate = maxPreallocNodes
 	}
@@ -898,13 +981,13 @@ func parseFullEntryScratchCapacity(sourceLen int) int {
 	if sourceLen <= 0 {
 		return defaultStackEntrySlabCap
 	}
-	estimate := sourceLen * 16
+	estimate := sourceLen * 12
 	if estimate < defaultStackEntrySlabCap {
 		estimate = defaultStackEntrySlabCap
 	}
 	// Keep initial scratch growth bounded; larger capacities are still
 	// reached on demand and retained up to maxRetainedStackEntryCap.
-	const maxPreallocEntries = 1 * 1024 * 1024
+	const maxPreallocEntries = 768 * 1024
 	if estimate > maxPreallocEntries {
 		estimate = maxPreallocEntries
 	}
@@ -1018,7 +1101,11 @@ func extendNodeToTrailingWhitespace(n *Node, source []byte) {
 // (state, symbol) pair, the parser forks: one stack per alternative.
 // Stacks that error out are dropped. Only duplicate stack versions are
 // merged; distinct alternatives are preserved.
-func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor, oldTree *Tree, arenaClass arenaClass) *Tree {
+func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor, oldTree *Tree, arenaClass arenaClass, timing *incrementalParseTiming) *Tree {
+	var parseStart time.Time
+	if timing != nil {
+		parseStart = time.Now()
+	}
 	if closer, ok := ts.(interface{ Close() }); ok {
 		defer closer.Close()
 	}
@@ -1026,6 +1113,15 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 	defer releaseParserScratch(scratch)
 
 	arena := acquireNodeArena(arenaClass)
+	if timing != nil {
+		startUsed := arena.used
+		defer func() {
+			timing.totalNanos += time.Since(parseStart).Nanoseconds()
+			if arena.used >= startUsed {
+				timing.newNodes += uint64(arena.used - startUsed)
+			}
+		}()
+	}
 	if arenaClass == arenaClassFull {
 		defer func() {
 			p.recordFullArenaUsage(arena.used)
@@ -1045,7 +1141,21 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 		return p.buildResultFromGLR(stacks, source, arena, oldTree, reusedAny)
 	}
 
-	stacks := []glrStack{newGLRStackWithScratch(p.language.InitialState, &scratch.entries)}
+	var stacksBuf [4]glrStack
+	stacks := stacksBuf[:1]
+	stacks[0] = newGLRStackWithScratch(p.language.InitialState, &scratch.entries)
+	if timing != nil && timing.maxStacksSeen < len(stacks) {
+		timing.maxStacksSeen = len(stacks)
+	}
+	maxStacks := maxGLRStacks
+	mergePerKeyCap := maxStacksPerMergeKey
+	if reuse != nil {
+		// Incremental reparses benefit from tighter GLR retention because
+		// edits are localized and we prioritize latency over broad ambiguity fanout.
+		maxStacks = 32
+		mergePerKeyCap = 4
+	}
+	scratch.merge.perKeyCap = mergePerKeyCap
 
 	maxIter := parseIterations(len(source))
 	maxDepth := parseStackDepth(len(source))
@@ -1060,6 +1170,9 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 	var consecutiveReduces int
 
 	for iter := 0; iter < maxIter; iter++ {
+		if timing != nil && len(stacks) > timing.maxStacksSeen {
+			timing.maxStacksSeen = len(stacks)
+		}
 		// Fast-path the overwhelmingly common non-GLR case with one live stack.
 		if len(stacks) == 1 {
 			if stacks[0].dead {
@@ -1077,7 +1190,6 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 		// Cap the number of parallel stacks to prevent combinatorial explosion.
 		// Keep the most promising stacks instead of truncating by insertion
 		// order, which can discard viable parses on highly-ambiguous inputs.
-		const maxStacks = 64
 		if len(stacks) > maxStacks {
 			sort.SliceStable(stacks, func(i, j int) bool {
 				return stackCompare(stacks[i], stacks[j]) > 0
@@ -1088,7 +1200,9 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 		// Keep the most promising stack in slot 0 because several parser
 		// heuristics (lex-mode selection, reduce-loop detection, depth cap)
 		// currently key off the primary stack.
-		p.promotePrimaryStack(stacks)
+		if len(stacks) > 1 {
+			p.promotePrimaryStack(stacks)
+		}
 		const maxCachedStacks = 32
 		for i := range stacks {
 			if i < maxCachedStacks {
@@ -1124,12 +1238,27 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 		// Incremental parsing fast-path: when there is a single active stack,
 		// try to reuse an unchanged subtree starting at the current token.
 		if reuse != nil && len(stacks) == 1 && !stacks[0].dead && tok.Symbol != 0 {
-			if nextTok, ok := p.tryReuseSubtree(&stacks[0], tok, ts, reuse, &scratch.entries, &scratch.gss); ok {
-				reusedAny = true
-				tok = nextTok
-				needToken = false
-				consecutiveReduces = 0
-				continue
+			if timing != nil {
+				reuseStart := time.Now()
+				nextTok, reusedBytes, ok := p.tryReuseSubtree(&stacks[0], tok, ts, reuse, &scratch.entries, &scratch.gss)
+				timing.reuseNanos += time.Since(reuseStart).Nanoseconds()
+				if ok {
+					timing.reusedSubtrees++
+					timing.reusedBytes += uint64(reusedBytes)
+					reusedAny = true
+					tok = nextTok
+					needToken = false
+					consecutiveReduces = 0
+					continue
+				}
+			} else {
+				if nextTok, _, ok := p.tryReuseSubtree(&stacks[0], tok, ts, reuse, &scratch.entries, &scratch.gss); ok {
+					reusedAny = true
+					tok = nextTok
+					needToken = false
+					consecutiveReduces = 0
+					continue
+				}
 			}
 		}
 
@@ -1184,6 +1313,13 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 					continue
 				}
 
+				// When multiple alternatives exist, drop no-action stacks
+				// immediately instead of running deep recovery scans.
+				if len(stacks) > 1 {
+					s.dead = true
+					continue
+				}
+
 				// Try grammar-directed recovery by searching the stack for
 				// the nearest state that can recover on this lookahead.
 				if depth, recoverAct, ok := p.findRecoverActionOnStack(s, tok.Symbol); ok {
@@ -1193,12 +1329,6 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 					}
 					p.applyAction(s, recoverAct, tok, &anyReduced, &nodeCount, arena, &scratch.entries, &scratch.gss, &scratch.tmpEntries)
 					needToken = true
-					continue
-				}
-
-				// If other stacks have valid actions, kill this one.
-				if len(stacks) > 1 {
-					s.dead = true
 					continue
 				}
 
@@ -1314,6 +1444,14 @@ func (p *Parser) applyAction(s *glrStack, act ParseAction, tok Token, anyReduced
 		entries := s.entries
 		borrowed := false
 		if entries == nil {
+			if !s.cacheEntries && s.gss.head != nil {
+				tmp := []stackEntry(nil)
+				if tmpEntries != nil {
+					tmp = *tmpEntries
+				}
+				p.applyReduceActionFromGSS(s, act, anyReduced, nodeCount, arena, entryScratch, gssScratch, tmpEntries, tmp)
+				return
+			}
 			if s.cacheEntries {
 				entries = s.ensureEntries(entryScratch)
 			} else {
@@ -1322,14 +1460,12 @@ func (p *Parser) applyAction(s *glrStack, act ParseAction, tok Token, anyReduced
 					tmp = *tmpEntries
 				}
 				entries, borrowed = s.entriesForRead(tmp)
-				if borrowed && tmpEntries != nil {
-					defer func() {
-						*tmpEntries = entries[:0]
-					}()
-				}
 			}
 		}
 		p.applyReduceAction(s, act, anyReduced, nodeCount, arena, entryScratch, gssScratch, entries)
+		if borrowed && tmpEntries != nil {
+			*tmpEntries = entries[:0]
+		}
 
 	case ParseActionAccept:
 		s.accepted = true
@@ -1349,6 +1485,124 @@ func (p *Parser) applyAction(s *glrStack, act ParseAction, tok Token, anyReduced
 		errNode.parseState = recoverState
 		s.push(recoverState, errNode, entryScratch, gssScratch)
 		*nodeCount++
+	}
+}
+
+func reduceWindowFromGSS(s *glrStack, childCount int, buf []stackEntry) ([]stackEntry, StateID, bool) {
+	if s == nil || s.gss.head == nil || s.depth() == 0 {
+		return nil, 0, false
+	}
+	if childCount == 0 {
+		return buf[:0], s.top().state, true
+	}
+
+	rev := buf[:0]
+	nonExtraFound := 0
+	n := s.gss.head
+	for n != nil {
+		rev = append(rev, n.entry)
+		if n.entry.node != nil && !n.entry.node.isExtra {
+			nonExtraFound++
+			if nonExtraFound == childCount {
+				break
+			}
+		}
+		n = n.prev
+	}
+	if nonExtraFound < childCount || n == nil || n.prev == nil {
+		return rev[:0], 0, false
+	}
+	topState := n.prev.entry.state
+
+	for i, j := 0, len(rev)-1; i < j; i, j = i+1, j-1 {
+		rev[i], rev[j] = rev[j], rev[i]
+	}
+	return rev, topState, true
+}
+
+func (p *Parser) applyReduceActionFromGSS(s *glrStack, act ParseAction, anyReduced *bool, nodeCount *int, arena *nodeArena, entryScratch *glrEntryScratch, gssScratch *gssScratch, tmpEntries *[]stackEntry, tmp []stackEntry) {
+	childCount := int(act.ChildCount)
+	windowEntries, topState, ok := reduceWindowFromGSS(s, childCount, tmp)
+	if !ok {
+		s.dead = true
+		if tmpEntries != nil {
+			*tmpEntries = windowEntries[:0]
+		}
+		return
+	}
+
+	actualEnd := len(windowEntries)
+	reducedEnd := actualEnd
+	for i := actualEnd - 1; i >= 0; i-- {
+		n := windowEntries[i].node
+		if n == nil || !n.isExtra {
+			break
+		}
+		reducedEnd--
+	}
+
+	span := computeReduceRawSpan(windowEntries, 0, reducedEnd)
+	children, fieldIDs := p.buildReduceChildren(windowEntries, 0, reducedEnd, childCount, act.ProductionID, arena)
+
+	var trailingExtras []*Node
+	if actualEnd > reducedEnd {
+		var trailingBuf [8]*Node
+		if actualEnd-reducedEnd <= len(trailingBuf) {
+			trailingExtras = trailingBuf[:0]
+		} else {
+			trailingExtras = make([]*Node, 0, actualEnd-reducedEnd)
+		}
+		for i := reducedEnd; i < actualEnd; i++ {
+			extra := windowEntries[i].node
+			if extra != nil {
+				trailingExtras = append(trailingExtras, extra)
+			}
+		}
+	}
+
+	targetDepth := s.depth() - actualEnd
+	if targetDepth < 0 || !s.truncate(targetDepth) {
+		s.dead = true
+		if tmpEntries != nil {
+			*tmpEntries = windowEntries[:0]
+		}
+		return
+	}
+
+	named := p.isNamedSymbol(act.Symbol)
+	parent := newParentNodeInArena(arena, act.Symbol, named, children, fieldIDs, act.ProductionID)
+	shouldUseRawSpan := len(children) == 0
+	if !shouldUseRawSpan && p.forceRawSpanAll {
+		shouldUseRawSpan = true
+	}
+	if !shouldUseRawSpan && int(act.Symbol) < len(p.forceRawSpanTable) && p.forceRawSpanTable[act.Symbol] {
+		shouldUseRawSpan = true
+	}
+	if shouldUseRawSpan && reducedEnd > 0 {
+		parent.startByte = span.startByte
+		parent.endByte = span.endByte
+		parent.startPoint = span.startPoint
+		parent.endPoint = span.endPoint
+	}
+	*nodeCount++
+
+	gotoState := p.lookupGoto(topState, act.Symbol)
+	targetState := topState
+	if gotoState != 0 {
+		targetState = gotoState
+	}
+	parent.parseState = targetState
+	s.push(targetState, parent, entryScratch, gssScratch)
+	for i := range trailingExtras {
+		extra := trailingExtras[i]
+		extra.parseState = targetState
+		s.push(targetState, extra, entryScratch, gssScratch)
+	}
+
+	s.score += int(act.DynamicPrecedence)
+	*anyReduced = true
+	if tmpEntries != nil {
+		*tmpEntries = windowEntries[:0]
 	}
 }
 
@@ -1774,15 +2028,23 @@ func (p *Parser) lookupAction(state StateID, sym Symbol) *ParseActionEntry {
 // Returns 0 (the error/no-action entry) if not found.
 func (p *Parser) lookupActionIndex(state StateID, sym Symbol) uint16 {
 	if int(state) < p.denseLimit {
-		if int(state) < len(p.language.ParseTable) {
-			row := p.language.ParseTable[state]
-			if int(sym) < len(row) {
-				return row[sym]
-			}
-		}
+		return p.lookupActionIndexDense(state, sym)
+	}
+	return p.lookupActionIndexSmall(state, sym)
+}
+
+func (p *Parser) lookupActionIndexDense(state StateID, sym Symbol) uint16 {
+	if int(state) >= len(p.language.ParseTable) {
 		return 0
 	}
+	row := p.language.ParseTable[state]
+	if int(sym) >= len(row) {
+		return 0
+	}
+	return row[sym]
+}
 
+func (p *Parser) lookupActionIndexSmall(state StateID, sym Symbol) uint16 {
 	// Small (compressed sparse) table lookup.
 	smallIdx := int(state) - p.smallBase
 	if smallIdx < 0 || smallIdx >= len(p.language.SmallParseTableMap) {

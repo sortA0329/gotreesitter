@@ -35,7 +35,9 @@ const (
 	defaultStackEntrySlabCap = 4 * 1024
 	// Retain enough entry-scratch capacity to avoid re-allocating large
 	// GLR stacks on every parse pass.
-	maxRetainedStackEntryCap = 8 * 1024 * 1024
+	maxRetainedStackEntryCap = 1 * 1024 * 1024
+	// Hard cap on concurrently retained GLR stacks in parseInternal.
+	maxGLRStacks = 64
 	// Tree-sitter's C runtime caps links per stack node at 8.
 	// We cap distinct alternatives per merge key similarly to avoid
 	// unbounded stack growth while preserving multiple paths.
@@ -43,9 +45,9 @@ const (
 )
 
 type glrMergeScratch struct {
-	result      []glrStack
-	keys        []glrMergeKey
-	bucketIndex map[glrMergeKey]glrMergeBucket
+	result    []glrStack
+	slots     []glrMergeSlot
+	perKeyCap int
 }
 
 type glrMergeKey struct {
@@ -53,7 +55,8 @@ type glrMergeKey struct {
 	byteOffset uint32
 }
 
-type glrMergeBucket struct {
+type glrMergeSlot struct {
+	key     glrMergeKey
 	indices [maxStacksPerMergeKey]int
 	count   int
 }
@@ -447,28 +450,40 @@ func mergeStacksWithScratch(stacks []glrStack, scratch *glrMergeScratch) []glrSt
 		scratch = &local
 	}
 
-	buckets := scratch.bucketIndex
-	if buckets == nil {
-		buckets = make(map[glrMergeKey]glrMergeBucket, len(alive))
-	} else if len(scratch.keys) > 0 {
-		for _, key := range scratch.keys {
-			delete(buckets, key)
-		}
+	perKeyCap := maxStacksPerMergeKey
+	if scratch.perKeyCap > 0 && scratch.perKeyCap < perKeyCap {
+		perKeyCap = scratch.perKeyCap
 	}
 
 	// Merge exact duplicates and keep a bounded number of distinct
 	// alternatives per merge key. This approximates the C runtime's
 	// graph-stack link fanout while keeping memory bounded.
 	result := ensureMergeResultCap(scratch, len(alive))
-	keys := ensureMergeKeyCap(scratch, len(alive))
+	slots := ensureMergeSlotCap(scratch, len(alive))
+	slotCount := 0
 	for i := range alive {
 		stack := alive[i]
 		key := mergeKeyForStack(stack)
-		bucket := buckets[key]
+
+		slotIndex := -1
+		for si := 0; si < slotCount; si++ {
+			if slots[si].key == key {
+				slotIndex = si
+				break
+			}
+		}
+		if slotIndex < 0 {
+			slotIndex = slotCount
+			slotCount++
+			slots[slotIndex].key = key
+			slots[slotIndex].count = 0
+		}
+		slot := &slots[slotIndex]
+
 		duplicateIndex := -1
 		worstIndex := -1
-		for j := 0; j < bucket.count; j++ {
-			idx := bucket.indices[j]
+		for j := 0; j < slot.count; j++ {
+			idx := slot.indices[j]
 			existing := &result[idx]
 			if stackEquivalent(*existing, stack) {
 				duplicateIndex = idx
@@ -485,13 +500,11 @@ func mergeStacksWithScratch(stacks []glrStack, scratch *glrMergeScratch) []glrSt
 			continue
 		}
 
-		if bucket.count < maxStacksPerMergeKey {
+		if slot.count < perKeyCap {
 			idx := len(result)
 			result = append(result, stack)
-			keys = append(keys, key)
-			bucket.indices[bucket.count] = idx
-			bucket.count++
-			buckets[key] = bucket
+			slot.indices[slot.count] = idx
+			slot.count++
 			continue
 		}
 
@@ -502,8 +515,7 @@ func mergeStacksWithScratch(stacks []glrStack, scratch *glrMergeScratch) []glrSt
 		}
 	}
 	scratch.result = result
-	scratch.keys = keys
-	scratch.bucketIndex = buckets
+	scratch.slots = slots[:slotCount]
 	return result
 }
 
@@ -514,11 +526,12 @@ func ensureMergeResultCap(scratch *glrMergeScratch, n int) []glrStack {
 	return scratch.result[:0]
 }
 
-func ensureMergeKeyCap(scratch *glrMergeScratch, n int) []glrMergeKey {
-	if cap(scratch.keys) < n {
-		scratch.keys = make([]glrMergeKey, 0, n)
+func ensureMergeSlotCap(scratch *glrMergeScratch, n int) []glrMergeSlot {
+	if cap(scratch.slots) < n {
+		scratch.slots = make([]glrMergeSlot, n)
+		return scratch.slots
 	}
-	return scratch.keys[:0]
+	return scratch.slots[:n]
 }
 
 func (s *glrEntryScratch) alloc(n int) []stackEntry {
