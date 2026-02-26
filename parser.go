@@ -35,34 +35,48 @@ type parserScratch struct {
 	entries glrEntryScratch
 }
 
-var parserScratchPool = sync.Pool{
-	New: func() any {
-		return &parserScratch{}
-	},
-}
+const maxParserScratchPoolSize = 64
+
+var (
+	parserScratchMu   sync.Mutex
+	parserScratchPool []*parserScratch
+)
 
 func acquireParserScratch() *parserScratch {
-	return parserScratchPool.Get().(*parserScratch)
+	parserScratchMu.Lock()
+	n := len(parserScratchPool)
+	if n == 0 {
+		parserScratchMu.Unlock()
+		return &parserScratch{}
+	}
+	s := parserScratchPool[n-1]
+	parserScratchPool = parserScratchPool[:n-1]
+	parserScratchMu.Unlock()
+	return s
 }
 
 func releaseParserScratch(s *parserScratch) {
 	if s == nil {
 		return
 	}
-	if cap(s.merge.result) > 0 {
-		clear(s.merge.result[:cap(s.merge.result)])
+	if len(s.merge.result) > 0 {
+		clear(s.merge.result)
 	}
-	if cap(s.merge.keys) > 0 {
-		clear(s.merge.keys[:cap(s.merge.keys)])
+	if len(s.merge.keys) > 0 {
+		clear(s.merge.keys)
 	}
-	if cap(s.merge.alive) > 0 {
-		clear(s.merge.alive[:cap(s.merge.alive)])
+	if len(s.merge.alive) > 0 {
+		clear(s.merge.alive)
 	}
 	s.merge.result = s.merge.result[:0]
 	s.merge.keys = s.merge.keys[:0]
 	s.merge.alive = s.merge.alive[:0]
 	s.entries.reset()
-	parserScratchPool.Put(s)
+	parserScratchMu.Lock()
+	if len(parserScratchPool) < maxParserScratchPoolSize {
+		parserScratchPool = append(parserScratchPool, s)
+	}
+	parserScratchMu.Unlock()
 }
 
 // NewParser creates a new Parser for the given language.
@@ -798,14 +812,15 @@ func parseFullArenaNodeCapacity(sourceLen int) int {
 	if sourceLen <= 0 {
 		return base
 	}
-	estimate := sourceLen / 2
-	if sourceLen <= 64*1024 {
-		estimate = sourceLen + sourceLen/2
+	// Full parses can build substantially more nodes than source bytes,
+	// especially under GLR ambiguity. Pre-size close to the parser's
+	// node safety limit to avoid repeated heap fallback allocations.
+	const maxPreallocNodes = 1_000_000
+	estimate := parseNodeLimit(sourceLen)
+	if estimate > maxPreallocNodes {
+		estimate = maxPreallocNodes
 	}
-	if estimate < base {
-		return base
-	}
-	return estimate
+	return max(base, estimate)
 }
 
 func parseErrorTree(source []byte, lang *Language) *Tree {
@@ -919,11 +934,19 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 	var consecutiveReduces int
 
 	for iter := 0; iter < maxIter; iter++ {
-		// Prune dead stacks and collapse only truly duplicate stack versions.
-		stacks = mergeStacksWithScratch(stacks, &scratch.merge)
-		if len(stacks) == 0 {
-			arena.Release()
-			return parseErrorTree(source, p.language)
+		// Fast-path the overwhelmingly common non-GLR case with one live stack.
+		if len(stacks) == 1 {
+			if stacks[0].dead {
+				arena.Release()
+				return parseErrorTree(source, p.language)
+			}
+		} else {
+			// Prune dead stacks and collapse only truly duplicate stack versions.
+			stacks = mergeStacksWithScratch(stacks, &scratch.merge)
+			if len(stacks) == 0 {
+				arena.Release()
+				return parseErrorTree(source, p.language)
+			}
 		}
 
 		// Cap the number of parallel stacks to prevent combinatorial explosion.
@@ -1029,6 +1052,7 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 				// the nearest state that can recover on this lookahead.
 				if depth, recoverAct, ok := p.findRecoverActionOnStack(s, tok.Symbol); ok {
 					s.entries = s.entries[:depth+1]
+					s.recomputeByteOffset()
 					p.applyAction(s, recoverAct, tok, &anyReduced, &nodeCount, arena, &scratch.entries)
 					needToken = true
 					continue
@@ -1153,8 +1177,8 @@ func stackPreferredForRetention(a, b glrStack) bool {
 	if a.dead != b.dead {
 		return !a.dead
 	}
-	if pa, pb := stackByteOffset(a.entries), stackByteOffset(b.entries); pa != pb {
-		return pa > pb
+	if a.byteOffset != b.byteOffset {
+		return a.byteOffset > b.byteOffset
 	}
 	if a.score != b.score {
 		return a.score > b.score

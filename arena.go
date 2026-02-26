@@ -21,6 +21,11 @@ const (
 	fullChildSliceCap        = 32 * 1024
 	incrementalFieldSliceCap = 2 * 1024
 	fullFieldSliceCap        = 32 * 1024
+
+	maxRetainedArenaFactor = 4
+	// Full-parse node slabs are much larger; keep more headroom so capacity
+	// growth does not thrash between parses.
+	maxRetainedFullNodeArenaFactor = 16
 )
 
 type arenaClass uint8
@@ -56,17 +61,49 @@ type fieldSliceSlab struct {
 }
 
 var (
-	incrementalArenaPool = sync.Pool{
-		New: func() any {
-			return newNodeArena(arenaClassIncremental, incrementalArenaSlab)
-		},
+	incrementalArenaPool = nodeArenaPool{
+		class:     arenaClassIncremental,
+		slabBytes: incrementalArenaSlab,
+		maxSize:   64,
 	}
-	fullArenaPool = sync.Pool{
-		New: func() any {
-			return newNodeArena(arenaClassFull, fullParseArenaSlab)
-		},
+	fullArenaPool = nodeArenaPool{
+		class:     arenaClassFull,
+		slabBytes: fullParseArenaSlab,
+		maxSize:   64,
 	}
 )
+
+type nodeArenaPool struct {
+	mu        sync.Mutex
+	class     arenaClass
+	slabBytes int
+	maxSize   int
+	free      []*nodeArena
+}
+
+func (p *nodeArenaPool) acquire() *nodeArena {
+	p.mu.Lock()
+	n := len(p.free)
+	if n == 0 {
+		p.mu.Unlock()
+		return newNodeArena(p.class, p.slabBytes)
+	}
+	a := p.free[n-1]
+	p.free = p.free[:n-1]
+	p.mu.Unlock()
+	return a
+}
+
+func (p *nodeArenaPool) release(a *nodeArena) {
+	if a == nil {
+		return
+	}
+	p.mu.Lock()
+	if len(p.free) < p.maxSize {
+		p.free = append(p.free, a)
+	}
+	p.mu.Unlock()
+}
 
 func nodeCapacityForBytes(slabBytes int) int {
 	nodeSize := int(unsafe.Sizeof(Node{}))
@@ -89,7 +126,7 @@ func newNodeArena(class arenaClass, slabBytes int) *nodeArena {
 	}
 	return &nodeArena{
 		class:      class,
-		nodes:      make([]Node, nodeCapacityForBytes(slabBytes)),
+		nodes:      make([]Node, nodeCapacityForClass(class)),
 		childSlabs: []childSliceSlab{{data: make([]*Node, childCap)}},
 		fieldSlabs: []fieldSliceSlab{{data: make([]FieldID, fieldCap)}},
 	}
@@ -99,9 +136,9 @@ func acquireNodeArena(class arenaClass) *nodeArena {
 	var a *nodeArena
 	switch class {
 	case arenaClassIncremental:
-		a = incrementalArenaPool.Get().(*nodeArena)
+		a = incrementalArenaPool.acquire()
 	default:
-		a = fullArenaPool.Get().(*nodeArena)
+		a = fullArenaPool.acquire()
 	}
 	a.refs.Store(1)
 	return a
@@ -124,23 +161,19 @@ func (a *nodeArena) Release() {
 	a.reset()
 	switch a.class {
 	case arenaClassIncremental:
-		incrementalArenaPool.Put(a)
+		incrementalArenaPool.release(a)
 	default:
-		fullArenaPool.Put(a)
+		fullArenaPool.release(a)
 	}
 }
 
 func (a *nodeArena) reset() {
-	for i := 0; i < a.used; i++ {
-		a.nodes[i] = Node{}
-	}
+	clear(a.nodes[:a.used])
 	a.used = 0
 
 	for i := range a.childSlabs {
 		slab := &a.childSlabs[i]
-		for j := 0; j < slab.used; j++ {
-			slab.data[j] = nil
-		}
+		clear(slab.data[:slab.used])
 		slab.used = 0
 	}
 	for i := range a.fieldSlabs {
@@ -148,6 +181,16 @@ func (a *nodeArena) reset() {
 	}
 	a.childSlabCursor = 0
 	a.fieldSlabCursor = 0
+
+	if len(a.nodes) > maxRetainedNodeCapacityForClass(a.class) {
+		a.nodes = make([]Node, nodeCapacityForClass(a.class))
+	}
+	if len(a.childSlabs) == 0 {
+		a.childSlabs = []childSliceSlab{{data: make([]*Node, defaultChildSliceCap(a.class))}}
+	}
+	if len(a.fieldSlabs) == 0 {
+		a.fieldSlabs = []fieldSliceSlab{{data: make([]FieldID, defaultFieldSliceCap(a.class))}}
+	}
 }
 
 func (a *nodeArena) allocNode() *Node {
@@ -157,11 +200,25 @@ func (a *nodeArena) allocNode() *Node {
 	if a.used < len(a.nodes) {
 		n := &a.nodes[a.used]
 		a.used++
-		*n = Node{}
 		return n
 	}
 	// Fallback when slab is exhausted.
 	return &Node{}
+}
+
+func (a *nodeArena) ensureNodeCapacity(min int) {
+	if a == nil || min <= len(a.nodes) {
+		return
+	}
+	newCap := len(a.nodes)
+	if newCap < minArenaNodeCap {
+		newCap = minArenaNodeCap
+	}
+	for newCap < min {
+		newCap *= 2
+	}
+	a.nodes = make([]Node, newCap)
+	a.used = 0
 }
 
 func (a *nodeArena) allocNodeSlice(n int) []*Node {
@@ -250,4 +307,27 @@ func defaultFieldSliceCap(class arenaClass) int {
 		return incrementalFieldSliceCap
 	}
 	return fullFieldSliceCap
+}
+
+func nodeCapacityForClass(class arenaClass) int {
+	if class == arenaClassIncremental {
+		return nodeCapacityForBytes(incrementalArenaSlab)
+	}
+	return nodeCapacityForBytes(fullParseArenaSlab)
+}
+
+func maxRetainedNodeCapacityForClass(class arenaClass) int {
+	factor := maxRetainedArenaFactor
+	if class == arenaClassFull {
+		factor = maxRetainedFullNodeArenaFactor
+	}
+	return nodeCapacityForClass(class) * factor
+}
+
+func maxRetainedChildSliceCapForClass(class arenaClass) int {
+	return defaultChildSliceCap(class) * maxRetainedArenaFactor
+}
+
+func maxRetainedFieldSliceCapForClass(class arenaClass) int {
+	return defaultFieldSliceCap(class) * maxRetainedArenaFactor
 }
