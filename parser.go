@@ -2016,7 +2016,14 @@ func (p *Parser) buildResultFromGLR(stacks []glrStack, source []byte, arena *nod
 		}
 	}
 
-	return p.buildResult(stacks[best].ensureEntries(nil), source, arena, oldTree, reusedAny)
+	selected := stacks[best]
+	if len(selected.entries) > 0 {
+		return p.buildResult(selected.entries, source, arena, oldTree, reusedAny)
+	}
+	if selected.gss.head == nil {
+		return p.buildResult(nil, source, arena, oldTree, reusedAny)
+	}
+	return p.buildResultFromNodes(nodesFromGSS(selected.gss), source, arena, oldTree, reusedAny)
 }
 
 // lookupAction looks up the parse action for the given state and symbol.
@@ -2151,6 +2158,30 @@ func (p *Parser) isNamedSymbol(sym Symbol) bool {
 	return false
 }
 
+func nodesFromGSS(stack gssStack) []*Node {
+	if stack.head == nil {
+		return nil
+	}
+	count := 0
+	for n := stack.head; n != nil; n = n.prev {
+		if n.entry.node != nil {
+			count++
+		}
+	}
+	if count == 0 {
+		return nil
+	}
+	nodes := make([]*Node, count)
+	i := count - 1
+	for n := stack.head; n != nil; n = n.prev {
+		if n.entry.node != nil {
+			nodes[i] = n.entry.node
+			i--
+		}
+	}
+	return nodes
+}
+
 // buildResult constructs the final Tree from a stack of entries.
 func (p *Parser) buildResult(stack []stackEntry, source []byte, arena *nodeArena, oldTree *Tree, reusedAny bool) *Tree {
 	var nodes []*Node
@@ -2159,7 +2190,10 @@ func (p *Parser) buildResult(stack []stackEntry, source []byte, arena *nodeArena
 			nodes = append(nodes, entry.node)
 		}
 	}
+	return p.buildResultFromNodes(nodes, source, arena, oldTree, reusedAny)
+}
 
+func (p *Parser) buildResultFromNodes(nodes []*Node, source []byte, arena *nodeArena, oldTree *Tree, reusedAny bool) *Tree {
 	if len(nodes) == 0 {
 		arena.Release()
 		if isWhitespaceOnlySource(source) {
