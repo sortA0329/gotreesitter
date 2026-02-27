@@ -49,6 +49,7 @@ type parserScratch struct {
 	entries    glrEntryScratch
 	gss        gssScratch
 	tmpEntries []stackEntry
+	glrStates  []StateID
 }
 
 var parserScratchPool = sync.Pool{
@@ -172,6 +173,11 @@ func releaseParserScratch(s *parserScratch) {
 		} else {
 			s.tmpEntries = buf[:0]
 		}
+	}
+	if cap(s.glrStates) > maxGLRStacks {
+		s.glrStates = nil
+	} else if len(s.glrStates) > 0 {
+		s.glrStates = s.glrStates[:0]
 	}
 	s.entries.reset()
 	s.gss.reset()
@@ -779,13 +785,11 @@ func (p *Parser) parseIncrementalInternal(source []byte, oldTree *Tree, ts Token
 		return oldTree
 	}
 
-	// Reuse is currently safe only for DFA token sources without external
-	// scanner state. All other backends parse incrementally with fresh-parse
-	// semantics to preserve correctness.
-	if _, isDFA := ts.(*dfaTokenSource); !isDFA {
-		return p.parseInternal(source, ts, nil, nil, arenaClassFull, timing)
-	}
-	if p.language != nil && p.language.ExternalScanner != nil {
+	// DFA with external scanner cannot safely skip — scanner state must be
+	// preserved token-by-token, so reuse is disabled for that combination.
+	// All other token sources (DFA without external scanner, custom lexers)
+	// support efficient skipping via PointSkippableTokenSource.
+	if _, isDFA := ts.(*dfaTokenSource); isDFA && p.language != nil && p.language.ExternalScanner != nil {
 		return p.parseInternal(source, ts, nil, nil, arenaClassFull, timing)
 	}
 
@@ -1709,14 +1713,21 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 		if stateful, ok := ts.(parserStateTokenSource); ok {
 			stateful.SetParserState(stacks[0].top().state)
 			if len(stacks) > 1 {
-				glrBuf := make([]StateID, 0, len(stacks))
+				glrBuf := scratch.glrStates[:0]
+				if cap(glrBuf) < len(stacks) {
+					glrBuf = make([]StateID, 0, len(stacks))
+				}
 				for si := range stacks {
 					if !stacks[si].dead {
 						glrBuf = append(glrBuf, stacks[si].top().state)
 					}
 				}
+				scratch.glrStates = glrBuf
 				stateful.SetGLRStates(glrBuf)
 			} else {
+				if len(scratch.glrStates) > 0 {
+					scratch.glrStates = scratch.glrStates[:0]
+				}
 				stateful.SetGLRStates(nil)
 			}
 		}
