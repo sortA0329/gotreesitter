@@ -477,18 +477,6 @@ func buildRecoverActionsByState(lang *Language) ([][]recoverSymbolAction, []bool
 	return recoverByState, hasRecoverState, hasRecoverSymbol
 }
 
-func parseActionEntryHasRecover(entry *ParseActionEntry) bool {
-	if entry == nil {
-		return false
-	}
-	for _, act := range entry.Actions {
-		if act.Type == ParseActionRecover {
-			return true
-		}
-	}
-	return false
-}
-
 func (p *Parser) stateCanRecover(state StateID) bool {
 	if len(p.hasRecoverState) == 0 {
 		return true
@@ -2494,21 +2482,6 @@ func (p *Parser) findRecoverActionOnStack(s *glrStack, sym Symbol, timing *incre
 		depth--
 	}
 	return 0, ParseAction{}, false
-}
-
-func (p *Parser) aliasSymbolForChild(productionID uint16, childIndex int) Symbol {
-	if p == nil || p.language == nil || childIndex < 0 {
-		return 0
-	}
-	pid := int(productionID)
-	if pid < 0 || pid >= len(p.language.AliasSequences) {
-		return 0
-	}
-	seq := p.language.AliasSequences[pid]
-	if childIndex >= len(seq) {
-		return 0
-	}
-	return seq[childIndex]
 }
 
 func aliasedNodeInArena(arena *nodeArena, lang *Language, n *Node, alias Symbol) *Node {
