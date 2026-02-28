@@ -94,8 +94,9 @@ func BuildLanguage(g *ExtractedGrammar) *gotreesitter.Language {
 		lang.LexModes = make([]gotreesitter.LexMode, len(g.LexModes))
 		for i, lm := range g.LexModes {
 			lang.LexModes[i] = gotreesitter.LexMode{
-				LexState:         uint16(lm.LexState),
-				ExternalLexState: uint16(lm.ExternalLexState),
+				LexState:          uint16(lm.LexState),
+				ExternalLexState:  uint16(lm.ExternalLexState),
+				ReservedWordSetID: uint16(lm.ReservedWordSetID),
 			}
 		}
 	}
@@ -114,6 +115,45 @@ func BuildLanguage(g *ExtractedGrammar) *gotreesitter.Language {
 		lang.ExternalSymbols = make([]gotreesitter.Symbol, len(g.ExternalSymbols))
 		for i, sym := range g.ExternalSymbols {
 			lang.ExternalSymbols[i] = gotreesitter.Symbol(sym)
+		}
+	}
+
+	// ABI 15: reserved words
+	if g.MaxReservedWordSetSize > 0 {
+		lang.MaxReservedWordSetSize = uint16(g.MaxReservedWordSetSize)
+		if len(g.ReservedWords) > 0 {
+			lang.ReservedWords = make([]gotreesitter.Symbol, len(g.ReservedWords))
+			for i, rw := range g.ReservedWords {
+				lang.ReservedWords[i] = gotreesitter.Symbol(rw)
+			}
+		}
+	}
+
+	// ABI 15: supertype hierarchy
+	if g.SupertypeCount > 0 {
+		if len(g.SupertypeSymbols) > 0 {
+			lang.SupertypeSymbols = make([]gotreesitter.Symbol, len(g.SupertypeSymbols))
+			for i, sym := range g.SupertypeSymbols {
+				lang.SupertypeSymbols[i] = gotreesitter.Symbol(sym)
+			}
+		}
+		if len(g.SupertypeMapSlices) > 0 {
+			lang.SupertypeMapSlices = append([][2]uint16(nil), g.SupertypeMapSlices...)
+		}
+		if len(g.SupertypeMapEntries) > 0 {
+			lang.SupertypeMapEntries = make([]gotreesitter.Symbol, len(g.SupertypeMapEntries))
+			for i, sym := range g.SupertypeMapEntries {
+				lang.SupertypeMapEntries[i] = gotreesitter.Symbol(sym)
+			}
+		}
+	}
+
+	// ABI 15: language metadata (grammar semantic version)
+	if g.LanguageMetadataMajor > 0 || g.LanguageMetadataMinor > 0 || g.LanguageMetadataPatch > 0 {
+		lang.Metadata = gotreesitter.LanguageMetadata{
+			MajorVersion: uint8(g.LanguageMetadataMajor),
+			MinorVersion: uint8(g.LanguageMetadataMinor),
+			PatchVersion: uint8(g.LanguageMetadataPatch),
 		}
 	}
 

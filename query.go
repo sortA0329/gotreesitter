@@ -75,6 +75,8 @@ const (
 	predicateAnyNotEq
 	predicateAnyMatch
 	predicateAnyNotMatch
+	predicateSelectAdjacent
+	predicateStrip
 )
 
 // QueryPredicate is a post-match constraint attached to a pattern.
@@ -135,6 +137,22 @@ type QueryMatch struct {
 type QueryCapture struct {
 	Name string
 	Node *Node
+	// TextOverride, when non-empty, replaces the node's source text for
+	// downstream consumers. It is set by the #strip! directive.
+	TextOverride string
+}
+
+// Text returns the effective text for this capture. If TextOverride is set
+// (e.g. by the #strip! directive), it is returned. Otherwise the node's
+// source text is returned.
+func (c QueryCapture) Text(source []byte) string {
+	if c.TextOverride != "" {
+		return c.TextOverride
+	}
+	if c.Node == nil {
+		return ""
+	}
+	return c.Node.Text(source)
 }
 
 type queryUnknownNodeTypeError struct {
@@ -497,6 +515,7 @@ func (q *Query) matchPattern(pat *Pattern, node *Node, lang *Language, source []
 	if !q.matchesPredicates(pat.predicates, captures, lang, source) {
 		return nil, false
 	}
+	captures = q.applyDirectives(pat.predicates, captures, source)
 	return captures, true
 }
 
@@ -739,7 +758,7 @@ func (q *Query) matchesPredicates(predicates []QueryPredicate, captures []QueryC
 				return false
 			}
 
-		case predicateSet, predicateOffset:
+		case predicateSet, predicateOffset, predicateSelectAdjacent, predicateStrip:
 			// Directives do not affect whether a match exists.
 			continue
 
@@ -749,6 +768,95 @@ func (q *Query) matchesPredicates(predicates []QueryPredicate, captures []QueryC
 	}
 
 	return true
+}
+
+// applyDirectives applies capture-modifying directives (#select-adjacent!,
+// #strip!) to the captures list after a match has been accepted.
+func (q *Query) applyDirectives(predicates []QueryPredicate, captures []QueryCapture, source []byte) []QueryCapture {
+	for _, pred := range predicates {
+		switch pred.kind {
+		case predicateSelectAdjacent:
+			captures = applySelectAdjacent(pred, captures)
+		case predicateStrip:
+			captures = applyStrip(pred, captures, source)
+		}
+	}
+	return captures
+}
+
+// applySelectAdjacent filters the captures named by pred.leftCapture to only
+// those that are byte-adjacent to at least one capture named by
+// pred.rightCapture. "Adjacent" means one node's end byte equals the other's
+// start byte.
+func applySelectAdjacent(pred QueryPredicate, captures []QueryCapture) []QueryCapture {
+	itemsName := pred.leftCapture
+	anchorName := pred.rightCapture
+
+	// Collect anchor byte boundaries.
+	type boundary struct {
+		start, end uint32
+	}
+	var anchors []boundary
+	for _, c := range captures {
+		if c.Name == anchorName && c.Node != nil {
+			anchors = append(anchors, boundary{c.Node.StartByte(), c.Node.EndByte()})
+		}
+	}
+	if len(anchors) == 0 {
+		// No anchors — remove all items captures.
+		out := captures[:0]
+		for _, c := range captures {
+			if c.Name != itemsName {
+				out = append(out, c)
+			}
+		}
+		return out
+	}
+
+	isAdjacent := func(n *Node) bool {
+		if n == nil {
+			return false
+		}
+		nStart := n.StartByte()
+		nEnd := n.EndByte()
+		for _, a := range anchors {
+			if nEnd == a.start || nStart == a.end {
+				return true
+			}
+		}
+		return false
+	}
+
+	out := make([]QueryCapture, 0, len(captures))
+	for _, c := range captures {
+		if c.Name == itemsName {
+			if isAdjacent(c.Node) {
+				out = append(out, c)
+			}
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// applyStrip applies the #strip! directive: for each capture named by
+// pred.leftCapture, it sets TextOverride to the node's text with all
+// matches of pred.regex removed.
+func applyStrip(pred QueryPredicate, captures []QueryCapture, source []byte) []QueryCapture {
+	if pred.regex == nil {
+		return captures
+	}
+	for i := range captures {
+		if captures[i].Name == pred.leftCapture && captures[i].Node != nil {
+			text := captures[i].Node.Text(source)
+			stripped := pred.regex.ReplaceAllString(text, "")
+			if stripped != text {
+				captures[i].TextOverride = stripped
+			}
+		}
+	}
+	return captures
 }
 
 func captureNodes(name string, captures []QueryCapture) []*Node {
@@ -2390,6 +2498,71 @@ func (p *queryParser) parsePredicate() (QueryPredicate, error) {
 			kind:        predicateOffset,
 			leftCapture: capName,
 			offset:      nums,
+		}, nil
+
+	case "#select-adjacent!":
+		p.skipWhitespaceAndComments()
+		items, itemsIsCapture, err := p.readPredicateArg()
+		if err != nil {
+			return QueryPredicate{}, err
+		}
+		if !itemsIsCapture {
+			return QueryPredicate{}, fmt.Errorf("query: #select-adjacent! first argument must be a capture")
+		}
+
+		p.skipWhitespaceAndComments()
+		anchor, anchorIsCapture, err := p.readPredicateArg()
+		if err != nil {
+			return QueryPredicate{}, err
+		}
+		if !anchorIsCapture {
+			return QueryPredicate{}, fmt.Errorf("query: #select-adjacent! second argument must be a capture")
+		}
+		p.skipWhitespaceAndComments()
+		if p.pos >= len(p.input) || p.input[p.pos] != ')' {
+			return QueryPredicate{}, fmt.Errorf("query: expected ')' to close predicate at position %d", p.pos)
+		}
+		p.pos++ // consume ')'
+
+		return QueryPredicate{
+			kind:         predicateSelectAdjacent,
+			leftCapture:  items,
+			rightCapture: anchor,
+		}, nil
+
+	case "#strip!":
+		p.skipWhitespaceAndComments()
+		capName, capIsCapture, err := p.readPredicateArg()
+		if err != nil {
+			return QueryPredicate{}, err
+		}
+		if !capIsCapture {
+			return QueryPredicate{}, fmt.Errorf("query: #strip! first argument must be a capture")
+		}
+
+		p.skipWhitespaceAndComments()
+		pattern, patternIsCapture, err := p.readPredicateArg()
+		if err != nil {
+			return QueryPredicate{}, err
+		}
+		if patternIsCapture {
+			return QueryPredicate{}, fmt.Errorf("query: #strip! second argument must be a string literal (regex)")
+		}
+		p.skipWhitespaceAndComments()
+		if p.pos >= len(p.input) || p.input[p.pos] != ')' {
+			return QueryPredicate{}, fmt.Errorf("query: expected ')' to close predicate at position %d", p.pos)
+		}
+		p.pos++ // consume ')'
+
+		rx, err := regexp.Compile(pattern)
+		if err != nil {
+			return QueryPredicate{}, fmt.Errorf("query: invalid regex in #strip!: %w", err)
+		}
+		return QueryPredicate{
+			kind:        predicateStrip,
+			leftCapture: capName,
+			literal:     pattern,
+			regex:       rx,
 		}, nil
 
 	default:
