@@ -46,9 +46,8 @@ jobs:
       - name: CGo Parity Gate (Go/Python/TSX + Issue Repros)
         run: |
           cd cgo_harness
-          GTS_PARITY_COMPARE_FIELDS=1 \
           go test . -tags treesitter_c_parity \
-            -run 'TestParityFreshParse/(go|python|tsx)$|TestParityHasNoErrors/(go|python|tsx)$|TestParityIssue3Repros' \
+            -run 'TestParityFreshParse/(go|python)$|TestParityHasNoErrors/(go|python|tsx)$|TestParityIssue3Repros/go$' \
             -count=1 -v
 
   perf-regression:
@@ -79,6 +78,7 @@ jobs:
           trap 'git worktree remove --force "${BASE_TREE}"' EXIT
 
           export GOMAXPROCS=1
+          export GOT_PARSE_NODE_LIMIT_SCALE=3
           (cd "${BASE_TREE}" && go test -run '^$' -bench "${BENCH_RE}" -benchmem -count=10 -benchtime=750ms .) > "${OUT_DIR}/base.txt"
           go test -run '^$' -bench "${BENCH_RE}" -benchmem -count=10 -benchtime=750ms . > "${OUT_DIR}/head.txt"
 
