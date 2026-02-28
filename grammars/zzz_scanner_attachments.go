@@ -129,6 +129,7 @@ func init() {
 		"haskell":         HaskellExternalScanner{},
 		"vhdl":            VhdlExternalScanner{},
 		"html":            HTMLExternalScanner{},
+		"yaml":            YamlExternalScanner{},
 	}
 
 	// Register scanners in the embedded loader's registry so that direct

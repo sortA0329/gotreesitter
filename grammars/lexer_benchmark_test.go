@@ -1,7 +1,6 @@
 package grammars
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/odvcencio/gotreesitter"
@@ -132,34 +131,21 @@ func BenchmarkParse_Lua(b *testing.B) {
 	benchmarkParse(b, src, NewLuaTokenSourceOrEOF, LuaLanguage)
 }
 
-// --- YAML ---
-func BenchmarkTokenize_YAML(b *testing.B) {
-	src := []byte("key: value\nlist:\n  - one\n  - two\nnested:\n  a: 1\n  b: true\n")
-	benchmarkTokenize(b, src, NewYAMLTokenSourceOrEOF, YamlLanguage)
-}
-
+// --- YAML (uses DFA+ExternalScanner, not TokenSource) ---
 func BenchmarkParse_YAML(b *testing.B) {
 	src := []byte("key: value\nlist:\n  - one\n  - two\nnested:\n  a: 1\n  b: true\n")
-	benchmarkParse(b, src, NewYAMLTokenSourceOrEOF, YamlLanguage)
-}
-
-func BenchmarkTokenize_YAML_Large(b *testing.B) {
-	// ~10KB YAML file to validate O(n) pointAtOffset fix
-	var sb strings.Builder
-	for i := 0; i < 500; i++ {
-		sb.WriteString("key_")
-		sb.WriteString(strings.Repeat("x", 5))
-		sb.WriteString(": value_")
-		sb.WriteString(strings.Repeat("y", 5))
-		sb.WriteByte('\n')
+	lang := YamlLanguage()
+	parser := gotreesitter.NewParser(lang)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(src)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tree, err := parser.Parse(src)
+		if err != nil {
+			b.Fatal(err)
+		}
+		tree.Release()
 	}
-	src := []byte(sb.String())
-	benchmarkTokenize(b, src, NewYAMLTokenSourceOrEOF, YamlLanguage)
-}
-
-func BenchmarkSkipToByte_YAML(b *testing.B) {
-	src := []byte("key: value\nlist:\n  - one\n  - two\nnested:\n  a: 1\n  b: true\n")
-	benchmarkSkipToByte(b, src, NewYAMLTokenSourceOrEOF, YamlLanguage)
 }
 
 // --- TOML ---

@@ -56,20 +56,15 @@ var correctnessGoldens = map[string]string{
 	"scala":      "(compilation_unit (object_definition (identifier) (template_body (function_definition (identifier) (parameters (parameter (identifier) (type_identifier))) (type_identifier) (infix_expression (identifier) (operator_identifier) (integer_literal))))))",
 	"toml":       "(document (pair (bare_key) (integer)) (pair (bare_key) (string)) (pair (bare_key) (array (string) (string))))",
 	"typescript": "(program (function_declaration (identifier) (formal_parameters) (type_annotation (predefined_type)) (statement_block (return_statement (number)))))",
-	"yaml":       "(stream (document (block_node (block_mapping (block_mapping_pair (flow_node (plain_scalar (string_scalar))) (flow_node (plain_scalar (integer_scalar))))))))",
+	"yaml":       "(stream (document (block_node (block_mapping (block_mapping_pair (flow_node (plain_scalar (string_scalar))) (flow_node (plain_scalar (string_scalar)))) (block_mapping_pair (flow_node (plain_scalar (string_scalar))) (block_node (block_mapping (block_mapping_pair (flow_node (plain_scalar (string_scalar))) (flow_node (plain_scalar (string_scalar)))))))))))",
 }
 
 func TestCorrectnessSnapshots(t *testing.T) {
 	entries := AllLanguages()
+	t.Cleanup(func() { PurgeEmbeddedLanguageCache() })
 	entryByName := make(map[string]LangEntry, len(entries))
 	for _, e := range entries {
 		entryByName[e.Name] = e
-	}
-
-	reports := AuditParseSupport()
-	reportByName := make(map[string]ParseSupport, len(reports))
-	for _, r := range reports {
-		reportByName[r.Name] = r
 	}
 
 	for name, golden := range correctnessGoldens {
@@ -78,9 +73,10 @@ func TestCorrectnessSnapshots(t *testing.T) {
 			if !ok {
 				t.Fatalf("language %q not registered", name)
 			}
-			report := reportByName[name]
-			sample := parseSmokeSample(name)
+			t.Cleanup(func() { UnloadEmbeddedLanguage(entry.Name + ".bin") })
 			lang := entry.Language()
+			report := EvaluateParseSupport(entry, lang)
+			sample := parseSmokeSample(name)
 			parser := gotreesitter.NewParser(lang)
 			src := []byte(sample)
 
@@ -102,6 +98,7 @@ func TestCorrectnessSnapshots(t *testing.T) {
 			if tree == nil || tree.RootNode() == nil {
 				t.Fatal("parse returned nil root")
 			}
+			defer tree.Release()
 
 			got := sexpr(tree.RootNode(), lang)
 			if got != golden {

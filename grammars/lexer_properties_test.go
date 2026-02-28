@@ -21,7 +21,6 @@ func allLexerTestCases() []lexerTestCase {
 		{"html", []byte("<html><head><title>Test</title></head><body><p class=\"x\">Hello</p></body></html>"), NewHTMLTokenSourceOrEOF, HtmlLanguage},
 		{"json", []byte(`{"key": "value", "num": 42, "arr": [1, true, null]}`), NewJSONTokenSourceOrEOF, JsonLanguage},
 		{"lua", []byte("local x = 1\nfunction foo(a, b)\n  return a + b\nend\nprint(foo(1, 2))\n"), NewLuaTokenSourceOrEOF, LuaLanguage},
-		{"yaml", []byte("key: value\nlist:\n  - one\n  - two\nnested:\n  a: 1\n  b: true\n"), NewYAMLTokenSourceOrEOF, YamlLanguage},
 		{"toml", []byte("[section]\nkey = \"value\"\nnum = 42\narr = [1, 2, 3]\n"), NewTomlTokenSourceOrEOF, TomlLanguage},
 		{"authzed", []byte("definition user {}\n\ndefinition document {\n  relation viewer: user\n  permission view = viewer\n}\n"), NewAuthzedTokenSourceOrEOF, AuthzedLanguage},
 	}

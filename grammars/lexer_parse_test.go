@@ -157,29 +157,6 @@ end
 			minNodes: 2,
 		},
 		{
-			name: "yaml_complex",
-			src: []byte(`name: myapp
-version: "1.0"
-debug: true
-count: 42
-
-services:
-  web:
-    port: 8080
-    host: localhost
-  db:
-    port: 5432
-    name: mydb
-
-tags:
-  - production
-  - stable
-`),
-			factory:  NewYAMLTokenSourceOrEOF,
-			lang:     YamlLanguage,
-			minNodes: 1,
-		},
-		{
 			name: "toml_sections",
 			src: []byte(`[package]
 name = "myapp"

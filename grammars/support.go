@@ -139,10 +139,6 @@ func defaultTokenSourceFactory(name string) func(src []byte, lang *gotreesitter.
 		return func(src []byte, lang *gotreesitter.Language) gotreesitter.TokenSource {
 			return NewTomlTokenSourceOrEOF(src, lang)
 		}
-	case "yaml":
-		return func(src []byte, lang *gotreesitter.Language) gotreesitter.TokenSource {
-			return NewYAMLTokenSourceOrEOF(src, lang)
-		}
 	default:
 		return nil
 	}

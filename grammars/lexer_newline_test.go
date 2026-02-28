@@ -44,17 +44,21 @@ func TestCNewlinePreprocToken(t *testing.T) {
 }
 
 func TestYAMLNewlineBlTokens(t *testing.T) {
+	// YAML now uses an ExternalScanner (not TokenSource), so we test via
+	// the parser's DFA+ExternalScanner path.
 	lang := YamlLanguage()
 	src := []byte("key: value\nother: data\n")
-	ts, err := NewYAMLTokenSource(src, lang)
+	parser := gotreesitter.NewParser(lang)
+	tree, err := parser.Parse(src)
 	if err != nil {
-		t.Fatalf("NewYAMLTokenSource: %v", err)
+		t.Fatalf("parse failed: %v", err)
 	}
-	tokens := collectAllTokens(ts, 100)
-	names := tokenNames(tokens, lang)
-
-	if !containsTokenName(names, "_bl") {
-		t.Errorf("expected _bl tokens for YAML newlines, got tokens: %v", names)
+	if tree == nil || tree.RootNode() == nil {
+		t.Fatal("nil tree")
+	}
+	defer tree.Release()
+	if tree.RootNode().HasError() {
+		t.Errorf("YAML parse produced errors")
 	}
 }
 

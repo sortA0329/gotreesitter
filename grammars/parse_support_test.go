@@ -46,7 +46,7 @@ var parseSmokeSamples = map[string]string{
 	"toml":              "a = 1\ntitle = \"hello\"\ntags = [\"x\", \"y\"]\n",
 	"tsx":               "const x = <div/>;\n",
 	"typescript":        "function f(): number { return 1; }\n",
-	"yaml":              "a: 1\n",
+	"yaml":              "key: value\nnested:\n  inner: data\n",
 	"zig":               "const x: i32 = 1;\n",
 	"scala":             "object Main { def f(x: Int): Int = x + 1 }\n",
 	"elixir":            "defmodule M do\n  def f(x), do: x\nend\n",
@@ -165,25 +165,19 @@ func parseSmokeDegradedReason(report ParseSupport, name string) string {
 
 func TestSupportedLanguagesParseSmoke(t *testing.T) {
 	entries := AllLanguages()
-	entryByName := make(map[string]LangEntry, len(entries))
-	for _, entry := range entries {
-		entryByName[entry.Name] = entry
-	}
+	t.Cleanup(func() { PurgeEmbeddedLanguageCache() })
 
-	reports := AuditParseSupport()
-	for _, report := range reports {
+	for _, entry := range entries {
+		lang := entry.Language()
+		report := EvaluateParseSupport(entry, lang)
 		sample := parseSmokeSample(report.Name)
 
 		if report.Backend == ParseBackendUnsupported {
 			t.Logf("skip %s: %s", report.Name, report.Reason)
+			UnloadEmbeddedLanguage(entry.Name + ".bin")
 			continue
 		}
 
-		entry, ok := entryByName[report.Name]
-		if !ok {
-			t.Fatalf("missing registry entry for %q", report.Name)
-		}
-		lang := entry.Language()
 		parser := gotreesitter.NewParser(lang)
 		source := []byte(sample)
 
@@ -207,7 +201,10 @@ func TestSupportedLanguagesParseSmoke(t *testing.T) {
 		}
 		if tree.RootNode().HasError() {
 			t.Logf("%s parse smoke sample produced syntax errors (degraded): %s", report.Name, parseSmokeDegradedReason(report, report.Name))
-			continue
 		}
+		tree.Release()
+
+		// Release decoded grammar to keep memory bounded to ~1 grammar at a time.
+		UnloadEmbeddedLanguage(entry.Name + ".bin")
 	}
 }
