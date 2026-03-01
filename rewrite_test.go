@@ -226,6 +226,80 @@ func TestRewriteApplyToTreeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRewriteApplyMultiEditCoordinatesShift(t *testing.T) {
+	source := []byte("a\nb\nc\n")
+	rw := NewRewriter(source)
+	rw.ReplaceRange(0, 1, []byte("A\nA"))
+	rw.ReplaceRange(4, 5, []byte("C"))
+
+	newSource, edits, err := rw.Apply()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := string(newSource), "A\nA\nb\nC\n"; got != want {
+		t.Fatalf("newSource = %q, want %q", got, want)
+	}
+	if len(edits) != 2 {
+		t.Fatalf("expected 2 edits, got %d", len(edits))
+	}
+
+	second := edits[1]
+	if second.StartByte != 6 || second.OldEndByte != 7 || second.NewEndByte != 7 {
+		t.Fatalf("second edit bytes = [%d,%d)->%d, want [6,7)->7", second.StartByte, second.OldEndByte, second.NewEndByte)
+	}
+	if second.StartPoint.Row != 3 || second.StartPoint.Column != 0 {
+		t.Fatalf("second StartPoint = (%d,%d), want (3,0)", second.StartPoint.Row, second.StartPoint.Column)
+	}
+	if second.OldEndPoint.Row != 3 || second.OldEndPoint.Column != 1 {
+		t.Fatalf("second OldEndPoint = (%d,%d), want (3,1)", second.OldEndPoint.Row, second.OldEndPoint.Column)
+	}
+	if second.NewEndPoint.Row != 3 || second.NewEndPoint.Column != 1 {
+		t.Fatalf("second NewEndPoint = (%d,%d), want (3,1)", second.NewEndPoint.Row, second.NewEndPoint.Column)
+	}
+}
+
+func TestRewriteApplyToTreeMultipleEditsNoDoubleShift(t *testing.T) {
+	lang := buildArithmeticLanguage()
+	parser := NewParser(lang)
+	source := []byte("1+2+3")
+	tree := mustParse(t, parser, source)
+
+	rw := NewRewriter(source)
+	rw.ReplaceRange(0, 1, []byte("10"))
+	rw.ReplaceRange(4, 5, []byte("30"))
+
+	newSource, err := rw.ApplyToTree(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(newSource), "10+2+30"; got != want {
+		t.Fatalf("newSource = %q, want %q", got, want)
+	}
+
+	edits := tree.Edits()
+	if len(edits) != 2 {
+		t.Fatalf("expected 2 tree edits, got %d", len(edits))
+	}
+	if edits[1].StartByte != 5 || edits[1].OldEndByte != 6 || edits[1].NewEndByte != 7 {
+		t.Fatalf("second tree edit bytes = [%d,%d)->%d, want [5,6)->7",
+			edits[1].StartByte, edits[1].OldEndByte, edits[1].NewEndByte)
+	}
+	if edits[1].StartPoint.Row != 0 || edits[1].StartPoint.Column != 5 {
+		t.Fatalf("second tree edit StartPoint = (%d,%d), want (0,5)",
+			edits[1].StartPoint.Row, edits[1].StartPoint.Column)
+	}
+
+	incrTree := mustParseIncremental(t, parser, newSource, tree)
+	if incrTree.RootNode() == nil {
+		t.Fatal("incremental parse returned nil root")
+	}
+	fullTree := mustParse(t, parser, newSource)
+	if got, want := incrTree.RootNode().Text(newSource), fullTree.RootNode().Text(newSource); got != want {
+		t.Fatalf("incremental root text = %q, full root text = %q", got, want)
+	}
+}
+
 func TestRewriteEmptyRewriter(t *testing.T) {
 	source := []byte("unchanged")
 	rw := NewRewriter(source)

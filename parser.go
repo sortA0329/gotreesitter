@@ -152,8 +152,12 @@ func WithProfiling() ParseOption {
 
 // ParseResult is returned by ParseWith.
 type ParseResult struct {
-	Tree    *Tree
+	Tree *Tree
+	// Profile is populated only when ParseWith uses WithProfiling for
+	// incremental parsing.
 	Profile IncrementalParseProfile
+	// ProfileAvailable reports whether Profile contains attribution data.
+	ProfileAvailable bool
 }
 
 type parseReuseState struct {
@@ -843,35 +847,35 @@ func (p *Parser) ParseWith(source []byte, opts ...ParseOption) (ParseResult, err
 		if cfg.oldTree != nil {
 			if cfg.tokenSource != nil {
 				tree, profile, err := p.ParseIncrementalWithTokenSourceProfiled(source, cfg.oldTree, cfg.tokenSource)
-				return ParseResult{Tree: tree, Profile: profile}, err
+				return ParseResult{Tree: tree, Profile: profile, ProfileAvailable: true}, err
 			}
 			tree, profile, err := p.ParseIncrementalProfiled(source, cfg.oldTree)
-			return ParseResult{Tree: tree, Profile: profile}, err
+			return ParseResult{Tree: tree, Profile: profile, ProfileAvailable: true}, err
 		}
 		// Full parses do not currently expose attribution data.
 		if cfg.tokenSource != nil {
 			tree, err := p.ParseWithTokenSource(source, cfg.tokenSource)
-			return ParseResult{Tree: tree}, err
+			return ParseResult{Tree: tree, ProfileAvailable: false}, err
 		}
 		tree, err := p.Parse(source)
-		return ParseResult{Tree: tree}, err
+		return ParseResult{Tree: tree, ProfileAvailable: false}, err
 	}
 
 	if cfg.oldTree != nil {
 		if cfg.tokenSource != nil {
 			tree, err := p.ParseIncrementalWithTokenSource(source, cfg.oldTree, cfg.tokenSource)
-			return ParseResult{Tree: tree}, err
+			return ParseResult{Tree: tree, ProfileAvailable: false}, err
 		}
 		tree, err := p.ParseIncremental(source, cfg.oldTree)
-		return ParseResult{Tree: tree}, err
+		return ParseResult{Tree: tree, ProfileAvailable: false}, err
 	}
 
 	if cfg.tokenSource != nil {
 		tree, err := p.ParseWithTokenSource(source, cfg.tokenSource)
-		return ParseResult{Tree: tree}, err
+		return ParseResult{Tree: tree, ProfileAvailable: false}, err
 	}
 	tree, err := p.Parse(source)
-	return ParseResult{Tree: tree}, err
+	return ParseResult{Tree: tree, ProfileAvailable: false}, err
 }
 
 // ErrNoLanguage is returned when a Parser has no language configured.
@@ -1536,6 +1540,10 @@ func parseStackDepth(sourceLen int) int {
 func parseNodeLimit(sourceLen int) int {
 	// Keep the default budget high enough for large full-parse corpora so
 	// correctness gates can run without relying on external scale overrides.
+	// The 100k floor avoids premature truncation on small/medium inputs
+	// during short-lived ambiguity spikes.
+	// The sourceLen*40 budget keeps corpus parity green while GLR/node
+	// pressure is still being optimized.
 	limit := max(100_000, sourceLen*40)
 	scale := parseNodeLimitScaleFactor()
 	if scale <= 1 {

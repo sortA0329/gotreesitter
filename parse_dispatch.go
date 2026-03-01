@@ -1,5 +1,8 @@
 package gotreesitter
 
+// dispatchParse is a best-effort parse helper for highlighter/tagger flows.
+// On parser error it intentionally returns an empty tree so editor features
+// degrade gracefully instead of failing hard.
 func dispatchParse(p *Parser, source []byte, oldTree *Tree, tsFactory func([]byte) TokenSource, lang *Language) *Tree {
 	var tree *Tree
 	var err error
