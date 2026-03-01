@@ -11,10 +11,8 @@ import (
 )
 
 var parseSmokeKnownDegraded = map[string]string{
-	"disassembly": "external scanner/token classification mismatch causes root ERROR node on smoke sample",
-	"norg":        "requires external scanner (122 tokens) not yet implemented",
+	"norg": "requires external scanner (122 tokens) not yet implemented",
 	"vimdoc":      "DFA cannot parse vimdoc grammar (0 external tokens, root always errors)",
-	"hurl":        "DFA lexer cannot handle this grammar",
 }
 
 func parseSmokeDegradedReason(report grammars.ParseSupport, name string) string {

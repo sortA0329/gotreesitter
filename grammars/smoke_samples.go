@@ -57,7 +57,7 @@ var ParseSmokeSamples = map[string]string{
 
 	// RE/binary analysis grammars
 	"asm":         "main:\n    mov eax, 1\n    ret\n",
-	"disassembly": "0000000000001000 <main>:\n    1000: 55                   push   rbp\n",
+	"disassembly": "0x400601 <__libc_csu_init+33>   sub    %r12,%rbp\n1000: 55                   push   rbp\n",
 	"wat":         "(module\n  (func $add (param i32 i32) (result i32)\n    local.get 0\n    local.get 1\n    i32.add))\n",
 
 	// Phase 2: DFA-only languages
