@@ -136,6 +136,7 @@ var ParseSmokeSamples = map[string]string{
 	"prolog":  "parent(tom, bob).\n",
 	"mojo":    "fn main():\n    print(1)\n",
 	"wolfram": "1 + 2\n",
+	"norg":    "* Heading\n  Some text here.\n",
 }
 
 // ParseSmokeSample returns the smoke test sample for the given language,

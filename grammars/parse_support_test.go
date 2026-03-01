@@ -7,8 +7,7 @@ import (
 )
 
 var parseSmokeKnownDegraded = map[string]string{
-	"norg": "requires external scanner (122 tokens) not yet implemented",
-	"vimdoc":      "DFA cannot parse vimdoc grammar (0 external tokens, root always errors)",
+	"vimdoc": "DFA cannot parse vimdoc grammar (0 external tokens, root always errors)",
 }
 
 func parseSmokeDegradedReason(report ParseSupport, name string) string {
