@@ -45,12 +45,12 @@ const (
 	// headroom while avoiding very large retained scratch slabs.
 	maxRetainedStackEntryCap = 512 * 1024
 	// Hard cap on concurrently retained GLR stacks in parseInternal.
-	// Matches tree-sitter C runtime order-of-magnitude behavior while
-	// preserving enough alternatives for high-conflict grammars.
+	// This is intentionally higher than tree-sitter C's MAX_VERSION_COUNT (6)
+	// to preserve alternatives on highly-ambiguous grammars.
 	maxGLRStacks = 64
-	// Tree-sitter's C runtime caps links per stack node at 8.
-	// Keep the same cap to avoid turning per-key pruning into global-cap churn.
-	maxStacksPerMergeKey = 8
+	// Per-merge-key survivor cap. Tuned below 8 to reduce full-parse GLR churn
+	// while keeping corpus parity and correctness gates green.
+	maxStacksPerMergeKey = 6
 )
 
 type glrMergeScratch struct {
