@@ -40,8 +40,9 @@ func Generate(querySource, typeName, packageName, langName string) (string, erro
 
 	// Generate match structs for each pattern.
 	structNames := make([]string, len(patterns))
+	usedNames := make(map[string]int)
 	for i, p := range patterns {
-		structName := patternStructName(p, i, typeName)
+		structName := patternStructName(p, i, typeName, usedNames)
 		structNames[i] = structName
 
 		fmt.Fprintf(&b, "// %s is a typed match for pattern %d", structName, i)
@@ -229,6 +230,7 @@ func parsePattern(source string, pos int) (PatternInfo, int, error) {
 
 		case ch == ')' || ch == ']':
 			depth--
+			inQuantifier = false
 			i++
 			if depth == 0 {
 				// Collect captures after the closing paren and merge with existing.
@@ -253,6 +255,7 @@ func parsePattern(source string, pos int) (PatternInfo, int, error) {
 			if name != "_" && name != "" {
 				p.Captures = addCapture(p.Captures, name, inQuantifier)
 			}
+			inQuantifier = false // quantifier applies to one capture
 
 		case ch == '*' || ch == '+':
 			inQuantifier = true
@@ -262,13 +265,24 @@ func parsePattern(source string, pos int) (PatternInfo, int, error) {
 			i++
 
 		case ch == '#':
-			// Predicate — skip to closing paren.
-			for i < len(source) && source[i] != ')' {
+			// Predicate — skip to matching ')', respecting strings and nesting.
+			// The opening '(' was already processed above (depth++), so we
+			// track our own predicate depth and decrement the outer depth.
+			pDepth := 1
+			for i < len(source) && pDepth > 0 {
+				if source[i] == '"' {
+					_, newI, _ := skipString(source, i)
+					i = newI
+					continue
+				}
+				if source[i] == '(' {
+					pDepth++
+				} else if source[i] == ')' {
+					pDepth--
+				}
 				i++
 			}
-			if i < len(source) {
-				i++ // skip ')'
-			}
+			depth-- // undo the depth++ from the '(' that preceded '#'
 
 		case ch == '"':
 			// String — skip.
@@ -460,12 +474,19 @@ func toPascalCase(s string) string {
 }
 
 // patternStructName generates a unique struct name for a pattern.
-func patternStructName(p PatternInfo, index int, queryTypeName string) string {
+func patternStructName(p PatternInfo, index int, queryTypeName string, used map[string]int) string {
+	var base string
 	if p.RootNodeType != "" {
-		name := toPascalCase(p.RootNodeType) + "Match"
-		return name
+		base = toPascalCase(p.RootNodeType) + "Match"
+	} else {
+		base = fmt.Sprintf("%sPattern%dMatch", queryTypeName, index)
 	}
-	return fmt.Sprintf("%sPattern%dMatch", queryTypeName, index)
+	count := used[base]
+	used[base]++
+	if count > 0 {
+		return fmt.Sprintf("%s%d", base, count)
+	}
+	return base
 }
 
 // goStringLiteral returns a Go source string literal.

@@ -208,6 +208,68 @@ func TestExtractPatternsWithPredicates(t *testing.T) {
 	}
 }
 
+func TestGenerateDuplicateRootType(t *testing.T) {
+	query := `(function_declaration name: (identifier) @name)
+(function_declaration body: (block) @body)`
+
+	code, err := Generate(query, "Funcs", "queries", "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Both patterns have root type function_declaration.
+	// The second should get a disambiguated name.
+	if strings.Count(code, "type FunctionDeclarationMatch struct") > 1 {
+		t.Error("duplicate FunctionDeclarationMatch struct names")
+	}
+	// First pattern should still be FunctionDeclarationMatch.
+	if !strings.Contains(code, "FunctionDeclarationMatch") {
+		t.Error("expected FunctionDeclarationMatch for first pattern")
+	}
+}
+
+func TestGenerateQuantifierReset(t *testing.T) {
+	// @params is after +, so should be multiple.
+	// @body is a sibling AFTER the quantified group, should NOT be multiple.
+	query := `(function_declaration
+  (parameter_list (parameter)+ @params)
+  body: (block) @body)`
+
+	code, err := Generate(query, "Funcs", "queries", "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(code, "Params []*gotreesitter.Node") {
+		t.Error("expected Params to be []*Node (multiple)")
+	}
+	if !strings.Contains(code, "Body *gotreesitter.Node") {
+		t.Errorf("expected Body to be *Node (singular), got multiple")
+	}
+}
+
+func TestGeneratePredicateWithParenInString(t *testing.T) {
+	// Inline predicate (depth > 0) with ')' inside a string literal.
+	// This exercises the '#' handler inside parsePattern, not skipPredicates.
+	query := `(call_expression function: (identifier) @fn (#eq? @fn "foo)") arguments: (argument_list) @args)`
+
+	patterns, err := extractPatterns(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(patterns) != 1 {
+		t.Fatalf("expected 1 pattern, got %d", len(patterns))
+	}
+	if patterns[0].RootNodeType != "call_expression" {
+		t.Errorf("RootNodeType = %q, want %q", patterns[0].RootNodeType, "call_expression")
+	}
+	// Should have both captures.
+	if len(patterns[0].Captures) < 2 {
+		t.Errorf("expected at least 2 captures, got %d", len(patterns[0].Captures))
+	}
+}
+
 func TestExtractPatternsAnonymousCapture(t *testing.T) {
 	query := `(identifier) @_`
 
