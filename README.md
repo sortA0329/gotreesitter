@@ -440,7 +440,7 @@ Test suite covers: smoke tests (206 grammars), golden S-expression snapshots, hi
 
 ## Roadmap
 
-v0.5.0 — 206 grammars, GLR parser, incremental reparsing, query engine, tree cursor, highlighting, tagging, ABI 15 support, injection parser, typed query codegen, CST rewriter.
+v0.6.0 — 206 grammars, GLR parser, incremental reparsing, query engine, tree cursor, highlighting, tagging, ABI 15 support, injection parser, typed query codegen, CST rewriter, and tightened parity/perf gates.
 
 Next:
 - Corpus parity testing against C tree-sitter reference output
