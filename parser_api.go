@@ -11,6 +11,19 @@ type parseConfig struct {
 	profiling   bool
 }
 
+const fullParseRetryMaxGLRStacks = 8
+
+type resettableTokenSource interface {
+	Reset(source []byte)
+}
+
+func shouldRetryFullParse(tree *Tree) bool {
+	if tree == nil {
+		return false
+	}
+	return tree.ParseStopReason() == ParseStopNoStacksAlive
+}
+
 // ParseOption configures ParseWith behavior.
 type ParseOption func(*parseConfig)
 
@@ -136,7 +149,21 @@ func (p *Parser) Parse(source []byte) (*Tree, error) {
 	if p.language.ExternalScanner != nil {
 		ts.externalPayload = p.language.ExternalScanner.Create()
 	}
-	return p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil), nil
+	tree := p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil, 0)
+	if parseMaxGLRStacksValue() < fullParseRetryMaxGLRStacks && shouldRetryFullParse(tree) {
+		retryLexer := NewLexer(p.language.LexStates, source)
+		retryTS := &dfaTokenSource{
+			lexer:             retryLexer,
+			language:          p.language,
+			lookupActionIndex: p.lookupActionIndex,
+			hasKeywordState:   p.hasKeywordState,
+		}
+		if p.language.ExternalScanner != nil {
+			retryTS.externalPayload = p.language.ExternalScanner.Create()
+		}
+		tree = p.parseInternal(source, p.wrapIncludedRanges(retryTS), nil, nil, arenaClassFull, nil, fullParseRetryMaxGLRStacks)
+	}
+	return tree, nil
 }
 
 // ParseWithTokenSource parses source using a custom token source.
@@ -146,7 +173,14 @@ func (p *Parser) ParseWithTokenSource(source []byte, ts TokenSource) (*Tree, err
 	if err := p.checkLanguageCompatible(); err != nil {
 		return nil, err
 	}
-	return p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil), nil
+	tree := p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil, 0)
+	if parseMaxGLRStacksValue() < fullParseRetryMaxGLRStacks && shouldRetryFullParse(tree) {
+		if resettable, ok := ts.(resettableTokenSource); ok {
+			resettable.Reset(source)
+			tree = p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil, fullParseRetryMaxGLRStacks)
+		}
+	}
+	return tree, nil
 }
 
 // ParseIncremental re-parses source after edits were applied to oldTree.

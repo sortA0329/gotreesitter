@@ -45,8 +45,8 @@ const (
 	// headroom while avoiding very large retained scratch slabs.
 	maxRetainedStackEntryCap = 512 * 1024
 	// Hard cap on concurrently retained GLR stacks in parseInternal.
-	// Match tree-sitter C's MAX_VERSION_COUNT (6) to constrain GLR fan-out
-	// while retaining a small set of alternatives for ambiguous inputs.
+	// Match tree-sitter C's MAX_VERSION_COUNT (6) for the fast path.
+	// Full parses that stop with no live stacks can retry once at a higher cap.
 	maxGLRStacks = 6
 	// Per-merge-key survivor cap. Tuned below 8 to reduce full-parse GLR churn
 	// while keeping corpus parity and correctness gates green.

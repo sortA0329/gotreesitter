@@ -132,7 +132,7 @@ func (p *Parser) parseIncrementalInternal(source []byte, oldTree *Tree, ts Token
 	// All other token sources (DFA without external scanner, custom lexers)
 	// support efficient skipping via PointSkippableTokenSource.
 	if _, isDFA := ts.(*dfaTokenSource); isDFA && p.language != nil && p.language.ExternalScanner != nil {
-		return p.parseInternal(source, ts, nil, nil, arenaClassFull, timing)
+		return p.parseInternal(source, ts, nil, nil, arenaClassFull, timing, 0)
 	}
 
 	p.reuseMu.Lock()
@@ -147,7 +147,7 @@ func (p *Parser) parseIncrementalInternal(source []byte, oldTree *Tree, ts Token
 		reuse = p.reuseCursor.reset(oldTree, source, &p.reuseScratch)
 	}
 	arenaClass := incrementalArenaClassForSource(source)
-	tree := p.parseInternal(source, ts, reuse, oldTree, arenaClass, timing)
+	tree := p.parseInternal(source, ts, reuse, oldTree, arenaClass, timing, 0)
 	if reuse != nil {
 		if timing != nil {
 			reuseStart := time.Now()
@@ -199,7 +199,7 @@ func canReuseUnchangedTree(source []byte, oldTree *Tree, lang *Language) bool {
 // (state, symbol) pair, the parser forks: one stack per alternative.
 // Stacks that error out are dropped. Only duplicate stack versions are
 // merged; distinct alternatives are preserved.
-func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor, oldTree *Tree, arenaClass arenaClass, timing *incrementalParseTiming) *Tree {
+func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor, oldTree *Tree, arenaClass arenaClass, timing *incrementalParseTiming, maxStacksOverride int) *Tree {
 	var parseStart time.Time
 	if timing != nil {
 		parseStart = time.Now()
@@ -310,6 +310,9 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 		timing.maxStacksSeen = len(stacks)
 	}
 	maxStacks := parseMaxGLRStacksValue()
+	if maxStacksOverride > 0 && maxStacksOverride > maxStacks {
+		maxStacks = maxStacksOverride
+	}
 	mergePerKeyCap := maxStacksPerMergeKey
 	if reuse != nil {
 		// Incremental reparses benefit from tighter GLR retention because

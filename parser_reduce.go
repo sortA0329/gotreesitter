@@ -242,6 +242,9 @@ func (p *Parser) applyReduceActionFromGSS(s *glrStack, act ParseAction, anyReduc
 		parent.startPoint = span.startPoint
 		parent.endPoint = span.endPoint
 	}
+	// Extend parent span to cover leading/trailing extras — matches C
+	// tree-sitter where extras are invisible children contributing to span.
+	extendParentSpanToWindow(parent, windowEntries, 0, actualEnd, trailingExtras, shouldUseRawSpan)
 	*nodeCount++
 
 	gotoState := p.lookupGoto(topState, act.Symbol)
@@ -348,6 +351,57 @@ func computeReduceRawSpan(entries []stackEntry, start, end int) reduceRawSpan {
 		span.endPoint = lastRaw.endPoint
 	}
 	return span
+}
+
+// extendParentSpanToWindow widens the parent node's [startByte, endByte] only
+// for leading/trailing extras around the reduced structural children.
+// Keeping this extras-only avoids inflating spans due to internal invisible
+// nodes while still matching C runtime range behavior for extras padding.
+func extendParentSpanToWindow(parent *Node, entries []stackEntry, start, actualEnd int, trailingExtras []*Node, includeInvisibleWindow bool) {
+	if includeInvisibleWindow {
+		// Leaf reductions can drop structural invisible children. Include the
+		// full reduce window so parent ranges still match C runtime behavior.
+		for i := start; i < actualEnd; i++ {
+			n := entries[i].node
+			if n == nil {
+				continue
+			}
+			if n.startByte < parent.startByte {
+				parent.startByte = n.startByte
+				parent.startPoint = n.startPoint
+			}
+			if n.endByte > parent.endByte {
+				parent.endByte = n.endByte
+				parent.endPoint = n.endPoint
+			}
+		}
+	} else {
+		// Leading extras: extend backward until the first structural child.
+		for i := start; i < actualEnd; i++ {
+			n := entries[i].node
+			if n == nil {
+				continue
+			}
+			if !n.isExtra {
+				break
+			}
+			if n.startByte < parent.startByte {
+				parent.startByte = n.startByte
+				parent.startPoint = n.startPoint
+			}
+		}
+	}
+	// Trailing extras: extend forward for any shifted trailing extras.
+	for i := range trailingExtras {
+		n := trailingExtras[i]
+		if n == nil {
+			continue
+		}
+		if n.endByte > parent.endByte {
+			parent.endByte = n.endByte
+			parent.endPoint = n.endPoint
+		}
+	}
 }
 
 func (p *Parser) buildReduceChildren(entries []stackEntry, start, end, childCount int, productionID uint16, arena *nodeArena) ([]*Node, []FieldID) {
@@ -501,6 +555,9 @@ func (p *Parser) applyReduceAction(s *glrStack, act ParseAction, anyReduced *boo
 		parent.startPoint = span.startPoint
 		parent.endPoint = span.endPoint
 	}
+	// Extend parent span to cover leading/trailing extras — matches C
+	// tree-sitter where extras are invisible children contributing to span.
+	extendParentSpanToWindow(parent, entries, window.start, window.actualEnd, trailingExtras, shouldUseRawSpan)
 	*nodeCount++
 
 	gotoState := p.lookupGoto(window.topState, act.Symbol)
