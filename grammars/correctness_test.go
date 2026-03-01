@@ -43,7 +43,7 @@ var correctnessGoldens = map[string]string{
 	"css":        "(stylesheet (rule_set (selectors (tag_name)) (block (declaration (property_name) (plain_value)))))",
 	"elixir":     "(source (call (identifier) (arguments (alias)) (do_block (call (identifier) (arguments (call (identifier) (arguments (identifier))) (keywords (pair (keyword) (identifier))))))))",
 	"go":         "(source_file (package_clause (package_identifier)) (function_declaration (identifier) (parameter_list) (block (statement_list (expression_statement (call_expression (identifier) (argument_list (int_literal))))))))",
-	"html":       "(document (element (start_tag (tag_name)) (element (start_tag (tag_name)) (text) (end_tag (tag_name))) (end_tag (tag_name))) (text))",
+	"html":       "(document (element (start_tag (tag_name)) (element (start_tag (tag_name)) (text) (end_tag (tag_name))) (end_tag (tag_name))))",
 	"java":       "(program (class_declaration (identifier) (class_body (field_declaration (integral_type) (variable_declarator (identifier))))))",
 	"javascript": "(program (function_declaration (identifier) (formal_parameters) (statement_block (return_statement (number)))) (lexical_declaration (variable_declarator (identifier) (arrow_function (formal_parameters) (binary_expression (identifier) (number))))))",
 	"json":       "(document (object (pair (string (string_content)) (number))))",

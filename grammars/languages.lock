@@ -27,3 +27,28 @@ elixir https://github.com/elixir-lang/tree-sitter-elixir d24cecee673c4c770f797ba
 graphql https://github.com/bkegley/tree-sitter-graphql 5e66e961eee421786bdda8495ed1db045e06b5fe src .graphql,.gql
 hcl https://github.com/tree-sitter-grammars/tree-sitter-hcl 64ad62785d442eb4d45df3a1764962dafd5bc98b src .hcl,.tf,.tfvars
 nix https://github.com/nix-community/tree-sitter-nix eabf96807ea4ab6d6c7f09b671a88cd483542840 src .nix
+
+# === top50 correctness lock expansion ===
+c_sharp https://github.com/tree-sitter/tree-sitter-c-sharp 88366631d598ce6595ec655ce1591b315cffb14c src .cs
+cmake https://github.com/uyha/tree-sitter-cmake c7b2a71e7f8ecb167fad4c97227c838439280175 src
+dart https://github.com/UserNobody14/tree-sitter-dart 81638dbbdb76a0e88ea8c31b95ec76b9625ddb84 src
+elm https://github.com/elm-tooling/tree-sitter-elm 6d9511c28181db66daee4e883f811f6251220943 src
+erlang https://github.com/WhatsApp/tree-sitter-erlang f21023bbd6cd30cadbc793d80ae4d990d9be86fc src
+gomod https://github.com/camdencheek/tree-sitter-go-mod 2e886870578eeba1927a2dc4bd2e2b3f598c5f9a src
+haskell https://github.com/tree-sitter/tree-sitter-haskell 0975ef72fc3c47b530309ca93937d7d143523628 src .hs,.lhs
+ini https://github.com/justinmk/tree-sitter-ini e4018b5176132b4f3c5d6e61cea383f42288d0f5 src .ini,.cfg,.conf
+json5 https://github.com/Joakker/tree-sitter-json5 aa630ef48903ab99e406a8acd2e2933077cc34e1 src .json5
+julia https://github.com/tree-sitter/tree-sitter-julia e0f9dcd180fdcfcfa8d79a3531e11d99e79321d3 src .jl
+make https://github.com/tree-sitter-grammars/tree-sitter-make 70613f3d812cbabbd7f38d104d60a409c4008b43 src
+markdown https://github.com/tree-sitter-grammars/tree-sitter-markdown f969cd3ae3f9fbd4e43205431d0ae286014c05b5 tree-sitter-markdown/src .md
+objc https://github.com/tree-sitter-grammars/tree-sitter-objc 181a81b8f23a2d593e7ab4259981f50122909fda src .m
+ocaml https://github.com/tree-sitter/tree-sitter-ocaml 3ef7c00b29e41e3a0c1d18e82ea37c64d72b93fc grammars/ocaml/src .ml,.mli
+perl https://github.com/tree-sitter-perl/tree-sitter-perl 0c24d001dd1921e418fb933d208a7bd7dd3f923a src .pl,.pm
+powershell https://github.com/airbus-cert/tree-sitter-powershell da65ba3acc93777255781b447f5e7448245df4bf src .ps1,.psm1,.psd1
+r https://github.com/r-lib/tree-sitter-r 0e6ef7741712c09dc3ee6e81c42e919820cc65ef src .r,.R
+scss https://github.com/tree-sitter-grammars/tree-sitter-scss bca847c1410f7dd97e13fbe7838b3c2c203fb473 src .scss
+svelte https://github.com/tree-sitter-grammars/tree-sitter-svelte ae5199db47757f785e43a14b332118a5474de1a2 src .svelte
+xml https://github.com/tree-sitter-grammars/tree-sitter-xml 5000ae8f22d11fbe93939b05c1e37cf21117162d xml/src .xml
+awk https://github.com/Beaglefoot/tree-sitter-awk 34bbdc7cce8e803096f47b625979e34c1be38127 src
+clojure https://github.com/sogaiu/tree-sitter-clojure e43eff80d17cf34852dcd92ca5e6986d23a7040f src .clj,.cljs,.cljc,.edn
+d https://github.com/gdamore/tree-sitter-d fb028c8f14f4188286c2eef143f105def6fbf24f src

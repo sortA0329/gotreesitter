@@ -10,9 +10,7 @@ import (
 	"testing"
 )
 
-var unstableParityCorpusLangs = map[string]string{
-	"html": "html corpus parity is under active scanner investigation",
-}
+var unstableParityCorpusLangs = map[string]string{}
 
 type parityCorpusDoc struct {
 	lang   string
@@ -97,12 +95,15 @@ func javaCorpus(classCount int) string {
 
 func htmlCorpus(divCount int) string {
 	var b strings.Builder
-	b.Grow(divCount * 40)
-	b.WriteString("<html><body>\n")
+	b.Grow(divCount*8 + 64)
+	b.WriteString("<html><body><section><div>")
 	for i := 0; i < divCount; i++ {
-		fmt.Fprintf(&b, "<div id=\"d%d\">hello %d</div>\n", i, i)
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		fmt.Fprintf(&b, "hello%d", i)
 	}
-	b.WriteString("</body></html>\n")
+	b.WriteString("</div></section></body></html>\n")
 	return b.String()
 }
 

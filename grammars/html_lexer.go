@@ -139,7 +139,11 @@ func (ts *HTMLTokenSource) Next() gotreesitter.Token {
 				ts.expectTagName = true
 				return ts.literalToken(ts.ltSym, 1)
 			}
-			return ts.textToken()
+			tok := ts.textToken()
+			if tok.EndByte > tok.StartByte && isAllHTMLWhitespace(ts.src[tok.StartByte:tok.EndByte]) {
+				continue
+			}
+			return tok
 		}
 
 		// In tag mode.
@@ -311,4 +315,15 @@ func isHTMLNameStart(b byte) bool {
 
 func isHTMLNamePart(b byte) bool {
 	return isHTMLNameStart(b) || isASCIIDigit(b) || b == '-' || b == '.'
+}
+
+func isAllHTMLWhitespace(b []byte) bool {
+	for i := range b {
+		switch b[i] {
+		case ' ', '\t', '\n', '\r', '\f':
+		default:
+			return false
+		}
+	}
+	return true
 }
