@@ -275,7 +275,7 @@ Emits `bench_out/matrix.json` (machine-readable), `bench_out/matrix.md` (summary
 
 ## Supported languages
 
-206 grammars ship in the registry. 202 currently produce error-free parse trees on smoke samples; 4 are degraded (`disassembly`, `norg`, `properties`, `vimdoc`). Run `go run ./cmd/parity_report` for current status.
+206 grammars ship in the registry. 203 currently produce error-free parse trees on smoke samples; 3 are degraded (`disassembly`, `norg`, `vimdoc`). Run `go run ./cmd/parity_report` for current status.
 
 - 14 hand-written (😉) Go external scanners (python, elixir, comment, doxygen, foam, nginx, nushell, r, xml, yuck, purescript, typst, html, yaml)
 - 8 hand-written Go token sources (authzed, c, go, html, java, json, lua, toml)
@@ -329,14 +329,33 @@ All shipped highlight and tags queries compile (`156/156` highlight, `69/69` tag
 
 - **Full-parse throughput**: ~11x slower than the C runtime on the Go grammar benchmark. The GLR parse loop, Go bounds checking, interface dispatch, and GC write barriers account for the gap. Incremental reparsing amortizes this for interactive use.
 - **GLR safety caps**: The parser enforces iteration, stack depth, and node count limits proportional to input size. These prevent pathological blowup on grammars with high ambiguity but impose a ceiling on the maximum input complexity that parses without error. The caps are tunable but not removable without risking unbounded resource consumption.
-- **Degraded grammars**: 4 of 206 grammars are currently degraded: `disassembly`, `norg`, `properties`, and `vimdoc`. Check `entry.Quality` and `tree.RootNode().HasError()`.
+- **Degraded grammars**: 3 of 206 grammars are currently degraded: `disassembly`, `norg`, and `vimdoc`. Check `entry.Quality` and `tree.RootNode().HasError()`.
 
 ## Adding a language
 
 1. Add the grammar repo to `grammars/languages.manifest`
-2. Generate tables: `go run ./cmd/ts2go -manifest grammars/languages.manifest -outdir ./grammars -package grammars -compact=true`
-3. Add smoke samples to `cmd/parity_report/main.go` and `grammars/parse_support_test.go`
-4. Verify: `go run ./cmd/parity_report && go test ./grammars/...`
+2. Refresh pinned refs in `grammars/languages.lock`:
+   `go run ./cmd/grammar_updater -lock grammars/languages.lock -write -report grammars/grammar_updates.json`
+3. Generate tables: `go run ./cmd/ts2go -manifest grammars/languages.manifest -outdir ./grammars -package grammars -compact=true`
+4. Add smoke samples to `cmd/parity_report/main.go` and `grammars/parse_support_test.go`
+5. Verify: `go run ./cmd/parity_report && go test ./grammars/...`
+
+## Grammar lock updates
+
+- `grammars/languages.lock` stores pinned refs for grammar update + parity automation.
+- `cmd/grammar_updater` refreshes refs and emits a machine-readable report.
+- `.github/workflows/grammar-lock-update.yml` opens scheduled/dispatch update PRs.
+
+Manual refresh:
+
+```sh
+go run ./cmd/grammar_updater \
+  -lock grammars/languages.lock \
+  -allow-list grammars/update_tier1_top50.txt \
+  -max-updates 10 \
+  -write \
+  -report grammars/grammar_updates.json
+```
 
 ## Architecture
 
@@ -399,6 +418,14 @@ GOTREESITTER_GRAMMAR_TRANSITION_INTERN_LIMIT=20000
 ```sh
 GOT_GLR_MAX_STACKS=12  # overrides default GLR stack cap (default: 6)
 ```
+
+**Legacy benchmark compatibility only**:
+
+```sh
+GOT_PARSE_NODE_LIMIT_SCALE=3
+```
+
+`GOT_PARSE_NODE_LIMIT_SCALE` is only needed for comparisons against older truncation-prone benchmark baselines. On current branches, keep it unset.
 
 ## Testing
 
