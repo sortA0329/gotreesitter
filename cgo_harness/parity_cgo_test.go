@@ -70,11 +70,65 @@ var hasDedicatedSample = func() map[string]bool {
 	return m
 }()
 
-// curatedLanguages is the hand-vetted correctness set that gates merges.
-// These languages produce structurally identical parse trees and identical
-// highlight captures between Go and C (except julia: 1 known gap tracked
-// in knownHighlightDivergence). Failures here are merge-blocking.
-var curatedLanguages = map[string]bool{
+// curatedStructuralLanguages is the hand-vetted structural-parity set that
+// gates merges for C-vs-Go parse-tree shape.
+var curatedStructuralLanguages = map[string]bool{
+	"awk":        true,
+	"bash":       true,
+	"c":          true,
+	"c_sharp":    true,
+	"cmake":      true,
+	"clojure":    true,
+	"cpp":        true,
+	"css":        true,
+	"dart":       true,
+	"d":          true,
+	"elixir":     true,
+	"elm":        true,
+	"erlang":     true,
+	"go":         true,
+	"gomod":      true,
+	"graphql":    true,
+	"haskell":    true,
+	"haxe":       true,
+	"hcl":        true,
+	"html":       true,
+	"ini":        true,
+	"java":       true,
+	"javascript": true,
+	"json":       true,
+	"json5":      true,
+	"julia":      true,
+	"kotlin":     true,
+	"lua":        true,
+	"make":       true,
+	"markdown":   true,
+	"nix":        true,
+	"objc":       true,
+	"ocaml":      true,
+	"perl":       true,
+	"php":        true,
+	"powershell": true,
+	"python":     true,
+	"r":          true,
+	"ruby":       true,
+	"rust":       true,
+	"scala":      true,
+	"scss":       true,
+	"sql":        true,
+	"svelte":     true,
+	"swift":      true,
+	"toml":       true,
+	"tsx":        true,
+	"typescript": true,
+	"xml":        true,
+	"yaml":       true,
+	"zig":        true,
+}
+
+// curatedHighlightLanguages remains a tighter set for highlight-capture
+// parity gating. Structural parity can advance independently.
+var curatedHighlightLanguages = map[string]bool{
 	"bash":       true,
 	"c":          true,
 	"cpp":        true,
@@ -605,7 +659,7 @@ func incrementalEditCandidates(src []byte) []incrementalEditCandidate {
 // on the currently CI-gated language set.
 func TestParityFreshParse(t *testing.T) {
 	for _, tc := range parityCases {
-		if !curatedLanguages[tc.name] {
+		if !curatedStructuralLanguages[tc.name] {
 			continue
 		}
 		tc := tc
@@ -622,7 +676,7 @@ func TestParityFreshParse(t *testing.T) {
 // matches a CGo fresh parse on edited source.
 func TestParityIncrementalParse(t *testing.T) {
 	for _, tc := range parityCases {
-		if !curatedLanguages[tc.name] {
+		if !curatedStructuralLanguages[tc.name] {
 			continue
 		}
 		tc := tc
@@ -784,7 +838,7 @@ func TestParityIncrementalParse(t *testing.T) {
 // do not produce error nodes.
 func TestParityHasNoErrors(t *testing.T) {
 	for _, tc := range parityCases {
-		if !curatedLanguages[tc.name] {
+		if !curatedStructuralLanguages[tc.name] {
 			continue
 		}
 		tc := tc

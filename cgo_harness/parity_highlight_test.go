@@ -25,7 +25,7 @@ func (h highlightCapture) String() string {
 
 // --- Three-tier highlight parity tracking ---
 //
-// Tier 1: curatedLanguages (in parity_cgo_test.go) — merge-blocking. These
+// Tier 1: curatedHighlightLanguages (in parity_cgo_test.go) — merge-blocking. These
 //         use knownHighlightDivergence / knownHighlightGoOnly as strict
 //         thresholds. Any regression fails the test.
 //
@@ -271,7 +271,7 @@ func runHighlightParity(t *testing.T, tc parityCase) (goOnlyCount, cMissingCount
 // curated languages. Failures here block CI.
 func TestParityHighlight(t *testing.T) {
 	for _, tc := range parityCases {
-		if !curatedLanguages[tc.name] {
+		if !curatedHighlightLanguages[tc.name] {
 			continue
 		}
 		tc := tc
@@ -304,7 +304,7 @@ func TestParityHighlight(t *testing.T) {
 // regressions (worse than recorded) fail; improvements are logged.
 func TestParityHighlightAllGrammars(t *testing.T) {
 	for _, tc := range parityCases {
-		if curatedLanguages[tc.name] {
+		if curatedHighlightLanguages[tc.name] {
 			continue // tested by TestParityHighlight
 		}
 		tc := tc
