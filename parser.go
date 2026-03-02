@@ -241,7 +241,7 @@ func (p *Parser) parseIncrementalInternal(source []byte, oldTree *Tree, ts Token
 	if !tokenSourceSupportsIncrementalReuse(ts) {
 		arenaClass := incrementalArenaClassForSource(source)
 		// Keep parse-time memory behavior consistent with incremental parses.
-		return p.parseInternal(source, ts, nil, nil, arenaClass, timing, 0)
+		return p.parseInternal(source, ts, nil, nil, arenaClass, timing, 0, false)
 	}
 
 	p.reuseMu.Lock()
@@ -256,7 +256,7 @@ func (p *Parser) parseIncrementalInternal(source []byte, oldTree *Tree, ts Token
 		reuse = p.reuseCursor.reset(oldTree, source, &p.reuseScratch)
 	}
 	arenaClass := incrementalArenaClassForSource(source)
-	tree := p.parseInternal(source, ts, reuse, oldTree, arenaClass, timing, 0)
+	tree := p.parseInternal(source, ts, reuse, oldTree, arenaClass, timing, 0, false)
 	if reuse != nil {
 		if timing != nil {
 			reuseStart := time.Now()
@@ -328,7 +328,7 @@ func (p *Parser) logf(kind ParserLogType, format string, args ...any) {
 // (state, symbol) pair, the parser forks: one stack per alternative.
 // Stacks that error out are dropped. Only duplicate stack versions are
 // merged; distinct alternatives are preserved.
-func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor, oldTree *Tree, arenaClass arenaClass, timing *incrementalParseTiming, maxStacksOverride int) *Tree {
+func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor, oldTree *Tree, arenaClass arenaClass, timing *incrementalParseTiming, maxStacksOverride int, deterministicExternalConflicts bool) *Tree {
 	parseStart := time.Now()
 	p.logf(ParserLogParse, "start len=%d incremental=%t", len(source), reuse != nil || oldTree != nil)
 	deferParentLinks := reuse == nil && oldTree == nil
@@ -715,6 +715,16 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 			// For single-action entries (the common case), no fork occurs.
 			// For multi-action entries, clone the stack for each alternative.
 			if len(actions) > 1 {
+				// Current external-scanner integration shares one scanner payload
+				// across all GLR stacks. Forking stacks while mutating shared
+				// scanner state can diverge from C runtime behavior. Until
+				// per-stack scanner state is modeled, keep external-scanner
+				// parses deterministic at conflicts.
+				if deterministicExternalConflicts && p.language != nil && p.language.ExternalScanner != nil {
+					act := actions[0]
+					p.applyAction(s, act, tok, &anyReduced, &nodeCount, arena, &scratch.entries, &scratch.gss, &scratch.tmpEntries, deferParentLinks, &trackChildErrors)
+					continue
+				}
 				if perfCountersEnabled {
 					rrConflict, rsConflict := classifyConflictShape(actions)
 					switch {
@@ -725,11 +735,6 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 					default:
 						perfRecordConflictOther()
 					}
-				}
-				if reuse != nil {
-					act := actions[0]
-					p.applyAction(s, act, tok, &anyReduced, &nodeCount, arena, &scratch.entries, &scratch.gss, &scratch.tmpEntries, deferParentLinks, &trackChildErrors)
-					continue
 				}
 				if perfCountersEnabled {
 					perfRecordFork(len(actions), perfTokensConsumed)

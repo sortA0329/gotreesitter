@@ -229,7 +229,7 @@ func (p *Parser) Parse(source []byte) (*Tree, error) {
 	if p.language.ExternalScanner != nil {
 		ts.externalPayload = p.language.ExternalScanner.Create()
 	}
-	tree := p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil, 0)
+	tree := p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil, 0, false)
 	if parseMaxGLRStacksValue() < fullParseRetryMaxGLRStacks && shouldRetryFullParse(tree) {
 		retryLexer := NewLexer(p.language.LexStates, source)
 		retryTS := &dfaTokenSource{
@@ -241,7 +241,18 @@ func (p *Parser) Parse(source []byte) (*Tree, error) {
 		if p.language.ExternalScanner != nil {
 			retryTS.externalPayload = p.language.ExternalScanner.Create()
 		}
-		tree = p.parseInternal(source, p.wrapIncludedRanges(retryTS), nil, nil, arenaClassFull, nil, fullParseRetryMaxGLRStacks)
+		tree = p.parseInternal(source, p.wrapIncludedRanges(retryTS), nil, nil, arenaClassFull, nil, fullParseRetryMaxGLRStacks, false)
+	}
+	if p.language.ExternalScanner != nil && shouldRetryFullParse(tree) {
+		retryLexer := NewLexer(p.language.LexStates, source)
+		retryTS := &dfaTokenSource{
+			lexer:             retryLexer,
+			language:          p.language,
+			lookupActionIndex: p.lookupActionIndex,
+			hasKeywordState:   p.hasKeywordState,
+		}
+		retryTS.externalPayload = p.language.ExternalScanner.Create()
+		tree = p.parseInternal(source, p.wrapIncludedRanges(retryTS), nil, nil, arenaClassFull, nil, fullParseRetryMaxGLRStacks, true)
 	}
 	return tree, nil
 }
@@ -253,11 +264,17 @@ func (p *Parser) ParseWithTokenSource(source []byte, ts TokenSource) (*Tree, err
 	if err := p.checkLanguageCompatible(); err != nil {
 		return nil, err
 	}
-	tree := p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil, 0)
+	tree := p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil, 0, false)
 	if parseMaxGLRStacksValue() < fullParseRetryMaxGLRStacks && shouldRetryFullParse(tree) {
 		if resettable, ok := ts.(resettableTokenSource); ok {
 			resettable.Reset(source)
-			tree = p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil, fullParseRetryMaxGLRStacks)
+			tree = p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil, fullParseRetryMaxGLRStacks, false)
+		}
+	}
+	if p.language.ExternalScanner != nil && shouldRetryFullParse(tree) {
+		if resettable, ok := ts.(resettableTokenSource); ok {
+			resettable.Reset(source)
+			tree = p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil, fullParseRetryMaxGLRStacks, true)
 		}
 	}
 	return tree, nil
