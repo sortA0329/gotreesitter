@@ -3,6 +3,7 @@ package gotreesitter
 import (
 	"bytes"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,6 +28,8 @@ type Parser struct {
 	forceRawSpanAll   bool
 	forceRawSpanTable []bool
 	included          []Range
+	timeoutMicros     uint64
+	cancellationFlag  *uint32
 	denseLimit        int
 	smallBase         int
 	smallLookup       [][]smallActionPair
@@ -200,10 +203,7 @@ func canReuseUnchangedTree(source []byte, oldTree *Tree, lang *Language) bool {
 // Stacks that error out are dropped. Only duplicate stack versions are
 // merged; distinct alternatives are preserved.
 func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor, oldTree *Tree, arenaClass arenaClass, timing *incrementalParseTiming, maxStacksOverride int) *Tree {
-	var parseStart time.Time
-	if timing != nil {
-		parseStart = time.Now()
-	}
+	parseStart := time.Now()
 	deferParentLinks := reuse == nil && oldTree == nil
 	if closer, ok := ts.(interface{ Close() }); ok {
 		defer closer.Close()
@@ -341,6 +341,16 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 	var consecutiveReduces int
 
 	for iter := 0; iter < maxIter; iter++ {
+		if p.timeoutMicros > 0 {
+			// Timeout is checked inside the parse loop so long-running parses
+			// can terminate predictably under caller-configured limits.
+			if time.Since(parseStart) > time.Duration(p.timeoutMicros)*time.Microsecond {
+				return finalize(stacks, ParseStopTimeout)
+			}
+		}
+		if flag := p.cancellationFlag; flag != nil && atomic.LoadUint32(flag) != 0 {
+			return finalize(stacks, ParseStopCancelled)
+		}
 		iterationsUsed = iter + 1
 		if perfCountersEnabled {
 			perfRecordMaxConcurrentStacks(len(stacks))

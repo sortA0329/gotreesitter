@@ -66,6 +66,40 @@ func (p *Parser) Language() *Language {
 	return p.language
 }
 
+// SetTimeoutMicros configures a per-parse timeout in microseconds.
+// A value of 0 disables timeout checks.
+func (p *Parser) SetTimeoutMicros(timeoutMicros uint64) {
+	if p == nil {
+		return
+	}
+	p.timeoutMicros = timeoutMicros
+}
+
+// TimeoutMicros returns the parser timeout in microseconds.
+func (p *Parser) TimeoutMicros() uint64 {
+	if p == nil {
+		return 0
+	}
+	return p.timeoutMicros
+}
+
+// SetCancellationFlag configures a caller-owned cancellation flag.
+// Parsing stops when the pointed value becomes non-zero.
+func (p *Parser) SetCancellationFlag(flag *uint32) {
+	if p == nil {
+		return
+	}
+	p.cancellationFlag = flag
+}
+
+// CancellationFlag returns the parser's current cancellation flag pointer.
+func (p *Parser) CancellationFlag() *uint32 {
+	if p == nil {
+		return nil
+	}
+	return p.cancellationFlag
+}
+
 // SetIncludedRanges configures parser include ranges.
 // Tokens outside these ranges are skipped.
 func (p *Parser) SetIncludedRanges(ranges []Range) {

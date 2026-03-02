@@ -1,6 +1,9 @@
 package gotreesitter
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // buildArithmeticLanguage constructs a hand-built LR grammar for simple
 // arithmetic expressions:
@@ -1307,6 +1310,22 @@ func (eofAtZeroTokenSource) Next() Token {
 	}
 }
 
+type slowArithmeticTokenSource struct {
+	delay  time.Duration
+	tokens []Token
+	idx    int
+}
+
+func (s *slowArithmeticTokenSource) Next() Token {
+	time.Sleep(s.delay)
+	if s.idx >= len(s.tokens) {
+		return Token{Symbol: 0}
+	}
+	tok := s.tokens[s.idx]
+	s.idx++
+	return tok
+}
+
 func TestParseRuntimeReportsTokenSourceEOFEarly(t *testing.T) {
 	lang := buildArithmeticLanguage()
 	parser := NewParser(lang)
@@ -1332,23 +1351,72 @@ func TestParseRuntimeReportsTokenSourceEOFEarly(t *testing.T) {
 	}
 }
 
+func TestParserCancellationFlagStopsParse(t *testing.T) {
+	lang := buildArithmeticLanguage()
+	parser := NewParser(lang)
+
+	var cancelled uint32 = 1
+	parser.SetCancellationFlag(&cancelled)
+	if got := parser.CancellationFlag(); got != &cancelled {
+		t.Fatalf("CancellationFlag() = %p, want %p", got, &cancelled)
+	}
+
+	tree := mustParse(t, parser, []byte("1+2"))
+	if got, want := tree.ParseStopReason(), ParseStopCancelled; got != want {
+		t.Fatalf("ParseStopReason() = %q, want %q", got, want)
+	}
+	if !tree.ParseStoppedEarly() {
+		t.Fatal("ParseStoppedEarly() = false, want true")
+	}
+}
+
+func TestParserTimeoutMicrosStopsParse(t *testing.T) {
+	lang := buildArithmeticLanguage()
+	parser := NewParser(lang)
+	parser.SetTimeoutMicros(200)
+	if got := parser.TimeoutMicros(); got != 200 {
+		t.Fatalf("TimeoutMicros() = %d, want 200", got)
+	}
+
+	ts := &slowArithmeticTokenSource{
+		delay: 2 * time.Millisecond,
+		tokens: []Token{
+			{Symbol: 1, StartByte: 0, EndByte: 1},
+			{Symbol: 0, StartByte: 1, EndByte: 1},
+		},
+	}
+	tree, err := parser.ParseWithTokenSource([]byte("1"), ts)
+	if err != nil {
+		t.Fatalf("ParseWithTokenSource() error = %v", err)
+	}
+	if got, want := tree.ParseStopReason(), ParseStopTimeout; got != want {
+		t.Fatalf("ParseStopReason() = %q, want %q", got, want)
+	}
+	if !tree.ParseStoppedEarly() {
+		t.Fatal("ParseStoppedEarly() = false, want true")
+	}
+}
+
 // buildReservedWordLanguage constructs a minimal language to test reserved word
 // handling in promoteKeyword. Symbols:
-//   0: EOF
-//   1: IDENT (terminal, named) — keyword capture token
-//   2: KW_IF (terminal, anonymous) — keyword matched by DFA
-//   3: stmt (nonterminal, named)
+//
+//	0: EOF
+//	1: IDENT (terminal, named) — keyword capture token
+//	2: KW_IF (terminal, anonymous) — keyword matched by DFA
+//	3: stmt (nonterminal, named)
 //
 // The keyword lexer DFA recognises "if" and emits symbol 2 (KW_IF).
 //
 // LexModes:
-//   state 0: no lex mode entry (unused)
-//   state 1: ReservedWordSetID=1 → set {KW_IF} → "if" is reserved, not promoted
-//   state 2: ReservedWordSetID=0 → no reserved words → "if" IS promoted
+//
+//	state 0: no lex mode entry (unused)
+//	state 1: ReservedWordSetID=1 → set {KW_IF} → "if" is reserved, not promoted
+//	state 2: ReservedWordSetID=0 → no reserved words → "if" IS promoted
 //
 // ReservedWords layout (stride 2):
-//   set 0 (offset 0): [0, 0]       — empty
-//   set 1 (offset 2): [KW_IF, 0]   — KW_IF is reserved
+//
+//	set 0 (offset 0): [0, 0]       — empty
+//	set 1 (offset 2): [KW_IF, 0]   — KW_IF is reserved
 func buildReservedWordLanguage() *Language {
 	return &Language{
 		Name:                "reserved_word_test",
@@ -1370,7 +1438,7 @@ func buildReservedWordLanguage() *Language {
 			{AcceptToken: 2, Default: -1, EOF: -1},
 		},
 		LexModes: []LexMode{
-			{LexState: 0}, // state 0 — not used in test
+			{LexState: 0},                       // state 0 — not used in test
 			{LexState: 0, ReservedWordSetID: 1}, // state 1 — KW_IF reserved
 			{LexState: 0, ReservedWordSetID: 0}, // state 2 — no reserved words
 		},

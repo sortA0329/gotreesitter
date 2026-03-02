@@ -44,6 +44,8 @@ const (
 	ParseStopAccepted        ParseStopReason = "accepted"
 	ParseStopNoStacksAlive   ParseStopReason = "no_stacks_alive"
 	ParseStopTokenSourceEOF  ParseStopReason = "token_source_eof"
+	ParseStopTimeout         ParseStopReason = "timeout"
+	ParseStopCancelled       ParseStopReason = "cancelled"
 	ParseStopIterationLimit  ParseStopReason = "iteration_limit"
 	ParseStopStackDepthLimit ParseStopReason = "stack_depth_limit"
 	ParseStopNodeLimit       ParseStopReason = "node_limit"
@@ -899,7 +901,7 @@ func (t *Tree) ParseStopReason() ParseStopReason {
 // ParseStoppedEarly reports whether parsing hit an early-stop condition.
 func (t *Tree) ParseStoppedEarly() bool {
 	switch t.ParseStopReason() {
-	case ParseStopIterationLimit, ParseStopStackDepthLimit, ParseStopNodeLimit, ParseStopTokenSourceEOF:
+	case ParseStopIterationLimit, ParseStopStackDepthLimit, ParseStopNodeLimit, ParseStopTokenSourceEOF, ParseStopTimeout, ParseStopCancelled:
 		return true
 	default:
 		return false
