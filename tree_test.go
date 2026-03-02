@@ -310,6 +310,74 @@ func TestTree(t *testing.T) {
 	}
 }
 
+func TestTreeCopyIndependentNodes(t *testing.T) {
+	lang := testLanguage()
+	left := NewLeafNode(Symbol(1), true, 0, 3, Point{Row: 0, Column: 0}, Point{Row: 0, Column: 3})
+	right := NewLeafNode(Symbol(2), true, 3, 6, Point{Row: 0, Column: 3}, Point{Row: 0, Column: 6})
+	root := NewParentNode(Symbol(3), true, []*Node{left, right}, nil, 0)
+	tree := NewTree(root, []byte("abcdef"), lang)
+	tree.Edit(InputEdit{
+		StartByte:   3,
+		OldEndByte:  4,
+		NewEndByte:  5,
+		StartPoint:  Point{Row: 0, Column: 3},
+		OldEndPoint: Point{Row: 0, Column: 4},
+		NewEndPoint: Point{Row: 0, Column: 5},
+	})
+
+	cp := tree.Copy()
+	if cp == nil {
+		t.Fatal("Copy() returned nil")
+	}
+	if cp == tree {
+		t.Fatal("Copy() returned same tree pointer")
+	}
+	if cp.RootNode() == tree.RootNode() {
+		t.Fatal("copy root should be a distinct node pointer")
+	}
+	if cp.RootNode().Child(0) == tree.RootNode().Child(0) {
+		t.Fatal("copy child should be a distinct node pointer")
+	}
+	if cp.Language() != tree.Language() {
+		t.Fatal("copy language mismatch")
+	}
+	if got, want := len(cp.Edits()), len(tree.Edits()); got != want {
+		t.Fatalf("copy edits len: got %d want %d", got, want)
+	}
+
+	// Mutating the copy must not mutate the original.
+	beforeOrigEnd := tree.RootNode().EndByte()
+	cp.Edit(InputEdit{
+		StartByte:   0,
+		OldEndByte:  0,
+		NewEndByte:  2,
+		StartPoint:  Point{Row: 0, Column: 0},
+		OldEndPoint: Point{Row: 0, Column: 0},
+		NewEndPoint: Point{Row: 0, Column: 2},
+	})
+	if tree.RootNode().EndByte() != beforeOrigEnd {
+		t.Fatalf("original tree root mutated by copy edit: got %d want %d", tree.RootNode().EndByte(), beforeOrigEnd)
+	}
+}
+
+func TestTreeCopySurvivesOriginalRelease(t *testing.T) {
+	lang := testLanguage()
+	root := NewLeafNode(Symbol(1), true, 0, 1, Point{}, Point{Row: 0, Column: 1})
+	tree := NewTree(root, []byte("x"), lang)
+	cp := tree.Copy()
+	if cp == nil || cp.RootNode() == nil {
+		t.Fatal("copy/root should be non-nil")
+	}
+
+	tree.Release()
+	if cp.RootNode() == nil {
+		t.Fatal("copy root should remain valid after releasing original")
+	}
+	if got, want := cp.RootNode().Text(cp.Source()), "x"; got != want {
+		t.Fatalf("copy text: got %q want %q", got, want)
+	}
+}
+
 func TestDescendantForByteRange(t *testing.T) {
 	lang := testLanguage()
 	left := NewLeafNode(Symbol(1), true, 0, 3, Point{Row: 0, Column: 0}, Point{Row: 0, Column: 3})

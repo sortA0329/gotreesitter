@@ -711,6 +711,95 @@ func (t *Tree) Source() []byte { return t.source }
 // Language returns the language used to parse this tree.
 func (t *Tree) Language() *Language { return t.language }
 
+// Copy returns an independent copy of this tree.
+//
+// The copied tree has distinct node objects, so subsequent Tree.Edit calls on
+// either tree do not mutate the other's spans/dirty bits. Source bytes and
+// language pointer are shared (read-only).
+func (t *Tree) Copy() *Tree {
+	if t == nil {
+		return nil
+	}
+
+	out := &Tree{
+		source:       t.source,
+		language:     t.language,
+		parseRuntime: t.parseRuntime,
+	}
+	if len(t.edits) > 0 {
+		out.edits = make([]InputEdit, len(t.edits))
+		copy(out.edits, t.edits)
+	}
+	if t.root == nil {
+		return out
+	}
+
+	class := arenaClassIncremental
+	if t.arena != nil {
+		class = t.arena.class
+	}
+	arena := acquireNodeArena(class)
+	out.root = cloneTreeNodesIntoArena(t.root, arena)
+	out.arena = arena
+	return out
+}
+
+func cloneTreeNodesIntoArena(root *Node, arena *nodeArena) *Node {
+	if root == nil {
+		return nil
+	}
+
+	type clonePair struct {
+		old *Node
+		new *Node
+	}
+
+	cloneNode := func(src *Node) *Node {
+		dst := arena.allocNodeFast()
+		*dst = *src
+		dst.children = nil
+		dst.fieldIDs = nil
+		dst.parent = nil
+		dst.childIndex = -1
+		dst.ownerArena = arena
+		return dst
+	}
+
+	newRoot := cloneNode(root)
+	stack := []clonePair{{old: root, new: newRoot}}
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		pair := stack[last]
+		stack = stack[:last]
+
+		oldNode := pair.old
+		newNode := pair.new
+
+		if n := len(oldNode.fieldIDs); n > 0 {
+			fieldIDs := arena.allocFieldIDSlice(n)
+			copy(fieldIDs, oldNode.fieldIDs)
+			newNode.fieldIDs = fieldIDs
+		}
+
+		if n := len(oldNode.children); n > 0 {
+			children := arena.allocNodeSlice(n)
+			newNode.children = children
+			for i, oldChild := range oldNode.children {
+				if oldChild == nil {
+					continue
+				}
+				newChild := cloneNode(oldChild)
+				newChild.parent = newNode
+				newChild.childIndex = i
+				children[i] = newChild
+				stack = append(stack, clonePair{old: oldChild, new: newChild})
+			}
+		}
+	}
+
+	return newRoot
+}
+
 // ParseStopReason reports why parsing terminated.
 func (t *Tree) ParseStopReason() ParseStopReason {
 	if t == nil {

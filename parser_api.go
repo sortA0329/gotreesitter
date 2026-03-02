@@ -58,6 +58,14 @@ type ParseResult struct {
 	ProfileAvailable bool
 }
 
+// Language returns the parser's configured language.
+func (p *Parser) Language() *Language {
+	if p == nil {
+		return nil
+	}
+	return p.language
+}
+
 // SetIncludedRanges configures parser include ranges.
 // Tokens outside these ranges are skipped.
 func (p *Parser) SetIncludedRanges(ranges []Range) {
