@@ -235,3 +235,99 @@ func TestDisplayName(t *testing.T) {
 		t.Error("DisplayName(nil) should return empty string")
 	}
 }
+
+func TestDetectLanguageByNameAliases(t *testing.T) {
+	tests := []struct {
+		input    string
+		wantName string
+	}{
+		// Linguist canonical names (mixed case).
+		{"Go", "go"},
+		{"Python", "python"},
+		{"JavaScript", "javascript"},
+		{"TypeScript", "typescript"},
+		{"C++", "cpp"},
+		{"C#", "c_sharp"},
+		{"Objective-C", "objc"},
+		{"F#", "fsharp"},
+		{"Shell", "bash"},
+		{"Makefile", "make"},
+		{"TSX", "tsx"},
+		{"Rust", "rust"},
+		{"Ruby", "ruby"},
+		{"Java", "java"},
+		{"HTML", "html"},
+		{"CSS", "css"},
+		{"YAML", "yaml"},
+		{"TOML", "toml"},
+		{"SQL", "sql"},
+		{"Kotlin", "kotlin"},
+		{"Swift", "swift"},
+		{"Scala", "scala"},
+		{"Elixir", "elixir"},
+		// Linguist aliases.
+		{"golang", "go"},
+		{"js", "javascript"},
+		{"ts", "typescript"},
+		{"py", "python"},
+		{"rb", "ruby"},
+		{"rs", "rust"},
+		// Case insensitivity.
+		{"PYTHON", "python"},
+		{"c++", "cpp"},
+		{"f#", "fsharp"},
+		{"shell", "bash"},
+		{"javascript", "javascript"},
+		{"makefile", "make"},
+		// Edge: gotreesitter name directly.
+		{"cpp", "cpp"},
+		{"c_sharp", "c_sharp"},
+		{"objc", "objc"},
+		{"fsharp", "fsharp"},
+		{"bash", "bash"},
+	}
+	for _, tt := range tests {
+		got := DetectLanguageByName(tt.input)
+		if got == nil {
+			t.Errorf("DetectLanguageByName(%q) = nil, want %q", tt.input, tt.wantName)
+		} else if got.Name != tt.wantName {
+			t.Errorf("DetectLanguageByName(%q) = %q, want %q", tt.input, got.Name, tt.wantName)
+		}
+	}
+}
+
+func TestDisplayNamePopulated(t *testing.T) {
+	tests := []struct {
+		grammar string
+		want    string
+	}{
+		{"cpp", "C++"},
+		{"c_sharp", "C#"},
+		{"objc", "Objective-C"},
+		{"fsharp", "F#"},
+		{"javascript", "JavaScript"},
+		{"typescript", "TypeScript"},
+		{"bash", "Shell"},
+		{"make", "Makefile"},
+		{"go", "Go"},
+		{"python", "Python"},
+		{"rust", "Rust"},
+		{"ruby", "Ruby"},
+		{"java", "Java"},
+		{"html", "HTML"},
+		{"css", "CSS"},
+		{"yaml", "YAML"},
+		{"sql", "SQL"},
+	}
+	for _, tt := range tests {
+		entry := lookupByName(tt.grammar)
+		if entry == nil {
+			t.Errorf("lookupByName(%q) = nil", tt.grammar)
+			continue
+		}
+		got := DisplayName(entry)
+		if got != tt.want {
+			t.Errorf("DisplayName(%q) = %q, want %q", tt.grammar, got, tt.want)
+		}
+	}
+}
