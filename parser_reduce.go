@@ -196,22 +196,6 @@ func (p *Parser) applyReduceActionFromGSS(s *glrStack, act ParseAction, anyReduc
 
 	children, fieldIDs := p.buildReduceChildren(windowEntries, 0, reducedEnd, childCount, act.ProductionID, arena)
 
-	var trailingExtras []*Node
-	if actualEnd > reducedEnd {
-		var trailingBuf [8]*Node
-		if actualEnd-reducedEnd <= len(trailingBuf) {
-			trailingExtras = trailingBuf[:0]
-		} else {
-			trailingExtras = make([]*Node, 0, actualEnd-reducedEnd)
-		}
-		for i := reducedEnd; i < actualEnd; i++ {
-			extra := windowEntries[i].node
-			if extra != nil {
-				trailingExtras = append(trailingExtras, extra)
-			}
-		}
-	}
-
 	targetDepth := s.depth() - actualEnd
 	if targetDepth < 0 || !s.truncate(targetDepth) {
 		s.dead = true
@@ -242,9 +226,8 @@ func (p *Parser) applyReduceActionFromGSS(s *glrStack, act ParseAction, anyReduc
 		parent.startPoint = span.startPoint
 		parent.endPoint = span.endPoint
 	}
-	// Extend parent span to cover leading/trailing extras — matches C
-	// tree-sitter where extras are invisible children contributing to span.
-	extendParentSpanToWindow(parent, windowEntries, 0, actualEnd, trailingExtras, shouldUseRawSpan)
+	// Extend parent span to cover invisible children dropped by buildReduceChildren.
+	extendParentSpanToWindow(parent, windowEntries, 0, reducedEnd, p.language.SymbolMetadata)
 	*nodeCount++
 
 	gotoState := p.lookupGoto(topState, act.Symbol)
@@ -255,8 +238,11 @@ func (p *Parser) applyReduceActionFromGSS(s *glrStack, act ParseAction, anyReduc
 	parent.preGotoState = topState
 	parent.parseState = targetState
 	p.pushStackNode(s, targetState, parent, entryScratch, gssScratch)
-	for i := range trailingExtras {
-		extra := trailingExtras[i]
+	for i := reducedEnd; i < actualEnd; i++ {
+		extra := windowEntries[i].node
+		if extra == nil {
+			continue
+		}
 		extra.parseState = targetState
 		p.pushStackNode(s, targetState, extra, entryScratch, gssScratch)
 	}
@@ -353,51 +339,61 @@ func computeReduceRawSpan(entries []stackEntry, start, end int) reduceRawSpan {
 	return span
 }
 
-// extendParentSpanToWindow widens the parent node's [startByte, endByte] only
-// for leading/trailing extras around the reduced structural children.
-// Keeping this extras-only avoids inflating spans due to internal invisible
-// nodes while still matching C runtime range behavior for extras padding.
-func extendParentSpanToWindow(parent *Node, entries []stackEntry, start, actualEnd int, trailingExtras []*Node, includeInvisibleWindow bool) {
-	if includeInvisibleWindow {
-		// Leaf reductions can drop structural invisible children. Include the
-		// full reduce window so parent ranges still match C runtime behavior.
-		for i := start; i < actualEnd; i++ {
-			n := entries[i].node
-			if n == nil {
-				continue
-			}
-			if n.startByte < parent.startByte {
-				parent.startByte = n.startByte
-				parent.startPoint = n.startPoint
-			}
-			if n.endByte > parent.endByte {
-				parent.endByte = n.endByte
-				parent.endPoint = n.endPoint
-			}
-		}
-	} else {
-		// Leading extras: extend backward until the first structural child.
-		for i := start; i < actualEnd; i++ {
-			n := entries[i].node
-			if n == nil {
-				continue
-			}
-			if !n.isExtra {
-				break
-			}
-			if n.startByte < parent.startByte {
-				parent.startByte = n.startByte
-				parent.startPoint = n.startPoint
-			}
-		}
-	}
-	// Trailing extras: extend forward for any shifted trailing extras.
-	for i := range trailingExtras {
-		n := trailingExtras[i]
+// extendParentSpanToWindow widens the parent node's [startByte, endByte] to
+// recover span from entries that buildReduceChildren drops. Two categories:
+//
+//  1. Leading extras: extend startByte backward (extras before first structural child).
+//  2. Invisible non-extra leaf children: these are structural children whose symbol
+//     is not visible AND that have no children to inline. buildReduceChildren skips
+//     them entirely (the "if len(kids) == 0 { continue }" path), losing their span.
+//     In C tree-sitter, ts_subtree_set_children includes ALL children in the parent
+//     span, so we must recover these dropped spans to match.
+//
+// Trailing extras (separated into [reducedEnd, actualEnd)) are NOT scanned because
+// they become siblings of the parent, not children.
+func extendParentSpanToWindow(parent *Node, entries []stackEntry, start, reducedEnd int, symbolMeta []SymbolMetadata) {
+	// Leading extras: extend startByte backward until the first structural child.
+	for i := start; i < reducedEnd; i++ {
+		n := entries[i].node
 		if n == nil {
 			continue
 		}
-		if n.endByte > parent.endByte {
+		if !n.isExtra {
+			break
+		}
+		if n.startByte < parent.startByte {
+			parent.startByte = n.startByte
+			parent.startPoint = n.startPoint
+		}
+	}
+	// Invisible non-extra leaf children: extend parent span for entries that
+	// buildReduceChildren drops (invisible symbol, no children to inline).
+	// Only extend for children that are contiguous with the current parent
+	// span (child.startByte <= parent.endByte for end extension, or
+	// child.endByte >= parent.startByte for start extension). Entries
+	// that start beyond the parent (e.g. zero-width _automatic_semicolon
+	// markers in javascript ASI) are not real content children and must
+	// not inflate the parent span.
+	for i := start; i < reducedEnd; i++ {
+		n := entries[i].node
+		if n == nil || n.isExtra {
+			continue
+		}
+		visible := true
+		if idx := int(n.symbol); idx < len(symbolMeta) {
+			visible = symbolMeta[n.symbol].Visible
+		}
+		if visible {
+			continue // visible children are already represented in parent's children
+		}
+		// Invisible entries (with or without children) may have span that
+		// extends beyond their inlined children due to nested invisible leaf
+		// extensions. Apply contiguity check below.
+		if n.endByte >= parent.startByte && n.startByte < parent.startByte {
+			parent.startByte = n.startByte
+			parent.startPoint = n.startPoint
+		}
+		if n.startByte <= parent.endByte && n.endByte > parent.endByte {
 			parent.endByte = n.endByte
 			parent.endPoint = n.endPoint
 		}
@@ -512,21 +508,6 @@ func (p *Parser) applyReduceAction(s *glrStack, act ParseAction, anyReduced *boo
 
 	trailingStart := window.reducedEnd
 	trailingEnd := window.actualEnd
-	var trailingExtras []*Node
-	if trailingEnd > trailingStart {
-		var trailingBuf [8]*Node
-		if trailingEnd-trailingStart <= len(trailingBuf) {
-			trailingExtras = trailingBuf[:0]
-		} else {
-			trailingExtras = make([]*Node, 0, trailingEnd-trailingStart)
-		}
-		for i := trailingStart; i < trailingEnd; i++ {
-			extra := entries[i].node
-			if extra != nil {
-				trailingExtras = append(trailingExtras, extra)
-			}
-		}
-	}
 
 	// Pop all reduced entries in one step after collection.
 	if !s.truncate(window.start) {
@@ -555,9 +536,8 @@ func (p *Parser) applyReduceAction(s *glrStack, act ParseAction, anyReduced *boo
 		parent.startPoint = span.startPoint
 		parent.endPoint = span.endPoint
 	}
-	// Extend parent span to cover leading/trailing extras — matches C
-	// tree-sitter where extras are invisible children contributing to span.
-	extendParentSpanToWindow(parent, entries, window.start, window.actualEnd, trailingExtras, shouldUseRawSpan)
+	// Extend parent span to cover invisible children dropped by buildReduceChildren.
+	extendParentSpanToWindow(parent, entries, window.start, window.reducedEnd, p.language.SymbolMetadata)
 	*nodeCount++
 
 	gotoState := p.lookupGoto(window.topState, act.Symbol)
@@ -568,8 +548,11 @@ func (p *Parser) applyReduceAction(s *glrStack, act ParseAction, anyReduced *boo
 	parent.preGotoState = window.topState
 	parent.parseState = targetState
 	p.pushStackNode(s, targetState, parent, entryScratch, gssScratch)
-	for i := range trailingExtras {
-		extra := trailingExtras[i]
+	for i := trailingStart; i < trailingEnd; i++ {
+		extra := entries[i].node
+		if extra == nil {
+			continue
+		}
 		extra.parseState = targetState
 		p.pushStackNode(s, targetState, extra, entryScratch, gssScratch)
 	}
