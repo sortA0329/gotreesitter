@@ -42,6 +42,17 @@ func makeCGLRPressureSource(stmtCount int) []byte {
 	return []byte(b.String())
 }
 
+func makeDartGLRPressureSource(callCount int) []byte {
+	var b strings.Builder
+	b.Grow(callCount * 16)
+	b.WriteString("void f() {\n")
+	for i := 0; i < callCount; i++ {
+		b.WriteString("obj.method();\n")
+	}
+	b.WriteString("}\n")
+	return []byte(b.String())
+}
+
 func assertGLRCapPressureRuntime(t *testing.T, tc parityCase, src []byte, minWidthScale int) {
 	t.Helper()
 
@@ -109,6 +120,18 @@ func TestParityGLRCapPressureTopLanguages(t *testing.T) {
 			lang:      "c",
 			name:      "decl-vs-call-200",
 			source:    normalizedSource("c", string(makeCGLRPressureSource(200))),
+			widthMult: 2,
+		},
+		{
+			lang:      "cpp",
+			name:      "decl-vs-call-200",
+			source:    normalizedSource("cpp", string(makeCGLRPressureSource(200))),
+			widthMult: 2,
+		},
+		{
+			lang:      "dart",
+			name:      "obj-method-200",
+			source:    normalizedSource("dart", string(makeDartGLRPressureSource(200))),
 			widthMult: 2,
 		},
 	}
