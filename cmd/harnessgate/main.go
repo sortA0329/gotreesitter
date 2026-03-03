@@ -48,6 +48,11 @@ func main() {
 		realCorpusResultPath   string
 		realCorpusArtifactDir  string
 		realCorpusScoreboardMD string
+		confidenceManifestPath string
+		confidenceProfile      string
+		confidenceResultsPath  string
+		confidenceMinScore     float64
+		confidenceIgnoreMiss   bool
 	)
 
 	flag.StringVar(&mode, "mode", "all", "one of: all, correctness, perf")
@@ -70,6 +75,11 @@ func main() {
 	flag.StringVar(&realCorpusResultPath, "real-corpus-out", "", "optional explicit corpus JSONL output path")
 	flag.StringVar(&realCorpusArtifactDir, "real-corpus-artifacts", "", "optional explicit corpus artifact dir")
 	flag.StringVar(&realCorpusScoreboardMD, "real-corpus-scoreboard", "", "optional explicit corpus scoreboard markdown path")
+	flag.StringVar(&confidenceManifestPath, "confidence-manifest", "", "optional path to weighted confidence manifest JSON")
+	flag.StringVar(&confidenceProfile, "confidence-profile", "", "optional built-in confidence profile: top50|core90")
+	flag.StringVar(&confidenceResultsPath, "confidence-results", "", "optional JSONL path for confidence scoring; defaults to real-corpus output")
+	flag.Float64Var(&confidenceMinScore, "confidence-min", 0.90, "minimum weighted confidence score required to pass")
+	flag.BoolVar(&confidenceIgnoreMiss, "confidence-ignore-missing", false, "ignore manifest languages missing from results when scoring")
 	flag.Parse()
 
 	switch mode {
@@ -90,6 +100,12 @@ func main() {
 	if strings.TrimSpace(benchBenchtime) == "" {
 		fatalf("-bench-benchtime must be non-empty")
 	}
+	if confidenceMinScore <= 0 || confidenceMinScore > 1 {
+		fatalf("-confidence-min must be within (0,1], got %.4f", confidenceMinScore)
+	}
+	if strings.TrimSpace(confidenceManifestPath) != "" && strings.TrimSpace(confidenceProfile) != "" {
+		fatalf("set only one of -confidence-manifest or -confidence-profile")
+	}
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		fatalf("create out dir: %v", err)
 	}
@@ -98,6 +114,8 @@ func main() {
 	appendResult := func(res stepResult) {
 		results = append(results, res)
 	}
+
+	resolvedRealCorpusOut := ""
 
 	if runRootTests {
 		appendResult(runStep(step{
@@ -122,6 +140,7 @@ func main() {
 		if strings.TrimSpace(outJSONL) == "" {
 			outJSONL = filepath.Join("..", outDir, "03_real_corpus_results.jsonl")
 		}
+		resolvedRealCorpusOut = outJSONL
 		artifactDir := realCorpusArtifactDir
 		if strings.TrimSpace(artifactDir) == "" {
 			artifactDir = filepath.Join("..", outDir, "03_real_corpus_dump_v1")
@@ -143,6 +162,39 @@ func main() {
 			},
 			LogPath: filepath.Join(outDir, "03_cgo_real_corpus.log"),
 		}))
+	}
+
+	if strings.TrimSpace(confidenceManifestPath) != "" || strings.TrimSpace(confidenceProfile) != "" {
+		var (
+			manifest confidenceManifest
+			err      error
+		)
+		if strings.TrimSpace(confidenceManifestPath) != "" {
+			manifest, err = confidenceManifestFromPath(confidenceManifestPath)
+			if err != nil {
+				fatalf("load confidence manifest: %v", err)
+			}
+		} else {
+			manifest, err = confidenceManifestFromProfile(confidenceProfile)
+			if err != nil {
+				fatalf("load confidence profile: %v", err)
+			}
+		}
+		resultsPath := strings.TrimSpace(confidenceResultsPath)
+		if resultsPath == "" {
+			resultsPath = strings.TrimSpace(resolvedRealCorpusOut)
+		}
+		if resultsPath == "" {
+			fatalf("confidence gate requires results JSONL; set -confidence-results or -real-corpus-out/-real-corpus-dir")
+		}
+		appendResult(runConfidenceStep(
+			"confidence-gate",
+			manifest,
+			resultsPath,
+			confidenceMinScore,
+			confidenceIgnoreMiss,
+			filepath.Join(outDir, "06_confidence.log"),
+		))
 	}
 
 	benchHeadPath := filepath.Join(outDir, "04_perf_head.txt")

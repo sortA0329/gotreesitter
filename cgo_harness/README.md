@@ -18,6 +18,17 @@ This executes:
 
 Artifacts are written under `harness_out/`.
 
+Optional weighted confidence scoring can be enabled from `harnessgate` using
+either a built-in profile (`top50`, `core90`) or a custom manifest JSON:
+
+```sh
+go run ./cmd/harnessgate -mode correctness \
+  -real-corpus-dir cgo_harness/corpus_real \
+  -real-corpus-langs top10 \
+  -confidence-profile core90 \
+  -confidence-min 0.90
+```
+
 Framework details (oracles, corpus tiers, gate policy):
 
 - `cgo_harness/HARNESS_FRAMEWORK.md`

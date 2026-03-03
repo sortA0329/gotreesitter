@@ -77,6 +77,13 @@ go run ./cmd/harnessgate -mode perf -bench-base harness_out/base.txt
 go run ./cmd/harnessgate -mode correctness \
   -real-corpus-dir cgo_harness/corpus_real \
   -real-corpus-langs top10
+
+# Add weighted confidence gate (built-in profile)
+go run ./cmd/harnessgate -mode correctness \
+  -real-corpus-dir cgo_harness/corpus_real \
+  -real-corpus-langs top10 \
+  -confidence-profile core90 \
+  -confidence-min 0.90
 ```
 
 Artifacts are written to `harness_out/` (logs + summary markdown).
