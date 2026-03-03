@@ -4,12 +4,12 @@ package grammars
 
 func init() {
 	Register(LangEntry{
-		Name:           "hlsl",
-		Extensions:     []string{".hlsl", ".fx"},
-		Language:       HlslLanguage,
-		HighlightQuery: hlslHighlightQuery,
+		Name:               "hlsl",
+		Extensions:         []string{".hlsl", ".fx"},
+		Language:           HlslLanguage,
+		HighlightQuery:     hlslHighlightQuery,
 		TokenSourceFactory: defaultTokenSourceFactory("hlsl"),
 	})
 }
 
-const hlslHighlightQuery = ""
+const hlslHighlightQuery = "(identifier) @variable\n"

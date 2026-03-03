@@ -163,12 +163,44 @@ func buildParityCRef(rootDir string, entry parityLockEntry) (*parityCRef, error)
 		return nil, fmt.Errorf("%s: compile parser shared library: %w", entry.Name, err)
 	}
 
-	symbol := "tree_sitter_" + paritySafeName(entry.Name)
-	ref, err := loadParitySharedLanguage(soPath, symbol)
-	if err != nil {
-		return nil, fmt.Errorf("%s: load %s: %w", entry.Name, symbol, err)
+	var loadErrs []string
+	for _, symbol := range parityLanguageSymbols(entry) {
+		ref, err := loadParitySharedLanguage(soPath, symbol)
+		if err == nil {
+			return ref, nil
+		}
+		loadErrs = append(loadErrs, fmt.Sprintf("%s: %v", symbol, err))
 	}
-	return ref, nil
+	return nil, fmt.Errorf("%s: load language symbol failed: %s", entry.Name, strings.Join(loadErrs, "; "))
+}
+
+func parityLanguageSymbols(entry parityLockEntry) []string {
+	var out []string
+	seen := make(map[string]bool)
+	add := func(sym string) {
+		if sym == "" || seen[sym] {
+			return
+		}
+		seen[sym] = true
+		out = append(out, sym)
+	}
+
+	add("tree_sitter_" + paritySafeName(entry.Name))
+
+	repo := strings.TrimSuffix(strings.TrimSpace(entry.RepoURL), "/")
+	repo = strings.TrimSuffix(repo, ".git")
+	if idx := strings.LastIndex(repo, "/"); idx >= 0 && idx+1 < len(repo) {
+		base := repo[idx+1:]
+		add("tree_sitter_" + paritySafeName(base))
+		if strings.HasPrefix(base, "tree-sitter-") {
+			add("tree_sitter_" + paritySafeName(strings.TrimPrefix(base, "tree-sitter-")))
+		}
+		if strings.HasPrefix(base, "tree_sitter_") {
+			add("tree_sitter_" + paritySafeName(strings.TrimPrefix(base, "tree_sitter_")))
+		}
+	}
+
+	return out
 }
 
 func loadParityLock(path string) (map[string]parityLockEntry, error) {
