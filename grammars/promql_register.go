@@ -12,4 +12,4 @@ func init() {
 	})
 }
 
-const promqlHighlightQuery = ""
+const promqlHighlightQuery = "(metric_name) @function\n\n(label_name) @property\n(label_value) @string\n\n\"=\" @operator\n\n\"{\" @punctuation.bracket\n\"}\" @punctuation.bracket\n"

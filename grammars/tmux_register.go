@@ -12,4 +12,4 @@ func init() {
 	})
 }
 
-const tmuxHighlightQuery = ""
+const tmuxHighlightQuery = "(command) @keyword\n(command_line_option) @attribute\n(option) @property\n(value) @string\n"
