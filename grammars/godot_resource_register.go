@@ -4,12 +4,12 @@ package grammars
 
 func init() {
 	Register(LangEntry{
-		Name:           "godot_resource",
-		Extensions:     []string{".tres", ".tscn"},
-		Language:       GodotResourceLanguage,
-		HighlightQuery: godotResourceHighlightQuery,
+		Name:               "godot_resource",
+		Extensions:         []string{".tres", ".tscn"},
+		Language:           GodotResourceLanguage,
+		HighlightQuery:     godotResourceHighlightQuery,
 		TokenSourceFactory: defaultTokenSourceFactory("godot_resource"),
 	})
 }
 
-const godotResourceHighlightQuery = ""
+const godotResourceHighlightQuery = "(path) @property\n(integer) @number\n"

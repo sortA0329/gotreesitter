@@ -4,12 +4,12 @@ package grammars
 
 func init() {
 	Register(LangEntry{
-		Name:           "cobol",
-		Extensions:     []string{".cob", ".cbl", ".cpy"},
-		Language:       CobolLanguage,
-		HighlightQuery: cobolHighlightQuery,
+		Name:               "cobol",
+		Extensions:         []string{".cob", ".cbl", ".cpy"},
+		Language:           CobolLanguage,
+		HighlightQuery:     cobolHighlightQuery,
 		TokenSourceFactory: defaultTokenSourceFactory("cobol"),
 	})
 }
 
-const cobolHighlightQuery = ""
+const cobolHighlightQuery = "(program_name) @type\n"

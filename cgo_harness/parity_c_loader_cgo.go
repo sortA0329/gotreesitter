@@ -186,6 +186,7 @@ func parityLanguageSymbols(entry parityLockEntry) []string {
 	}
 
 	add("tree_sitter_" + paritySafeName(entry.Name))
+	add("tree_sitter_" + strings.ToUpper(strings.TrimSpace(entry.Name)))
 
 	repo := strings.TrimSuffix(strings.TrimSpace(entry.RepoURL), "/")
 	repo = strings.TrimSuffix(repo, ".git")

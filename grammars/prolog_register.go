@@ -4,12 +4,12 @@ package grammars
 
 func init() {
 	Register(LangEntry{
-		Name:           "prolog",
-		Extensions:     []string{".pl", ".pro"},
-		Language:       PrologLanguage,
-		HighlightQuery: prologHighlightQuery,
+		Name:               "prolog",
+		Extensions:         []string{".pl", ".pro"},
+		Language:           PrologLanguage,
+		HighlightQuery:     prologHighlightQuery,
 		TokenSourceFactory: defaultTokenSourceFactory("prolog"),
 	})
 }
 
-const prologHighlightQuery = ""
+const prologHighlightQuery = "(atom) @function\n"

@@ -4,12 +4,12 @@ package grammars
 
 func init() {
 	Register(LangEntry{
-		Name:           "fennel",
-		Extensions:     nil,
-		Language:       FennelLanguage,
-		HighlightQuery: fennelHighlightQuery,
+		Name:               "fennel",
+		Extensions:         nil,
+		Language:           FennelLanguage,
+		HighlightQuery:     fennelHighlightQuery,
 		TokenSourceFactory: defaultTokenSourceFactory("fennel"),
 	})
 }
 
-const fennelHighlightQuery = ""
+const fennelHighlightQuery = "(symbol) @variable\n(number) @number\n"
