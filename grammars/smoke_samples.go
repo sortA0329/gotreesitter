@@ -203,7 +203,7 @@ var ParseSmokeSamples = map[string]string{
 	"less":            "body { color: red; }\n",
 	"linkerscript":    "SECTIONS { .text : { *(.text) } }\n",
 	"luau":            "local x: number = 1\n",
-	"markdown":        "- item\n",
+	"markdown":        "# Heading\n",
 	"markdown_inline": "hello **world**\n",
 	"mermaid":         "flowchart TD\nA-->B\n",
 	"meson":           "project('hello', 'c')\n",

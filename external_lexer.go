@@ -15,6 +15,7 @@ type ExternalLexer struct {
 	startPoint Point
 	point      Point
 	endPoint   Point
+	endMarked  bool
 
 	resultSymbol Symbol
 	hasResult    bool
@@ -74,6 +75,7 @@ func (l *ExternalLexer) Advance(skip bool) {
 func (l *ExternalLexer) MarkEnd() {
 	l.endPos = l.pos
 	l.endPoint = l.point
+	l.endMarked = true
 }
 
 // SetResultSymbol sets the token symbol to emit when Scan returns true.
@@ -98,27 +100,35 @@ func (l *ExternalLexer) token() (Token, bool) {
 	if !l.hasResult {
 		return Token{}, false
 	}
+	endPos := l.endPos
+	endPoint := l.endPoint
+	// C scanner semantics: if mark_end was never called, token end defaults to
+	// the current lexer cursor.
+	if !l.endMarked {
+		endPos = l.pos
+		endPoint = l.point
+	}
 	// When endPos < startPos the scanner marked a position before skip
 	// advanced startPos past it.  This yields a zero-width token at the
 	// mark position — the parser will re-position the lexer there so the
 	// skipped bytes are re-encountered on the next scan, matching C
 	// tree-sitter semantics.
-	if l.endPos < l.startPos {
+	if endPos < l.startPos {
 		return Token{
 			Symbol:     l.resultSymbol,
-			StartByte:  uint32(l.endPos),
-			EndByte:    uint32(l.endPos),
-			StartPoint: l.endPoint,
-			EndPoint:   l.endPoint,
+			StartByte:  uint32(endPos),
+			EndByte:    uint32(endPos),
+			StartPoint: endPoint,
+			EndPoint:   endPoint,
 		}, true
 	}
 
 	return Token{
 		Symbol:     l.resultSymbol,
-		Text:       bytesToStringNoCopy(l.source[l.startPos:l.endPos]),
+		Text:       bytesToStringNoCopy(l.source[l.startPos:endPos]),
 		StartByte:  uint32(l.startPos),
-		EndByte:    uint32(l.endPos),
+		EndByte:    uint32(endPos),
 		StartPoint: l.startPoint,
-		EndPoint:   l.endPoint,
+		EndPoint:   endPoint,
 	}, true
 }
