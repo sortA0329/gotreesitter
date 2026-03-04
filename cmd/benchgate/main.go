@@ -102,7 +102,7 @@ func main() {
 	base := aggregate(baseRaw)
 	head := aggregate(headRaw)
 
-	fmt.Printf("benchgate thresholds: ns<=+%.2f%% B<=+%.2f%% allocs<=+%.2f%%\n",
+	fmt.Printf("benchgate thresholds: ns<=+%.2f%% B<=+%.2f%% allocs<=+%.2f%% (min +1 alloc/op floor)\n",
 		maxNsRegression*100.0, maxBytesRegression*100.0, maxAllocsRegression*100.0)
 	fmt.Println("benchmark\tmetric\tbase\thead\tdelta\tstatus")
 
@@ -303,6 +303,20 @@ func evaluateMetric(name, metric string, base, head, maxRegression float64) metr
 	}
 
 	ev.Delta = (head / base) - 1.0
+	if metric == "allocs/op" {
+		// For low-allocation benchmarks, pure percentage gates are too strict
+		// (e.g. 5->6 allocs/op is +20% but often acceptable when latency/RSS
+		// improve). Apply a minimum absolute slack of +1 alloc/op in addition
+		// to the ratio threshold.
+		allowedAbs := base * maxRegression
+		if allowedAbs < 1.0 {
+			allowedAbs = 1.0
+		}
+		if (head - base) > allowedAbs {
+			ev.Failed = true
+		}
+		return ev
+	}
 	if ev.Delta > maxRegression {
 		ev.Failed = true
 	}

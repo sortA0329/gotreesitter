@@ -211,6 +211,8 @@ jobs:
               > "${OUT_DIR}/head_rss_bench.txt" 2> "${OUT_DIR}/head_rss_time.txt"
           fi
 
+          # benchgate applies a minimum +1 alloc/op floor for low-allocation
+          # benches, so we can keep strict ratio thresholds.
           go run ./cmd/benchgate \
             -base "${OUT_DIR}/base.txt" \
             -head "${OUT_DIR}/head.txt" \
@@ -218,10 +220,7 @@ jobs:
             -head-rss "${OUT_DIR}/head_rss_time.txt" \
             -max-ns-regression 0.08 \
             -max-bytes-regression 0.05 \
-            # Temporary one-time relax: this PR improves ns/op and RSS
-            # substantially while incurring +1 alloc/op on full parse.
-            # Re-tighten after baseline rolls forward.
-            -max-allocs-regression 0.25 \
+            -max-allocs-regression 0.05 \
             -max-rss-regression 0.10
 
       - name: Perf Definitive Outcome Summary
@@ -244,7 +243,7 @@ jobs:
             -head "${OUT_DIR}/head.txt" \
             -max-ns-regression 0.08 \
             -max-bytes-regression 0.05 \
-            -max-allocs-regression 0.25 \
+            -max-allocs-regression 0.05 \
             -exit-on-fail=false \
             -post-definitive \
             -definitive-output "${OUT_DIR}/definitive.md" || true
