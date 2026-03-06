@@ -1,6 +1,7 @@
 package grammars
 
 import (
+	"sync"
 	"unicode"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
@@ -15,13 +16,26 @@ const (
 	justTokErrorRecovery = 4
 )
 
-const (
-	justSymIndent        gotreesitter.Symbol = 55
-	justSymDedent        gotreesitter.Symbol = 56
-	justSymNewline       gotreesitter.Symbol = 57
-	justSymText          gotreesitter.Symbol = 58
-	justSymErrorRecovery gotreesitter.Symbol = 59
-)
+// justSyms caches resolved external symbol IDs for the just grammar.
+var justSyms struct {
+	once          sync.Once
+	indent        gotreesitter.Symbol
+	dedent        gotreesitter.Symbol
+	newline       gotreesitter.Symbol
+	text          gotreesitter.Symbol
+	errorRecovery gotreesitter.Symbol
+}
+
+func resolveJustSyms() {
+	justSyms.once.Do(func() {
+		lang := JustLanguage()
+		justSyms.indent = lang.ExternalSymbols[justTokIndent]
+		justSyms.dedent = lang.ExternalSymbols[justTokDedent]
+		justSyms.newline = lang.ExternalSymbols[justTokNewline]
+		justSyms.text = lang.ExternalSymbols[justTokText]
+		justSyms.errorRecovery = lang.ExternalSymbols[justTokErrorRecovery]
+	})
+}
 
 // justState tracks indent level and brace advancement for just files.
 type justState struct {
@@ -68,6 +82,7 @@ func (JustExternalScanner) Deserialize(payload any, buf []byte) {
 }
 
 func (JustExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, validSymbols []bool) bool {
+	resolveJustSyms()
 	s := payload.(*justState)
 
 	if lexer.Lookahead() == 0 {
@@ -93,7 +108,8 @@ func (JustExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, 
 		}
 
 		if eolFound && !escape {
-			lexer.SetResultSymbol(justSymNewline)
+			lexer.MarkEnd()
+			lexer.SetResultSymbol(justSyms.newline)
 			return true
 		}
 	}
@@ -121,12 +137,14 @@ func (JustExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, 
 		indent := lexer.GetColumn()
 
 		if indent > s.prevIndent && justValid(validSymbols, justTokIndent) && s.prevIndent == 0 {
-			lexer.SetResultSymbol(justSymIndent)
+			lexer.MarkEnd()
+			lexer.SetResultSymbol(justSyms.indent)
 			s.prevIndent = indent
 			return true
 		}
 		if indent < s.prevIndent && justValid(validSymbols, justTokDedent) && indent == 0 {
-			lexer.SetResultSymbol(justSymDedent)
+			lexer.MarkEnd()
+			lexer.SetResultSymbol(justSyms.dedent)
 			s.prevIndent = indent
 			return true
 		}
@@ -168,7 +186,7 @@ func (JustExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, 
 
 			if lexer.Lookahead() == '\n' || lexer.Lookahead() == 0 {
 				lexer.MarkEnd()
-				lexer.SetResultSymbol(justSymText)
+				lexer.SetResultSymbol(justSyms.text)
 				if advancedOnce {
 					return true
 				}
@@ -182,7 +200,7 @@ func (JustExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, 
 
 				if lexer.Lookahead() == 0 || lexer.Lookahead() == '\n' {
 					lexer.MarkEnd()
-					lexer.SetResultSymbol(justSymText)
+					lexer.SetResultSymbol(justSyms.text)
 					return advancedOnce
 				}
 
@@ -200,7 +218,7 @@ func (JustExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, 
 						if lexer.Lookahead() == '}' {
 							lexer.Advance(false)
 							if lexer.Lookahead() == '}' {
-								lexer.SetResultSymbol(justSymText)
+								lexer.SetResultSymbol(justSyms.text)
 								return advancedOnce
 							}
 						}
@@ -221,7 +239,7 @@ func justHandleEof(lexer *gotreesitter.ExternalLexer, s *justState, validSymbols
 	lexer.MarkEnd()
 
 	if justValid(validSymbols, justTokDedent) {
-		lexer.SetResultSymbol(justSymDedent)
+		lexer.SetResultSymbol(justSyms.dedent)
 		return true
 	}
 
@@ -229,7 +247,7 @@ func justHandleEof(lexer *gotreesitter.ExternalLexer, s *justState, validSymbols
 		if s.hasSeenEof {
 			return false
 		}
-		lexer.SetResultSymbol(justSymNewline)
+		lexer.SetResultSymbol(justSyms.newline)
 		s.hasSeenEof = true
 		return true
 	}
