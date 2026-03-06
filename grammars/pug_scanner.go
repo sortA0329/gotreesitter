@@ -87,6 +87,7 @@ done:
 
 			if pugValid(validSymbols, pugTokIndent) && indentLen > uint32(currentIndent) {
 				s.indents = append(s.indents, uint16(indentLen))
+				lexer.MarkEnd()
 				lexer.SetResultSymbol(pugSymIndent)
 				return true
 			}
@@ -94,12 +95,14 @@ done:
 			if (pugValid(validSymbols, pugTokDedent) || !pugValid(validSymbols, pugTokNewline)) &&
 				indentLen < uint32(currentIndent) {
 				s.indents = s.indents[:len(s.indents)-1]
+				lexer.MarkEnd()
 				lexer.SetResultSymbol(pugSymDedent)
 				return true
 			}
 		}
 
 		if pugValid(validSymbols, pugTokNewline) {
+			lexer.MarkEnd()
 			lexer.SetResultSymbol(pugSymNewline)
 			return true
 		}

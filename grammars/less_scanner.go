@@ -32,12 +32,12 @@ func (LessExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, 
 	if !isLessSpace(ch) {
 		return false
 	}
-	lexer.SetResultSymbol(lessSymDescendantOp)
 	lexer.Advance(true)
 	for isLessSpace(lexer.Lookahead()) {
 		lexer.Advance(true)
 	}
 	lexer.MarkEnd()
+	lexer.SetResultSymbol(lessSymDescendantOp)
 
 	next := lexer.Lookahead()
 	if next == '#' || next == '.' || next == '[' || next == '-' ||

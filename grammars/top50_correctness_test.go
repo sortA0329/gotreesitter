@@ -65,11 +65,7 @@ var top50CorrectnessLanguages = []string{
 
 // top50SmokeKnownErrorNodes tracks languages whose current smoke fixtures
 // still produce parser error nodes. Keep this list small and temporary.
-var top50SmokeKnownErrorNodes = map[string]string{
-	"haskell": "grammar/sample still produces recoverable error nodes",
-	"hcl":     "grammar/sample still produces recoverable error nodes",
-	"svelte":  "grammar/sample still produces recoverable error nodes",
-}
+var top50SmokeKnownErrorNodes = map[string]string{}
 
 func TestTop50ParseSmokeNoErrors(t *testing.T) {
 	testParseSmokeNoErrors(t, top50CorrectnessLanguages, top50SmokeKnownErrorNodes)

@@ -55,6 +55,7 @@ func (CaddyExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer,
 	if lexer.Lookahead() == '\n' {
 		if caddyValid(validSymbols, caddyTokNewline) {
 			lexer.Advance(true)
+			lexer.MarkEnd()
 			lexer.SetResultSymbol(caddySymNewline)
 			return true
 		}
@@ -82,11 +83,13 @@ func (CaddyExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer,
 		top := s.indents[len(s.indents)-1]
 		if indentLen > top && caddyValid(validSymbols, caddyTokIndent) {
 			s.indents = append(s.indents, indentLen)
+			lexer.MarkEnd()
 			lexer.SetResultSymbol(caddySymIndent)
 			return true
 		}
 		if indentLen < top && caddyValid(validSymbols, caddyTokDedent) {
 			s.indents = s.indents[:len(s.indents)-1]
+			lexer.MarkEnd()
 			lexer.SetResultSymbol(caddySymDedent)
 			return true
 		}

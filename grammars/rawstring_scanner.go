@@ -57,13 +57,19 @@ func rawStringScan(payload any, lexer *gotreesitter.ExternalLexer, validSymbols 
 	s := payload.(*rawStringState)
 
 	if delimValid {
+		if !scanRawStringDelimiter(s, lexer) {
+			return false
+		}
 		lexer.SetResultSymbol(symDelim)
-		return scanRawStringDelimiter(s, lexer)
+		return true
 	}
 
 	if contentValid {
+		if !scanRawStringContent(s, lexer) {
+			return false
+		}
 		lexer.SetResultSymbol(symContent)
-		return scanRawStringContent(s, lexer)
+		return true
 	}
 
 	return false
@@ -91,7 +97,11 @@ func scanRawStringDelimiter(s *rawStringState, lexer *gotreesitter.ExternalLexer
 			return false
 		}
 		if ch == '(' {
-			return len(s.delimiter) > 0
+			if len(s.delimiter) > 0 {
+				lexer.MarkEnd()
+				return true
+			}
+			return false
 		}
 		s.delimiter = append(s.delimiter, ch)
 		lexer.Advance(false)
