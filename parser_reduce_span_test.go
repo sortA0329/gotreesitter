@@ -201,3 +201,39 @@ func TestExtendParentSpanSkipsInvisibleLineEnding(t *testing.T) {
 		t.Fatalf("parent.endByte = %d, want %d", got, want)
 	}
 }
+
+func TestShouldUseRawSpanForInvisibleReduction(t *testing.T) {
+	meta := []SymbolMetadata{
+		{},
+		{Visible: true},
+		{Visible: false},
+	}
+	children := []*Node{
+		NewLeafNode(1, true, 38, 45, Point{Row: 0, Column: 38}, Point{Row: 0, Column: 45}),
+	}
+
+	if !shouldUseRawSpanForReduction(2, children, meta, false, nil) {
+		t.Fatalf("expected invisible reduction to preserve raw span")
+	}
+	if shouldUseRawSpanForReduction(1, children, meta, false, nil) {
+		t.Fatalf("expected visible reduction with visible children to keep child-derived span")
+	}
+}
+
+func TestComputeReduceRawSpanKeepsDroppedInvisiblePrefix(t *testing.T) {
+	visibleTail := NewLeafNode(1, true, 38, 45, Point{Row: 0, Column: 38}, Point{Row: 0, Column: 45})
+	invisibleReduced := NewParentNode(2, false, []*Node{visibleTail}, nil, 0)
+	invisibleReduced.startByte = 16
+	invisibleReduced.endByte = 45
+	invisibleReduced.startPoint = Point{Row: 0, Column: 16}
+	invisibleReduced.endPoint = Point{Row: 0, Column: 45}
+
+	entries := []stackEntry{{state: 0, node: invisibleReduced}}
+	span := computeReduceRawSpan(entries, 0, len(entries))
+	if got, want := span.startByte, uint32(16); got != want {
+		t.Fatalf("span.startByte = %d, want %d", got, want)
+	}
+	if got, want := span.endByte, uint32(45); got != want {
+		t.Fatalf("span.endByte = %d, want %d", got, want)
+	}
+}

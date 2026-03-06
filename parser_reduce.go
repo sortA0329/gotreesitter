@@ -257,13 +257,7 @@ func (p *Parser) applyReduceActionFromGSS(s *glrStack, act ParseAction, tok Toke
 	} else {
 		parent = newParentNodeInArena(arena, act.Symbol, named, children, fieldIDs, act.ProductionID)
 	}
-	shouldUseRawSpan := len(children) == 0
-	if !shouldUseRawSpan && p.forceRawSpanAll {
-		shouldUseRawSpan = true
-	}
-	if !shouldUseRawSpan && int(act.Symbol) < len(p.forceRawSpanTable) && p.forceRawSpanTable[act.Symbol] {
-		shouldUseRawSpan = true
-	}
+	shouldUseRawSpan := shouldUseRawSpanForReduction(act.Symbol, children, p.language.SymbolMetadata, p.forceRawSpanAll, p.forceRawSpanTable)
 	if shouldUseRawSpan && reducedEnd > 0 {
 		span := computeReduceRawSpan(windowEntries, 0, reducedEnd)
 		parent.startByte = span.startByte
@@ -385,6 +379,22 @@ func computeReduceRawSpan(entries []stackEntry, start, end int) reduceRawSpan {
 		span.endPoint = lastRaw.endPoint
 	}
 	return span
+}
+
+func shouldUseRawSpanForReduction(sym Symbol, children []*Node, symbolMeta []SymbolMetadata, forceRawSpanAll bool, forceRawSpanTable []bool) bool {
+	if len(children) == 0 {
+		return true
+	}
+	if forceRawSpanAll {
+		return true
+	}
+	if int(sym) < len(forceRawSpanTable) && forceRawSpanTable[sym] {
+		return true
+	}
+	if int(sym) < len(symbolMeta) && !symbolMeta[sym].Visible {
+		return true
+	}
+	return false
 }
 
 // extendParentSpanToWindow widens the parent node's [startByte, endByte] to
@@ -632,13 +642,7 @@ func (p *Parser) applyReduceAction(s *glrStack, act ParseAction, tok Token, anyR
 	} else {
 		parent = newParentNodeInArena(arena, act.Symbol, named, children, fieldIDs, act.ProductionID)
 	}
-	shouldUseRawSpan := len(children) == 0
-	if !shouldUseRawSpan && p.forceRawSpanAll {
-		shouldUseRawSpan = true
-	}
-	if !shouldUseRawSpan && int(act.Symbol) < len(p.forceRawSpanTable) && p.forceRawSpanTable[act.Symbol] {
-		shouldUseRawSpan = true
-	}
+	shouldUseRawSpan := shouldUseRawSpanForReduction(act.Symbol, children, p.language.SymbolMetadata, p.forceRawSpanAll, p.forceRawSpanTable)
 	if shouldUseRawSpan && window.reducedEnd > window.start {
 		span := computeReduceRawSpan(entries, window.start, window.reducedEnd)
 		parent.startByte = span.startByte
