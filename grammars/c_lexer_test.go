@@ -430,7 +430,6 @@ func dumpCTokenSourceTokens(t *testing.T, src []byte, lang *gotreesitter.Languag
 		toks = append(toks, lang.SymbolNames[tok.Symbol]+"="+tok.Text)
 	}
 }
-
 func TestParseCFixedWidthIntegerTypesAsPrimitiveTypes(t *testing.T) {
 	lang := CLanguage()
 	parser := gotreesitter.NewParser(lang)
