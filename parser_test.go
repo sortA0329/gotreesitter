@@ -536,6 +536,108 @@ func TestParserErrorRecovery(t *testing.T) {
 	}
 }
 
+func TestParserPreservesPartialTreeOnNoStacksAlive(t *testing.T) {
+	lang := buildArithmeticLanguage()
+	parser := NewParser(lang)
+
+	tree := mustParse(t, parser, []byte("1+"))
+	if tree == nil || tree.RootNode() == nil {
+		t.Fatal("parse returned nil tree/root")
+	}
+	if got := tree.ParseStopReason(); got != ParseStopNoStacksAlive {
+		t.Fatalf("ParseStopReason = %q, want %q", got, ParseStopNoStacksAlive)
+	}
+	root := tree.RootNode()
+	if got := root.Symbol(); got == errorSymbol {
+		t.Fatalf("root symbol = %d, want partial preserved root", got)
+	}
+	if got := root.Text(tree.Source()); got != "1+" {
+		t.Fatalf("root text = %q, want %q", got, "1+")
+	}
+	if got := root.ChildCount(); got == 0 {
+		t.Fatal("expected partial tree with children after no_stacks_alive")
+	}
+}
+
+func TestCanFinalizeNoActionEOFRejectsFragmentStackWithInferredRoot(t *testing.T) {
+	lang := buildArithmeticLanguage()
+	parser := NewParser(lang)
+
+	s := newGLRStack(lang.InitialState)
+	s.push(2, NewLeafNode(3, true, 0, 1, Point{Row: 0, Column: 0}, Point{Row: 0, Column: 1}), nil, nil)
+	s.push(3, NewLeafNode(2, false, 1, 2, Point{Row: 0, Column: 1}, Point{Row: 0, Column: 2}), nil, nil)
+
+	if parser.canFinalizeNoActionEOF(&s) {
+		t.Fatal("canFinalizeNoActionEOF() = true, want false for leftover fragments")
+	}
+}
+
+func TestCanFinalizeNoActionEOFAcceptsSingleNonterminalWithExtras(t *testing.T) {
+	lang := buildArithmeticLanguage()
+	parser := NewParser(lang)
+
+	s := newGLRStack(lang.InitialState)
+	extra := NewLeafNode(0, false, 0, 0, Point{Row: 0, Column: 0}, Point{Row: 0, Column: 0})
+	extra.isExtra = true
+	s.push(0, extra, nil, nil)
+	s.push(2, NewLeafNode(3, true, 0, 1, Point{Row: 0, Column: 0}, Point{Row: 0, Column: 1}), nil, nil)
+
+	if !parser.canFinalizeNoActionEOF(&s) {
+		t.Fatal("canFinalizeNoActionEOF() = false, want true for single nonterminal root")
+	}
+}
+
+func TestPushOrExtendErrorNodeCoalescesConsecutiveTokens(t *testing.T) {
+	lang := buildArithmeticLanguage()
+	parser := NewParser(lang)
+	arena := acquireNodeArena(arenaClassFull)
+	defer arena.Release()
+
+	s := newGLRStack(lang.InitialState)
+	nodeCount := 0
+	trackChildErrors := false
+
+	parser.pushOrExtendErrorNode(&s, lang.InitialState, Token{
+		StartByte:  0,
+		EndByte:    1,
+		StartPoint: Point{},
+		EndPoint:   Point{Row: 0, Column: 1},
+	}, &nodeCount, arena, nil, nil, &trackChildErrors)
+	if got, want := s.depth(), 2; got != want {
+		t.Fatalf("stack depth after first error = %d, want %d", got, want)
+	}
+
+	parser.pushOrExtendErrorNode(&s, lang.InitialState, Token{
+		StartByte:  1,
+		EndByte:    2,
+		StartPoint: Point{Row: 0, Column: 1},
+		EndPoint:   Point{Row: 0, Column: 2},
+	}, &nodeCount, arena, nil, nil, &trackChildErrors)
+
+	if got, want := s.depth(), 2; got != want {
+		t.Fatalf("stack depth after extending error = %d, want %d", got, want)
+	}
+	if got, want := nodeCount, 1; got != want {
+		t.Fatalf("nodeCount = %d, want %d", got, want)
+	}
+	top := s.top().node
+	if top == nil {
+		t.Fatal("top node is nil")
+	}
+	if got, want := top.Symbol(), errorSymbol; got != want {
+		t.Fatalf("top symbol = %d, want %d", got, want)
+	}
+	if got, want := top.StartByte(), uint32(0); got != want {
+		t.Fatalf("top.StartByte = %d, want %d", got, want)
+	}
+	if got, want := top.EndByte(), uint32(2); got != want {
+		t.Fatalf("top.EndByte = %d, want %d", got, want)
+	}
+	if !trackChildErrors {
+		t.Fatal("expected trackChildErrors=true")
+	}
+}
+
 func TestParserRecoverAction(t *testing.T) {
 	lang := buildArithmeticLanguage()
 

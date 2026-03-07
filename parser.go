@@ -57,7 +57,7 @@ const (
 	maxForkCloneDepth = 4 * 1024
 	// maxConsecutivePrimaryReduces prevents infinite reduce loops on the
 	// primary stack when no token advancement occurs.
-	maxConsecutivePrimaryReduces = 10
+	maxConsecutivePrimaryReduces = 256
 )
 
 // IncrementalParseProfile attributes incremental parse time into coarse buckets.
@@ -235,15 +235,50 @@ func (p *Parser) canFinalizeNoActionEOF(s *glrStack) bool {
 	if top.node == nil {
 		return true
 	}
-	// When we can infer the grammar root symbol, finalization can still
-	// produce a valid root wrapper even if this stack top is a terminal.
-	if p != nil && p.hasRootSymbol {
+
+	tokenCount := uint32(0)
+	if p != nil && p.language != nil {
+		tokenCount = p.language.TokenCount
+	}
+
+	// Without an inferred root, the legacy behavior is still appropriate:
+	// a single nonterminal at the top can serve as the final tree root.
+	if p == nil || !p.hasRootSymbol {
+		return p != nil && p.language != nil && uint32(top.node.symbol) >= tokenCount
+	}
+
+	nonExtraCount := 0
+	onlyNonExtra := (*Node)(nil)
+	countNode := func(n *Node) bool {
+		if n == nil || n.isExtra {
+			return false
+		}
+		nonExtraCount++
+		onlyNonExtra = n
+		return nonExtraCount > 1
+	}
+
+	if len(s.entries) > 0 {
+		for i := range s.entries {
+			if countNode(s.entries[i].node) {
+				return false
+			}
+		}
+	} else {
+		for n := s.gss.head; n != nil; n = n.prev {
+			if countNode(n.entry.node) {
+				return false
+			}
+		}
+	}
+
+	if nonExtraCount == 0 {
 		return true
 	}
-	if p != nil && p.language != nil && uint32(top.node.symbol) >= p.language.TokenCount {
-		return true
+	if onlyNonExtra == nil || onlyNonExtra.symbol == errorSymbol {
+		return false
 	}
-	return false
+	return uint32(onlyNonExtra.symbol) >= tokenCount
 }
 
 func (p *Parser) parseIncrementalInternal(source []byte, oldTree *Tree, ts TokenSource, timing *incrementalParseTiming) *Tree {
@@ -257,7 +292,7 @@ func (p *Parser) parseIncrementalInternal(source []byte, oldTree *Tree, ts Token
 	if !tokenSourceSupportsIncrementalReuse(ts) {
 		arenaClass := incrementalArenaClassForSource(source)
 		// Keep parse-time memory behavior consistent with incremental parses.
-		return p.parseInternal(source, ts, nil, nil, arenaClass, timing, 0, false)
+		return p.parseInternal(source, ts, nil, nil, arenaClass, timing, 0, 0, 0, false)
 	}
 
 	p.reuseMu.Lock()
@@ -272,7 +307,7 @@ func (p *Parser) parseIncrementalInternal(source []byte, oldTree *Tree, ts Token
 		reuse = p.reuseCursor.reset(oldTree, source, &p.reuseScratch)
 	}
 	arenaClass := incrementalArenaClassForSource(source)
-	tree := p.parseInternal(source, ts, reuse, oldTree, arenaClass, timing, 0, false)
+	tree := p.parseInternal(source, ts, reuse, oldTree, arenaClass, timing, 0, 0, 0, false)
 	if reuse != nil {
 		if timing != nil {
 			reuseStart := time.Now()
@@ -344,7 +379,7 @@ func (p *Parser) logf(kind ParserLogType, format string, args ...any) {
 // (state, symbol) pair, the parser forks: one stack per alternative.
 // Stacks that error out are dropped. Only duplicate stack versions are
 // merged; distinct alternatives are preserved.
-func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor, oldTree *Tree, arenaClass arenaClass, timing *incrementalParseTiming, maxStacksOverride int, deterministicExternalConflicts bool) *Tree {
+func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor, oldTree *Tree, arenaClass arenaClass, timing *incrementalParseTiming, maxStacksOverride int, maxNodesOverride int, maxMergePerKeyOverride int, deterministicExternalConflicts bool) *Tree {
 	parseStart := time.Now()
 	if p.logger != nil {
 		p.logf(ParserLogParse, "start len=%d incremental=%t", len(source), reuse != nil || oldTree != nil)
@@ -475,6 +510,12 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 		maxStacks = p.maxConflictWidth
 	}
 	mergePerKeyCap := maxStacksPerMergeKey
+	if maxMergePerKeyOverride > mergePerKeyCap {
+		mergePerKeyCap = maxMergePerKeyOverride
+	}
+	if mergePerKeyCap > maxStacksPerMergeKeyCeiling {
+		mergePerKeyCap = maxStacksPerMergeKeyCeiling
+	}
 	if reuse != nil {
 		// Incremental reparses benefit from tighter GLR retention because
 		// edits are localized and we prioritize latency over broad ambiguity fanout.
@@ -490,6 +531,9 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 	maxIter := parseIterations(len(source))
 	maxDepth := parseStackDepth(len(source))
 	maxNodes := parseNodeLimit(len(source))
+	if maxNodesOverride > maxNodes {
+		maxNodes = maxNodesOverride
+	}
 	parseRuntime.IterationLimit = maxIter
 	parseRuntime.StackDepthLimit = maxDepth
 	parseRuntime.NodeLimit = maxNodes
@@ -499,6 +543,7 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 
 	// Per-primary-stack infinite-reduce detection.
 	var lastReduceState StateID
+	lastReduceDepth := -1
 	var consecutiveReduces int
 
 	for iter := 0; iter < maxIter; iter++ {
@@ -525,9 +570,19 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 		// Fast-path the overwhelmingly common non-GLR case with one live stack.
 		if len(stacks) == 1 {
 			if stacks[0].dead {
-				return finalizeErrorTree(ParseStopNoStacksAlive)
+				return finalize(stacks, ParseStopNoStacksAlive)
 			}
 		} else {
+			allDead := true
+			for i := range stacks {
+				if !stacks[i].dead {
+					allDead = false
+					break
+				}
+			}
+			if allDead {
+				return finalize(stacks, ParseStopNoStacksAlive)
+			}
 			// Prune dead stacks and collapse only truly duplicate stack versions.
 			stacks = mergeStacksWithScratch(stacks, &scratch.merge)
 			if len(stacks) == 0 {
@@ -628,7 +683,7 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 			perfTokensConsumed++
 			lastTokenEndByte = tok.EndByte
 			lastTokenSymbol = tok.Symbol
-			lastTokenWasEOF = tok.Symbol == 0 && tok.StartByte == tok.EndByte
+			lastTokenWasEOF = tok.Symbol == 0 && tok.StartByte == tok.EndByte && !tok.NoLookahead
 			if lastTokenWasEOF && tok.EndByte < expectedEOFByte {
 				tokenSourceEOFEarly = true
 			}
@@ -698,7 +753,7 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 			if actionIdx != 0 && int(actionIdx) < len(parseActions) {
 				actions = parseActions[actionIdx].Actions
 			}
-			if p.glrTrace && len(stacks) > 1 {
+			if p.glrTrace {
 				fmt.Printf("  stack[%d] state=%d actionIdx=%d actions=%d\n", si, currentState, actionIdx, len(actions))
 				for ai, a := range actions {
 					fmt.Printf("    action[%d]: type=%d state=%d sym=%d cnt=%d prec=%d\n",
@@ -770,16 +825,7 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 				if s.depth() == 0 {
 					return finalize(stacks, ParseStopNoStacksAlive)
 				}
-				errNode := newLeafNodeInArena(arena, errorSymbol, false,
-					tok.StartByte, tok.EndByte, tok.StartPoint, tok.EndPoint)
-				errNode.hasError = true
-				trackChildErrors = true
-				if perfCountersEnabled {
-					perfRecordErrorNode()
-				}
-				errNode.parseState = currentState
-				p.pushStackNode(s, currentState, errNode, &scratch.entries, &scratch.gss)
-				nodeCount++
+				p.pushOrExtendErrorNode(s, currentState, tok, &nodeCount, arena, &scratch.entries, &scratch.gss, &trackChildErrors)
 				needToken = true
 				continue
 			}
@@ -793,7 +839,7 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 				// scanner state can diverge from C runtime behavior. Until
 				// per-stack scanner state is modeled, keep external-scanner
 				// parses deterministic at conflicts.
-				if deterministicExternalConflicts && p.language != nil && (p.language.Name == "yaml" || p.language.Name == "scala") && p.language.ExternalScanner != nil {
+				if deterministicExternalConflicts && p.language != nil && p.language.Name == "yaml" && p.language.ExternalScanner != nil {
 					chosen := actions[0]
 					for ai := 1; ai < len(actions); ai++ {
 						cand := actions[ai]
@@ -926,16 +972,7 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 					}
 				} else if stacks[0].depth() > 0 {
 					// Wrap the problematic token in an error node.
-					errNode := newLeafNodeInArena(arena, errorSymbol, false,
-						tok.StartByte, tok.EndByte, tok.StartPoint, tok.EndPoint)
-					errNode.hasError = true
-					trackChildErrors = true
-					if perfCountersEnabled {
-						perfRecordErrorNode()
-					}
-					errNode.parseState = currentState
-					p.pushStackNode(&stacks[0], currentState, errNode, &scratch.entries, &scratch.gss)
-					nodeCount++
+					p.pushOrExtendErrorNode(&stacks[0], currentState, tok, &nodeCount, arena, &scratch.entries, &scratch.gss, &trackChildErrors)
 					needToken = true
 				}
 			}
@@ -946,24 +983,31 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 		// stacks have new top states and need to re-check the action for
 		// the current lookahead). Otherwise, advance to next token.
 		if anyReduced {
-			needToken = false
+			needToken = tok.NoLookahead
 
 			// Infinite-reduce detection (for the primary stack).
-			if len(stacks) > 0 && !stacks[0].dead {
+			if !tok.NoLookahead && len(stacks) > 0 && !stacks[0].dead {
 				topState := stacks[0].top().state
-				if topState == lastReduceState {
+				topDepth := stacks[0].depth()
+				if topState == lastReduceState && topDepth == lastReduceDepth {
 					consecutiveReduces++
 				} else {
 					lastReduceState = topState
+					lastReduceDepth = topDepth
 					consecutiveReduces = 1
 				}
 				if consecutiveReduces > maxConsecutivePrimaryReduces {
 					needToken = true
+					lastReduceDepth = -1
 					consecutiveReduces = 0
 				}
+			} else if tok.NoLookahead {
+				lastReduceDepth = -1
+				consecutiveReduces = 0
 			}
 		} else {
 			needToken = true
+			lastReduceDepth = -1
 			consecutiveReduces = 0
 		}
 
