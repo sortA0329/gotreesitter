@@ -9,6 +9,8 @@ type parserScratch struct {
 	tmpEntries []stackEntry
 	glrStates  []StateID
 	nodeLinks  []*Node
+	stackPick  []int
+	stackKeep  []bool
 }
 
 var parserScratchPool = sync.Pool{
@@ -52,6 +54,17 @@ func releaseParserScratch(s *parserScratch, skipGSSClear bool) {
 		s.nodeLinks = nil
 	} else if len(s.nodeLinks) > 0 {
 		s.nodeLinks = s.nodeLinks[:0]
+	}
+	const maxRetainedStackCullScratch = 256
+	if cap(s.stackPick) > maxRetainedStackCullScratch {
+		s.stackPick = nil
+	} else if len(s.stackPick) > 0 {
+		s.stackPick = s.stackPick[:0]
+	}
+	if cap(s.stackKeep) > maxRetainedStackCullScratch {
+		s.stackKeep = nil
+	} else if len(s.stackKeep) > 0 {
+		s.stackKeep = s.stackKeep[:0]
 	}
 	s.entries.reset()
 	s.gss.skipClear = skipGSSClear

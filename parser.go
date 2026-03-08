@@ -619,7 +619,7 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 			if perfCountersEnabled {
 				perfRecordGlobalCapCull(len(stacks), maxStacks)
 			}
-			stacks = retainTopStacksForLanguage(stacks, maxStacks, p.language)
+			stacks = retainTopStacksForLanguageWithScratch(stacks, maxStacks, p.language, &scratch.stackPick, &scratch.stackKeep)
 			if p.glrTrace {
 				fmt.Printf("[GLR] after cull:\n")
 				for ci := range stacks {
@@ -1118,6 +1118,10 @@ func retainTopStacks(stacks []glrStack, keep int) []glrStack {
 }
 
 func retainTopStacksForLanguage(stacks []glrStack, keep int, lang *Language) []glrStack {
+	return retainTopStacksForLanguageWithScratch(stacks, keep, lang, nil, nil)
+}
+
+func retainTopStacksForLanguageWithScratch(stacks []glrStack, keep int, lang *Language, selectedBuf *[]int, chosenBuf *[]bool) []glrStack {
 	if keep <= 0 {
 		return stacks[:0]
 	}
@@ -1128,7 +1132,15 @@ func retainTopStacksForLanguage(stacks []glrStack, keep int, lang *Language) []g
 	// Preserve one strong representative per top state before filling the
 	// remaining cap. Otherwise a burst of near-duplicate stacks from one state
 	// can crowd out a shallower but semantically distinct branch.
-	selected := make([]int, 0, len(stacks))
+	var selected []int
+	if selectedBuf != nil {
+		if cap(*selectedBuf) < len(stacks) {
+			*selectedBuf = make([]int, 0, len(stacks))
+		}
+		selected = (*selectedBuf)[:0]
+	} else {
+		selected = make([]int, 0, len(stacks))
+	}
 	for i := range stacks {
 		state := stacks[i].top().state
 		seen := false
@@ -1167,7 +1179,16 @@ func retainTopStacksForLanguage(stacks []glrStack, keep int, lang *Language) []g
 		selected = selected[:keep]
 	}
 
-	chosen := make([]bool, len(stacks))
+	var chosen []bool
+	if chosenBuf != nil {
+		if cap(*chosenBuf) < len(stacks) {
+			*chosenBuf = make([]bool, len(stacks))
+		}
+		chosen = (*chosenBuf)[:len(stacks)]
+		clear(chosen)
+	} else {
+		chosen = make([]bool, len(stacks))
+	}
 	for _, idx := range selected {
 		chosen[idx] = true
 	}
