@@ -60,6 +60,10 @@ const (
 	// maxConsecutivePrimaryReduces prevents infinite reduce loops on the
 	// primary stack when no token advancement occurs.
 	maxConsecutivePrimaryReduces = 256
+	// Allow a small temporary oversubscription on full parses before
+	// triggering expensive global stack culling, mirroring the C runtime's
+	// version overflow window.
+	fullParseGLRStackOverflow = 4
 )
 
 // IncrementalParseProfile attributes incremental parse time into coarse buckets.
@@ -578,6 +582,11 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 		}
 	}
 	scratch.merge.perKeyCap = mergePerKeyCap
+	langName := ""
+	if p.language != nil {
+		langName = p.language.Name
+	}
+	maxStackCullTrigger := glrStackCullTrigger(maxStacks, arenaClass, langName)
 
 	maxIter := parseIterations(len(source))
 	maxDepth := parseStackDepth(len(source))
@@ -644,9 +653,9 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 		// Cap the number of parallel stacks to prevent combinatorial explosion.
 		// Keep the most promising stacks instead of truncating by insertion
 		// order, which can discard viable parses on highly-ambiguous inputs.
-		if len(stacks) > maxStacks {
+		if len(stacks) > maxStackCullTrigger {
 			if p.glrTrace {
-				fmt.Printf("[GLR] CAP CULL: %d stacks → keep %d\n", len(stacks), maxStacks)
+				fmt.Printf("[GLR] CAP CULL: %d stacks → keep %d (trigger=%d)\n", len(stacks), maxStacks, maxStackCullTrigger)
 				for ci := range stacks {
 					fmt.Printf("  pre-cull[%d]: st=%d dead=%v shift=%v dep=%d score=%d byte=%d\n",
 						ci, stacks[ci].top().state, stacks[ci].dead, stacks[ci].shifted, stacks[ci].depth(), stacks[ci].score, stacks[ci].byteOffset)
@@ -1077,6 +1086,20 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 
 	// Iteration limit reached.
 	return finalize(stacks, ParseStopIterationLimit)
+}
+
+func glrStackCullTrigger(maxStacks int, class arenaClass, langName string) int {
+	if maxStacks <= 0 {
+		return maxStacks
+	}
+	if class != arenaClassFull || langName == "c_sharp" {
+		return maxStacks
+	}
+	maxInt := int(^uint(0) >> 1)
+	if maxStacks > maxInt-fullParseGLRStackOverflow {
+		return maxInt
+	}
+	return maxStacks + fullParseGLRStackOverflow
 }
 
 func (p *Parser) promotePrimaryStack(stacks []glrStack) {

@@ -70,9 +70,9 @@ func TestPreferRetryTreePrefersFurtherAcceptedProgress(t *testing.T) {
 			children: []*Node{{}, {}, {}},
 		},
 		parseRuntime: ParseRuntime{
-			StopReason:  ParseStopNoStacksAlive,
+			StopReason:      ParseStopNoStacksAlive,
 			ExpectedEOFByte: 200,
-			Truncated:   true,
+			Truncated:       true,
 		},
 	}
 	candidate := &Tree{
@@ -120,5 +120,21 @@ func TestPreferRetryTreePrefersFewerChildrenOnEqualErrorTrees(t *testing.T) {
 
 	if !preferRetryTree(candidate, incumbent) {
 		t.Fatal("preferRetryTree = false, want true for smaller equal-span error tree")
+	}
+}
+
+func TestGLRStackCullTrigger(t *testing.T) {
+	if got := glrStackCullTrigger(8, arenaClassFull, "go"); got != 12 {
+		t.Fatalf("glrStackCullTrigger(full, go) = %d, want 12", got)
+	}
+	if got := glrStackCullTrigger(8, arenaClassFull, "c_sharp"); got != 8 {
+		t.Fatalf("glrStackCullTrigger(full, c_sharp) = %d, want 8", got)
+	}
+	if got := glrStackCullTrigger(8, arenaClassIncremental, "go"); got != 8 {
+		t.Fatalf("glrStackCullTrigger(incremental, go) = %d, want 8", got)
+	}
+	maxInt := int(^uint(0) >> 1)
+	if got := glrStackCullTrigger(maxInt, arenaClassFull, "go"); got != maxInt {
+		t.Fatalf("glrStackCullTrigger(maxInt) = %d, want %d", got, maxInt)
 	}
 }
