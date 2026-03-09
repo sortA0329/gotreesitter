@@ -188,3 +188,74 @@ func TestCSharpInvocationStatementRegression(t *testing.T) {
 	}
 	assertCSharpInvocationStatementShape(t, tree, lang, src, "newLines.Add(line)")
 }
+
+func TestCSharpJoinClauseRegression(t *testing.T) {
+	lang := CSharpLanguage()
+	parser := gotreesitter.NewParser(lang)
+
+	src := []byte(`class C
+{
+    void M()
+    {
+        var x = from a in sourceA
+                join b in sourceB on a.FK equals b.PK
+                select a;
+    }
+}
+`)
+
+	tree, err := parser.Parse(src)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	root := tree.RootNode()
+	if root == nil || root.HasError() {
+		t.Fatalf("unexpected error tree: %s", root.SExpr(lang))
+	}
+
+	joinClause := findFirstNamedDescendantWhere(root, lang, "join_clause", func(node *gotreesitter.Node) bool {
+		return strings.Contains(node.Text(src), "join b in sourceB")
+	})
+	if joinClause == nil {
+		t.Fatalf("missing join_clause in tree: %s", root.SExpr(lang))
+	}
+	if got := joinClause.FieldNameForChild(1, lang); got != "" {
+		t.Fatalf("join identifier field = %q, want empty: %s", got, joinClause.SExpr(lang))
+	}
+}
+
+func TestCSharpTypeConstraintNotnullRegression(t *testing.T) {
+	lang := CSharpLanguage()
+	parser := gotreesitter.NewParser(lang)
+
+	src := []byte(`class C<T> where T : notnull {}`)
+
+	tree, err := parser.Parse(src)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	root := tree.RootNode()
+	if root == nil || root.HasError() {
+		t.Fatalf("unexpected error tree: %s", root.SExpr(lang))
+	}
+
+	constraint := findFirstNamedDescendantWhere(root, lang, "type_parameter_constraint", func(node *gotreesitter.Node) bool {
+		return node.Text(src) == "notnull"
+	})
+	if constraint == nil {
+		t.Fatalf("missing type_parameter_constraint in tree: %s", root.SExpr(lang))
+	}
+	if got := constraint.ChildCount(); got != 1 {
+		t.Fatalf("constraint child count = %d, want 1: %s", got, constraint.SExpr(lang))
+	}
+	child := constraint.Child(0)
+	if child == nil {
+		t.Fatalf("constraint missing child: %s", constraint.SExpr(lang))
+	}
+	if got := child.Type(lang); got != "notnull" {
+		t.Fatalf("constraint child type = %q, want notnull: %s", got, constraint.SExpr(lang))
+	}
+	if got := constraint.FieldNameForChild(0, lang); got != "" {
+		t.Fatalf("constraint child field = %q, want empty: %s", got, constraint.SExpr(lang))
+	}
+}

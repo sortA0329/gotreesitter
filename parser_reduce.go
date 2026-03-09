@@ -460,10 +460,10 @@ func extendParentSpanToWindow(parent *Node, entries []stackEntry, start, reduced
 		if isNonSpanExtendingInvisibleSymbol(n.symbol, symbolNames) {
 			continue
 		}
-	// Invisible entries (with or without children) may have span that
-	// extends beyond their inlined children due to nested invisible leaf
-	// extensions. Apply contiguity check below.
-	if n.endByte >= parent.startByte && n.startByte < parent.startByte {
+		// Invisible entries (with or without children) may have span that
+		// extends beyond their inlined children due to nested invisible leaf
+		// extensions. Apply contiguity check below.
+		if n.endByte >= parent.startByte && n.startByte < parent.startByte {
 			parent.startByte = n.startByte
 			parent.startPoint = n.startPoint
 		}
@@ -721,6 +721,9 @@ func (p *Parser) buildReduceChildren(entries []stackEntry, start, end, childCoun
 					source = fieldSourceInherited
 				}
 				if inherited && fieldEnd-spanStart == 1 && !flattenedSpanHasFieldID(fieldIDs, spanStart, fieldEnd, fid) {
+					continue
+				}
+				if inherited && n.isNamed && !flattenedSpanHasFieldID(fieldIDs, spanStart, fieldEnd, fid) && countEligibleNamedFieldTargets(children, fieldIDs, spanStart, fieldEnd) > 1 {
 					continue
 				}
 				if inherited && !flattenedSpanHasFieldID(fieldIDs, spanStart, fieldEnd, fid) && flattenedSpanHasAnyDirectField(children, fieldIDs, fieldSources, spanStart, fieldEnd) {
@@ -992,19 +995,38 @@ func applyFieldToFlattenedSpan(children []*Node, fieldIDs []FieldID, fieldSource
 			return
 		}
 	}
+	namedTargets := 0
+	totalTargets := 0
+	allowAnonymousSingleDirectTarget := false
+	if source == fieldSourceDirect && !alreadyAssigned {
+		namedTargets = countEligibleNamedFieldTargets(children, fieldIDs, start, end)
+		totalTargets = countEligibleFieldTargets(children, fieldIDs, start, end)
+		allowAnonymousSingleDirectTarget = namedTargets == 0 && totalTargets == 1
+	}
 	for j := start; !alreadyAssigned && j < end; j++ {
 		if fieldIDs[j] != 0 || children[j] == nil || children[j].isExtra {
 			continue
 		}
-		if preferNamed && !children[j].isNamed {
+		if preferNamed && !allowAnonymousSingleDirectTarget && !children[j].isNamed {
 			continue
 		}
 		if inherited && nodeHasDirectFieldID(children[j], fid) {
 			continue
 		}
 		if source == fieldSourceDirect {
-			namedTargets := countEligibleNamedFieldTargets(children, fieldIDs, start, end)
-			totalTargets := countEligibleFieldTargets(children, fieldIDs, start, end)
+			if namedTargets == 0 && totalTargets == 1 {
+				for k := start; k < end; k++ {
+					if children[k] == nil || children[k].isExtra || fieldIDs[k] != 0 {
+						continue
+					}
+					fieldIDs[k] = fid
+					if fieldSources != nil {
+						fieldSources[k] = source
+					}
+					break
+				}
+				break
+			}
 			if namedTargets > 1 {
 				for k := start; k < end; k++ {
 					if children[k] == nil || children[k].isExtra || !children[k].isNamed || fieldIDs[k] != 0 {
@@ -1101,7 +1123,6 @@ func nodeHasAnyDirectField(n *Node) bool {
 	}
 	return false
 }
-
 
 func (p *Parser) applyReduceAction(s *glrStack, act ParseAction, tok Token, anyReduced *bool, nodeCount *int, arena *nodeArena, entryScratch *glrEntryScratch, gssScratch *gssScratch, entries []stackEntry, deferParentLinks bool, trackChildErrors bool) {
 	childCount := int(act.ChildCount)

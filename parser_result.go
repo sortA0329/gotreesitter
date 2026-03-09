@@ -277,6 +277,7 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, lang *Language) {
 	normalizeHaskellImportsSpan(root, source, lang)
 	normalizeNginxAttributeLineBreaks(root, source, lang)
 	normalizeTopLevelTrailingLineBreakSpan(root, source, lang)
+	normalizeCSharpTypeConstraintKeywords(root, lang)
 	normalizeScalaTrailingCommentOwnership(root, source, lang)
 	normalizeScalaFunctionModifierFields(root, lang)
 	normalizeScalaInterpolatedStringTail(root, source, lang)
@@ -515,6 +516,40 @@ func normalizeHaskellImportsSpan(root *Node, source []byte, lang *Language) {
 		left.endByte = right.startByte
 		left.endPoint = advancePointByBytes(left.endPoint, gap)
 	}
+}
+
+func normalizeCSharpTypeConstraintKeywords(root *Node, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "c_sharp" {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type(lang) == "type_parameter_constraint" && len(n.children) == 1 {
+			child := n.children[0]
+			if child != nil && child.Type(lang) == "identifier" && len(child.children) == 1 {
+				inner := child.children[0]
+				if inner != nil && inner.Type(lang) == "notnull" && !inner.isNamed &&
+					child.startByte == inner.startByte && child.endByte == inner.endByte {
+					n.children[0] = inner
+					inner.parent = n
+					inner.childIndex = 0
+					if len(n.fieldIDs) > 0 {
+						n.fieldIDs[0] = 0
+					}
+					if len(n.fieldSources) > 0 {
+						n.fieldSources[0] = fieldSourceNone
+					}
+				}
+			}
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
 }
 
 func normalizeScalaTrailingCommentOwnership(root *Node, source []byte, lang *Language) {

@@ -1065,6 +1065,46 @@ func TestBuildReduceChildrenInheritedFieldDoesNotBlanketSpanWithoutConflict(t *t
 	}
 }
 
+func TestBuildReduceChildrenInheritedFieldSkipsNamedHiddenSpanWithMultipleNamedTargets(t *testing.T) {
+	lang := &Language{
+		SymbolNames: []string{"EOF", "_join_header", "identifier", "in", "visible_parent"},
+		SymbolMetadata: []SymbolMetadata{
+			{Name: "EOF", Visible: false, Named: false},
+			{Name: "_join_header", Visible: false, Named: true},
+			{Name: "identifier", Visible: true, Named: true},
+			{Name: "in", Visible: true, Named: false},
+			{Name: "visible_parent", Visible: true, Named: true},
+		},
+		FieldNames: []string{"", "type"},
+		FieldMapSlices: [][2]uint16{
+			{0, 1},
+		},
+		FieldMapEntries: []FieldMapEntry{
+			{FieldID: 1, ChildIndex: 0, Inherited: true},
+		},
+	}
+
+	parser := NewParser(lang)
+	arena := newNodeArena(arenaClassFull)
+	left := newLeafNodeInArena(arena, 2, true, 0, 1, Point{Row: 0, Column: 0}, Point{Row: 0, Column: 1})
+	inTok := newLeafNodeInArena(arena, 3, false, 2, 4, Point{Row: 0, Column: 2}, Point{Row: 0, Column: 4})
+	right := newLeafNodeInArena(arena, 2, true, 5, 6, Point{Row: 0, Column: 5}, Point{Row: 0, Column: 6})
+	hidden := newParentNodeInArena(arena, 1, true, []*Node{left, inTok, right}, nil, 0)
+
+	children, fieldIDs, _ := parser.buildReduceChildren([]stackEntry{{node: hidden}}, 0, 1, 1, 4, 0, arena)
+	if got, want := len(children), 3; got != want {
+		t.Fatalf("len(children) = %d, want %d", got, want)
+	}
+	if got, want := len(fieldIDs), 3; got != want {
+		t.Fatalf("len(fieldIDs) = %d, want %d", got, want)
+	}
+	for i, fid := range fieldIDs {
+		if fid != 0 {
+			t.Fatalf("fieldIDs[%d] = %d, want 0", i, fid)
+		}
+	}
+}
+
 func TestBuildReduceChildrenDirectFieldPrefersNamedTargetsOnFlattenedSpan(t *testing.T) {
 	lang := &Language{
 		SymbolNames: []string{"EOF", "_hidden_inner", ".", "identifier", "visible_parent"},
@@ -1229,7 +1269,7 @@ func TestBuildReduceChildrenDirectFieldDoesNotSpreadToLeadingExtraComment(t *tes
 			{Name: "binding", Visible: true, Named: true},
 			{Name: "visible_parent", Visible: true, Named: true},
 		},
-		FieldNames: []string{"", "binding"},
+		FieldNames:     []string{"", "binding"},
 		FieldMapSlices: [][2]uint16{{0, 1}},
 		FieldMapEntries: []FieldMapEntry{
 			{FieldID: 1, ChildIndex: 0, Inherited: false},
@@ -1303,7 +1343,7 @@ func TestBuildReduceChildrenDirectFieldFillsSingleNamedHiddenSpanDelimiters(t *t
 			{Name: ")", Visible: true, Named: false},
 			{Name: "visible_parent", Visible: true, Named: true},
 		},
-		FieldNames: []string{"", "right"},
+		FieldNames:     []string{"", "right"},
 		FieldMapSlices: [][2]uint16{{0, 1}},
 		FieldMapEntries: []FieldMapEntry{
 			{FieldID: 1, ChildIndex: 0, Inherited: false},
@@ -1328,6 +1368,39 @@ func TestBuildReduceChildrenDirectFieldFillsSingleNamedHiddenSpanDelimiters(t *t
 	}
 }
 
+func TestBuildReduceChildrenDirectFieldAssignsSingleAnonymousHiddenTarget(t *testing.T) {
+	lang := &Language{
+		SymbolNames: []string{"EOF", "expression", "this", "member_access_expression"},
+		SymbolMetadata: []SymbolMetadata{
+			{Name: "EOF", Visible: false, Named: false},
+			{Name: "expression", Visible: false, Named: true},
+			{Name: "this", Visible: true, Named: false},
+			{Name: "member_access_expression", Visible: true, Named: true},
+		},
+		FieldNames:     []string{"", "expression"},
+		FieldMapSlices: [][2]uint16{{0, 1}},
+		FieldMapEntries: []FieldMapEntry{
+			{FieldID: 1, ChildIndex: 0, Inherited: false},
+		},
+	}
+
+	parser := NewParser(lang)
+	arena := newNodeArena(arenaClassFull)
+	thisTok := newLeafNodeInArena(arena, 2, false, 0, 4, Point{Row: 0, Column: 0}, Point{Row: 0, Column: 4})
+	hidden := newParentNodeInArena(arena, 1, true, []*Node{thisTok}, nil, 0)
+
+	children, fieldIDs, _ := parser.buildReduceChildren([]stackEntry{{node: hidden}}, 0, 1, 1, 3, 0, arena)
+	if got, want := len(children), 1; got != want {
+		t.Fatalf("len(children) = %d, want %d", got, want)
+	}
+	if got, want := len(fieldIDs), 1; got != want {
+		t.Fatalf("len(fieldIDs) = %d, want %d", got, want)
+	}
+	if got, want := fieldIDs[0], FieldID(1); got != want {
+		t.Fatalf("fieldIDs[0] = %d, want %d", got, want)
+	}
+}
+
 func TestBuildReduceChildrenInheritedFieldSkipsProjectionWhenFlattenedSpanHasDirectFields(t *testing.T) {
 	lang := &Language{
 		SymbolNames: []string{"EOF", "_hidden_inner", "modifier", "predefined_type", "identifier", "parameter_list", "visible_parent"},
@@ -1340,7 +1413,7 @@ func TestBuildReduceChildrenInheritedFieldSkipsProjectionWhenFlattenedSpanHasDir
 			{Name: "parameter_list", Visible: true, Named: true},
 			{Name: "visible_parent", Visible: true, Named: true},
 		},
-		FieldNames: []string{"", "type", "name", "parameters", "type_parameters"},
+		FieldNames:     []string{"", "type", "name", "parameters", "type_parameters"},
 		FieldMapSlices: [][2]uint16{{0, 1}},
 		FieldMapEntries: []FieldMapEntry{
 			{FieldID: 4, ChildIndex: 0, Inherited: true},
@@ -1386,7 +1459,7 @@ func TestBuildReduceChildrenInheritedFieldSkipsProjectionWhenDescendantHasDirect
 			{Name: "member_access_expression", Visible: true, Named: true},
 			{Name: "visible_parent", Visible: true, Named: true},
 		},
-		FieldNames: []string{"", "type", "expression", "name"},
+		FieldNames:     []string{"", "type", "expression", "name"},
 		FieldMapSlices: [][2]uint16{{0, 1}},
 		FieldMapEntries: []FieldMapEntry{
 			{FieldID: 1, ChildIndex: 0, Inherited: true},
