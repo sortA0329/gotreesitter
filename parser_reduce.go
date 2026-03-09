@@ -558,7 +558,7 @@ func fieldSourceAt(fieldSources []uint8, i int) uint8 {
 func countEligibleNamedFieldTargets(children []*Node, fieldIDs []FieldID, start, end int) int {
 	count := 0
 	for i := start; i < end; i++ {
-		if children[i] == nil || !children[i].isNamed || fieldIDs[i] != 0 {
+		if children[i] == nil || children[i].isExtra || !children[i].isNamed || fieldIDs[i] != 0 {
 			continue
 		}
 		count++
@@ -569,7 +569,7 @@ func countEligibleNamedFieldTargets(children []*Node, fieldIDs []FieldID, start,
 func countEligibleFieldTargets(children []*Node, fieldIDs []FieldID, start, end int) int {
 	count := 0
 	for i := start; i < end; i++ {
-		if children[i] == nil || fieldIDs[i] != 0 {
+		if children[i] == nil || children[i].isExtra || fieldIDs[i] != 0 {
 			continue
 		}
 		count++
@@ -926,7 +926,7 @@ func applyFieldToFlattenedSpan(children []*Node, fieldIDs []FieldID, fieldSource
 	override := !multipleKinds && conflictCount >= 2
 	if override {
 		for j := start; j < end; j++ {
-			if children[j] == nil {
+			if children[j] == nil || children[j].isExtra {
 				continue
 			}
 			if inherited && fieldIDs[j] != 0 && fieldIDs[j] != fid && fieldSourceAt(fieldSources, j) == fieldSourceDirect {
@@ -941,7 +941,7 @@ func applyFieldToFlattenedSpan(children []*Node, fieldIDs []FieldID, fieldSource
 	}
 	if !multipleKinds && conflictCount == 1 && preferNamed {
 		for j := start; j < end; j++ {
-			if children[j] == nil || !children[j].isNamed {
+			if children[j] == nil || children[j].isExtra || !children[j].isNamed {
 				continue
 			}
 			if inherited && fieldIDs[j] != 0 && fieldIDs[j] != fid && fieldSourceAt(fieldSources, j) == fieldSourceDirect {
@@ -962,36 +962,13 @@ func applyFieldToFlattenedSpan(children []*Node, fieldIDs []FieldID, fieldSource
 		}
 	}
 	if source == fieldSourceDirect && alreadyAssigned {
-		first, last := -1, -1
+		first := -1
 		for j := start; j < end; j++ {
 			if fieldIDs[j] != fid {
 				continue
 			}
 			if first < 0 {
 				first = j
-			}
-			last = j
-		}
-		if first >= 0 && last > first {
-			for j := first + 1; j < last; j++ {
-				if children[j] == nil || fieldIDs[j] != 0 {
-					continue
-				}
-				fieldIDs[j] = fid
-				if fieldSources != nil {
-					fieldSources[j] = source
-				}
-			}
-		}
-		if first >= 0 {
-			for j := first - 1; j >= start; j-- {
-				if children[j] == nil || children[j].isNamed || fieldIDs[j] != 0 {
-					break
-				}
-				fieldIDs[j] = fid
-				if fieldSources != nil {
-					fieldSources[j] = source
-				}
 			}
 		}
 	}
@@ -1001,7 +978,7 @@ func applyFieldToFlattenedSpan(children []*Node, fieldIDs []FieldID, fieldSource
 		}
 	}
 	for j := start; !alreadyAssigned && j < end; j++ {
-		if fieldIDs[j] != 0 || children[j] == nil {
+		if fieldIDs[j] != 0 || children[j] == nil || children[j].isExtra {
 			continue
 		}
 		if preferNamed && !children[j].isNamed {
@@ -1012,20 +989,9 @@ func applyFieldToFlattenedSpan(children []*Node, fieldIDs []FieldID, fieldSource
 		}
 		if source == fieldSourceDirect {
 			namedTargets := countEligibleNamedFieldTargets(children, fieldIDs, start, end)
-			totalTargets := countEligibleFieldTargets(children, fieldIDs, start, end)
 			if namedTargets > 1 {
-				firstNamed, lastNamed := -1, -1
 				for k := start; k < end; k++ {
-					if children[k] == nil || !children[k].isNamed || fieldIDs[k] != 0 {
-						continue
-					}
-					if firstNamed < 0 {
-						firstNamed = k
-					}
-					lastNamed = k
-				}
-				for k := firstNamed; k <= lastNamed; k++ {
-					if k < 0 || children[k] == nil || fieldIDs[k] != 0 {
+					if children[k] == nil || children[k].isExtra || !children[k].isNamed || fieldIDs[k] != 0 {
 						continue
 					}
 					fieldIDs[k] = fid
@@ -1035,9 +1001,9 @@ func applyFieldToFlattenedSpan(children []*Node, fieldIDs []FieldID, fieldSource
 				}
 				break
 			}
-			if namedTargets == 1 && totalTargets > 1 {
+			if namedTargets == 1 {
 				for k := start; k < end; k++ {
-					if children[k] == nil || fieldIDs[k] != 0 {
+					if children[k] == nil || children[k].isExtra || !children[k].isNamed || fieldIDs[k] != 0 {
 						continue
 					}
 					fieldIDs[k] = fid

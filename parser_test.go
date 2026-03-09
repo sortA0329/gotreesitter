@@ -1065,7 +1065,7 @@ func TestBuildReduceChildrenInheritedFieldDoesNotBlanketSpanWithoutConflict(t *t
 	}
 }
 
-func TestBuildReduceChildrenDirectFieldExtendsAcrossLeadingAnonymousOnFlattenedSpan(t *testing.T) {
+func TestBuildReduceChildrenDirectFieldPrefersNamedTargetsOnFlattenedSpan(t *testing.T) {
 	lang := &Language{
 		SymbolNames: []string{"EOF", "_hidden_inner", ".", "identifier", "visible_parent"},
 		SymbolMetadata: []SymbolMetadata{
@@ -1090,8 +1090,8 @@ func TestBuildReduceChildrenDirectFieldExtendsAcrossLeadingAnonymousOnFlattenedS
 	net := newLeafNodeInArena(arena, 3, true, 5, 8, Point{Row: 0, Column: 5}, Point{Row: 0, Column: 8})
 	dot1 := newLeafNodeInArena(arena, 2, false, 8, 9, Point{Row: 0, Column: 8}, Point{Row: 0, Column: 9})
 	url := newLeafNodeInArena(arena, 3, true, 9, 12, Point{Row: 0, Column: 9}, Point{Row: 0, Column: 12})
-	hidden := newParentNodeInArena(arena, 1, false, []*Node{dot0, net, dot1, url}, []FieldID{0, 1, 1, 1}, 0)
-	hidden.fieldSources = []uint8{fieldSourceNone, fieldSourceDirect, fieldSourceDirect, fieldSourceDirect}
+	hidden := newParentNodeInArena(arena, 1, false, []*Node{dot0, net, dot1, url}, []FieldID{0, 1, 0, 1}, 0)
+	hidden.fieldSources = []uint8{fieldSourceNone, fieldSourceDirect, fieldSourceNone, fieldSourceDirect}
 
 	children, fieldIDs, _ := parser.buildReduceChildren([]stackEntry{{node: hidden}}, 0, 1, 1, 4, 0, arena)
 	if got, want := len(children), 4; got != want {
@@ -1100,14 +1100,21 @@ func TestBuildReduceChildrenDirectFieldExtendsAcrossLeadingAnonymousOnFlattenedS
 	if got, want := len(fieldIDs), 4; got != want {
 		t.Fatalf("len(fieldIDs) = %d, want %d", got, want)
 	}
-	for i, fid := range fieldIDs {
-		if got, want := fid, FieldID(1); got != want {
-			t.Fatalf("fieldIDs[%d] = %d, want %d", i, got, want)
-		}
+	if got := fieldIDs[0]; got != 0 {
+		t.Fatalf("fieldIDs[0] = %d, want 0", got)
+	}
+	if got, want := fieldIDs[1], FieldID(1); got != want {
+		t.Fatalf("fieldIDs[1] = %d, want %d", got, want)
+	}
+	if got := fieldIDs[2]; got != 0 {
+		t.Fatalf("fieldIDs[2] = %d, want 0", got)
+	}
+	if got, want := fieldIDs[3], FieldID(1); got != want {
+		t.Fatalf("fieldIDs[3] = %d, want %d", got, want)
 	}
 }
 
-func TestBuildReduceChildrenRepeatedDirectFieldOnHiddenPathFillsAnonymousGap(t *testing.T) {
+func TestBuildReduceChildrenRepeatedDirectFieldOnHiddenPathLeavesAnonymousGapUnfielded(t *testing.T) {
 	lang := &Language{
 		SymbolNames: []string{"EOF", "_hidden_inner", ".", "identifier", "visible_parent"},
 		SymbolMetadata: []SymbolMetadata{
@@ -1134,8 +1141,8 @@ func TestBuildReduceChildrenRepeatedDirectFieldOnHiddenPathFillsAnonymousGap(t *
 	dot1 := newLeafNodeInArena(arena, 2, false, 8, 9, Point{Row: 0, Column: 8}, Point{Row: 0, Column: 9})
 	url := newLeafNodeInArena(arena, 3, true, 9, 12, Point{Row: 0, Column: 9}, Point{Row: 0, Column: 12})
 
-	tail := newParentNodeInArena(arena, 1, false, []*Node{net, dot1, url}, []FieldID{1, 1, 1}, 0)
-	tail.fieldSources = []uint8{fieldSourceDirect, fieldSourceDirect, fieldSourceDirect}
+	tail := newParentNodeInArena(arena, 1, false, []*Node{net, dot1, url}, []FieldID{1, 0, 1}, 0)
+	tail.fieldSources = []uint8{fieldSourceDirect, fieldSourceNone, fieldSourceDirect}
 	outer := newParentNodeInArena(arena, 1, false, []*Node{java, dot0, tail}, []FieldID{1, 0, 1}, 0)
 	outer.fieldSources = []uint8{fieldSourceDirect, fieldSourceNone, fieldSourceDirect}
 
@@ -1146,10 +1153,20 @@ func TestBuildReduceChildrenRepeatedDirectFieldOnHiddenPathFillsAnonymousGap(t *
 	if got, want := len(fieldIDs), 5; got != want {
 		t.Fatalf("len(fieldIDs) = %d, want %d", got, want)
 	}
-	for i, fid := range fieldIDs {
-		if got, want := fid, FieldID(1); got != want {
-			t.Fatalf("fieldIDs[%d] = %d, want %d", i, got, want)
-		}
+	if got, want := fieldIDs[0], FieldID(1); got != want {
+		t.Fatalf("fieldIDs[0] = %d, want %d", got, want)
+	}
+	if got := fieldIDs[1]; got != 0 {
+		t.Fatalf("fieldIDs[1] = %d, want 0", got)
+	}
+	if got, want := fieldIDs[2], FieldID(1); got != want {
+		t.Fatalf("fieldIDs[2] = %d, want %d", got, want)
+	}
+	if got := fieldIDs[3]; got != 0 {
+		t.Fatalf("fieldIDs[3] = %d, want 0", got)
+	}
+	if got, want := fieldIDs[4], FieldID(1); got != want {
+		t.Fatalf("fieldIDs[4] = %d, want %d", got, want)
 	}
 }
 
@@ -1199,6 +1216,79 @@ func TestBuildReduceChildrenInheritedFieldYieldsToDirectTargetOnHiddenSpan(t *te
 	}
 	if got, want := fieldSources[4], uint8(fieldSourceDirect); got != want {
 		t.Fatalf("fieldSources[4] = %d, want %d", got, want)
+	}
+}
+
+func TestBuildReduceChildrenDirectFieldDoesNotSpreadToLeadingExtraComment(t *testing.T) {
+	lang := &Language{
+		SymbolNames: []string{"EOF", "_hidden", "comment", "binding", "visible_parent"},
+		SymbolMetadata: []SymbolMetadata{
+			{Name: "EOF", Visible: false, Named: false},
+			{Name: "_hidden", Visible: false, Named: false},
+			{Name: "comment", Visible: true, Named: true},
+			{Name: "binding", Visible: true, Named: true},
+			{Name: "visible_parent", Visible: true, Named: true},
+		},
+		FieldNames: []string{"", "binding"},
+		FieldMapSlices: [][2]uint16{{0, 1}},
+		FieldMapEntries: []FieldMapEntry{
+			{FieldID: 1, ChildIndex: 0, Inherited: false},
+		},
+	}
+
+	parser := NewParser(lang)
+	arena := newNodeArena(arenaClassFull)
+	comment := newLeafNodeInArena(arena, 2, true, 0, 9, Point{Row: 0, Column: 0}, Point{Row: 0, Column: 9})
+	comment.isExtra = true
+	binding := newLeafNodeInArena(arena, 3, true, 10, 16, Point{Row: 0, Column: 10}, Point{Row: 0, Column: 16})
+	hidden := newParentNodeInArena(arena, 1, false, []*Node{comment, binding}, nil, 0)
+
+	children, fieldIDs, _ := parser.buildReduceChildren([]stackEntry{{node: hidden}}, 0, 1, 1, 4, 0, arena)
+	if got, want := len(children), 2; got != want {
+		t.Fatalf("len(children) = %d, want %d", got, want)
+	}
+	if got := fieldIDs[0]; got != 0 {
+		t.Fatalf("fieldIDs[0] = %d, want 0", got)
+	}
+	if got, want := fieldIDs[1], FieldID(1); got != want {
+		t.Fatalf("fieldIDs[1] = %d, want %d", got, want)
+	}
+}
+
+func TestAppendFlattenedHiddenChildrenRepeatedDirectFieldSkipsCommaSeparator(t *testing.T) {
+	lang := &Language{
+		SymbolNames: []string{"EOF", "_hidden_inner", "identifier", ",", "visible_parent"},
+		SymbolMetadata: []SymbolMetadata{
+			{Name: "EOF", Visible: false, Named: false},
+			{Name: "_hidden_inner", Visible: false, Named: false},
+			{Name: "identifier", Visible: true, Named: true},
+			{Name: ",", Visible: true, Named: false},
+			{Name: "visible_parent", Visible: true, Named: true},
+		},
+		FieldNames: []string{"", "name"},
+	}
+
+	arena := newNodeArena(arenaClassFull)
+	left := newLeafNodeInArena(arena, 2, true, 0, 1, Point{Row: 0, Column: 0}, Point{Row: 0, Column: 1})
+	comma := newLeafNodeInArena(arena, 3, false, 1, 2, Point{Row: 0, Column: 1}, Point{Row: 0, Column: 2})
+	right := newLeafNodeInArena(arena, 2, true, 3, 4, Point{Row: 0, Column: 3}, Point{Row: 0, Column: 4})
+	hidden := newParentNodeInArena(arena, 1, false, []*Node{left, comma, right}, []FieldID{1, 0, 1}, 0)
+	hidden.fieldSources = []uint8{fieldSourceDirect, fieldSourceNone, fieldSourceDirect}
+
+	children := arena.allocNodeSlice(3)
+	fieldIDs := arena.allocFieldIDSlice(3)
+	fieldSources := make([]uint8, 3)
+	if got, want := appendFlattenedHiddenChildrenWithFields(children, fieldIDs, fieldSources, 0, hidden, lang.SymbolMetadata), 3; got != want {
+		t.Fatalf("appendFlattenedHiddenChildrenWithFields() = %d, want %d", got, want)
+	}
+	if got, want := fieldIDs[0], FieldID(1); got != want {
+		t.Fatalf("fieldIDs[0] = %d, want %d", got, want)
+	}
+	if got := fieldIDs[1]; got != 0 {
+		t.Fatalf("fieldIDs[1] = %d, want 0", got)
+	}
+	if got, want := fieldIDs[2], FieldID(1); got != want {
+		t.Fatalf("fieldIDs[2] = %d, want %d", got, want)
 	}
 }
 
