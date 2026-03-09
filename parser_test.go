@@ -1292,6 +1292,42 @@ func TestAppendFlattenedHiddenChildrenRepeatedDirectFieldSkipsCommaSeparator(t *
 	}
 }
 
+func TestBuildReduceChildrenDirectFieldFillsSingleNamedHiddenSpanDelimiters(t *testing.T) {
+	lang := &Language{
+		SymbolNames: []string{"EOF", "_hidden_inner", "(", "list_expression", ")", "visible_parent"},
+		SymbolMetadata: []SymbolMetadata{
+			{Name: "EOF", Visible: false, Named: false},
+			{Name: "_hidden_inner", Visible: false, Named: false},
+			{Name: "(", Visible: true, Named: false},
+			{Name: "list_expression", Visible: true, Named: true},
+			{Name: ")", Visible: true, Named: false},
+			{Name: "visible_parent", Visible: true, Named: true},
+		},
+		FieldNames: []string{"", "right"},
+		FieldMapSlices: [][2]uint16{{0, 1}},
+		FieldMapEntries: []FieldMapEntry{
+			{FieldID: 1, ChildIndex: 0, Inherited: false},
+		},
+	}
+
+	parser := NewParser(lang)
+	arena := newNodeArena(arenaClassFull)
+	open := newLeafNodeInArena(arena, 2, false, 10, 11, Point{Row: 0, Column: 10}, Point{Row: 0, Column: 11})
+	list := newLeafNodeInArena(arena, 3, true, 11, 20, Point{Row: 0, Column: 11}, Point{Row: 0, Column: 20})
+	close := newLeafNodeInArena(arena, 4, false, 20, 21, Point{Row: 0, Column: 20}, Point{Row: 0, Column: 21})
+	hidden := newParentNodeInArena(arena, 1, false, []*Node{open, list, close}, nil, 0)
+
+	_, fieldIDs, _ := parser.buildReduceChildren([]stackEntry{{node: hidden}}, 0, 1, 1, 5, 0, arena)
+	if got, want := len(fieldIDs), 3; got != want {
+		t.Fatalf("len(fieldIDs) = %d, want %d", got, want)
+	}
+	for i, fid := range fieldIDs {
+		if got, want := fid, FieldID(1); got != want {
+			t.Fatalf("fieldIDs[%d] = %d, want %d", i, got, want)
+		}
+	}
+}
+
 func TestBuildReduceChildrenNoAliasNoFieldsInlinesHiddenChildren(t *testing.T) {
 	lang := &Language{
 		SymbolNames: []string{"EOF", "_hidden", "identifier", "operator"},

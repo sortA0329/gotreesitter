@@ -989,9 +989,22 @@ func applyFieldToFlattenedSpan(children []*Node, fieldIDs []FieldID, fieldSource
 		}
 		if source == fieldSourceDirect {
 			namedTargets := countEligibleNamedFieldTargets(children, fieldIDs, start, end)
+			totalTargets := countEligibleFieldTargets(children, fieldIDs, start, end)
 			if namedTargets > 1 {
 				for k := start; k < end; k++ {
 					if children[k] == nil || children[k].isExtra || !children[k].isNamed || fieldIDs[k] != 0 {
+						continue
+					}
+					fieldIDs[k] = fid
+					if fieldSources != nil {
+						fieldSources[k] = source
+					}
+				}
+				break
+			}
+			if namedTargets == 1 && totalTargets > 1 {
+				for k := start; k < end; k++ {
+					if children[k] == nil || children[k].isExtra || fieldIDs[k] != 0 {
 						continue
 					}
 					fieldIDs[k] = fid
@@ -1056,6 +1069,7 @@ func nodeHasDirectFieldID(n *Node, fid FieldID) bool {
 	}
 	return false
 }
+
 
 func (p *Parser) applyReduceAction(s *glrStack, act ParseAction, tok Token, anyReduced *bool, nodeCount *int, arena *nodeArena, entryScratch *glrEntryScratch, gssScratch *gssScratch, entries []stackEntry, deferParentLinks bool, trackChildErrors bool) {
 	childCount := int(act.ChildCount)
