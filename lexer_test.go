@@ -152,6 +152,47 @@ func TestPositionTracking(t *testing.T) {
 	}
 }
 
+func TestPositionTrackingUsesByteColumnsForUTF8(t *testing.T) {
+	states := buildIdentNumberWSDFA()
+	lex := NewLexer(states, []byte("ab\nx✗z"))
+
+	tok := lex.Next(0)
+	if tok.Symbol != 1 || tok.Text != "ab" {
+		t.Fatalf("token 1 = (%d,%q), want identifier ab", tok.Symbol, tok.Text)
+	}
+
+	tok = lex.Next(0)
+	if tok.Symbol != 1 {
+		t.Fatalf("token 2 Symbol = %d, want 1", tok.Symbol)
+	}
+	if tok.Text != "x" {
+		t.Fatalf("token 2 Text = %q, want %q", tok.Text, "x")
+	}
+	if tok.StartPoint.Row != 1 || tok.StartPoint.Column != 0 {
+		t.Fatalf("token 2 start = (%d,%d), want (1,0)", tok.StartPoint.Row, tok.StartPoint.Column)
+	}
+	if tok.EndPoint.Row != 1 || tok.EndPoint.Column != 1 {
+		t.Fatalf("token 2 end = (%d,%d), want (1,1)", tok.EndPoint.Row, tok.EndPoint.Column)
+	}
+
+	tok = lex.Next(0)
+	if tok.Symbol != 1 {
+		t.Fatalf("token 3 Symbol = %d, want 1", tok.Symbol)
+	}
+	if tok.Text != "z" {
+		t.Fatalf("token 3 Text = %q, want %q", tok.Text, "z")
+	}
+	if tok.StartByte != 7 || tok.EndByte != 8 {
+		t.Fatalf("token 3 bytes = [%d,%d), want [7,8)", tok.StartByte, tok.EndByte)
+	}
+	if tok.StartPoint.Row != 1 || tok.StartPoint.Column != 4 {
+		t.Fatalf("token 3 start = (%d,%d), want (1,4)", tok.StartPoint.Row, tok.StartPoint.Column)
+	}
+	if tok.EndPoint.Row != 1 || tok.EndPoint.Column != 5 {
+		t.Fatalf("token 3 end = (%d,%d), want (1,5)", tok.EndPoint.Row, tok.EndPoint.Column)
+	}
+}
+
 // TestEOF verifies EOF behavior for empty and single-character inputs.
 func TestEOF(t *testing.T) {
 	states := buildIdentNumberWSDFA()

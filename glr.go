@@ -486,7 +486,11 @@ func stackEntryNodesEquivalent(a, b *Node) bool {
 
 func stackEntryNodesEquivalentForLanguage(lang *Language, a, b *Node) bool {
 	if lang != nil && lang.Name == "c_sharp" {
-		if !stackEntryNodesEquivalentFrontier(a, b, stackEquivalentFrontierDepthLimit) {
+		depthLimit := stackEquivalentFrontierDepthLimit
+		if depthLimit < 10 {
+			depthLimit = 10
+		}
+		if !stackEntryNodesEquivalentFrontier(a, b, depthLimit) {
 			return false
 		}
 		if a == nil || b == nil {
@@ -499,7 +503,7 @@ func stackEntryNodesEquivalentForLanguage(lang *Language, a, b *Node) bool {
 				if child == nil || child.isExtra || (!child.isNamed && len(child.children) == 0) {
 					continue
 				}
-				if !stackEntryNodesEquivalentFrontier(child, b.children[i], stackEquivalentFrontierDepthLimit-1) {
+				if !stackEntryNodesEquivalentFrontier(child, b.children[i], depthLimit-1) {
 					return false
 				}
 				compared++
@@ -512,7 +516,7 @@ func stackEntryNodesEquivalentForLanguage(lang *Language, a, b *Node) bool {
 				if child == nil || child.isExtra || (!child.isNamed && len(child.children) == 0) {
 					continue
 				}
-				if !stackEntryNodesEquivalentFrontier(child, b.children[i], stackEquivalentFrontierDepthLimit-1) {
+				if !stackEntryNodesEquivalentFrontier(child, b.children[i], depthLimit-1) {
 					return false
 				}
 				compared++
