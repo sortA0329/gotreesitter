@@ -1328,6 +1328,97 @@ func TestBuildReduceChildrenDirectFieldFillsSingleNamedHiddenSpanDelimiters(t *t
 	}
 }
 
+func TestBuildReduceChildrenInheritedFieldSkipsProjectionWhenFlattenedSpanHasDirectFields(t *testing.T) {
+	lang := &Language{
+		SymbolNames: []string{"EOF", "_hidden_inner", "modifier", "predefined_type", "identifier", "parameter_list", "visible_parent"},
+		SymbolMetadata: []SymbolMetadata{
+			{Name: "EOF", Visible: false, Named: false},
+			{Name: "_hidden_inner", Visible: false, Named: false},
+			{Name: "modifier", Visible: true, Named: true},
+			{Name: "predefined_type", Visible: true, Named: true},
+			{Name: "identifier", Visible: true, Named: true},
+			{Name: "parameter_list", Visible: true, Named: true},
+			{Name: "visible_parent", Visible: true, Named: true},
+		},
+		FieldNames: []string{"", "type", "name", "parameters", "type_parameters"},
+		FieldMapSlices: [][2]uint16{{0, 1}},
+		FieldMapEntries: []FieldMapEntry{
+			{FieldID: 4, ChildIndex: 0, Inherited: true},
+		},
+	}
+
+	parser := NewParser(lang)
+	arena := newNodeArena(arenaClassFull)
+	modifier := newLeafNodeInArena(arena, 2, true, 0, 8, Point{Row: 0, Column: 0}, Point{Row: 0, Column: 8})
+	typ := newLeafNodeInArena(arena, 3, true, 9, 13, Point{Row: 0, Column: 9}, Point{Row: 0, Column: 13})
+	name := newLeafNodeInArena(arena, 4, true, 14, 15, Point{Row: 0, Column: 14}, Point{Row: 0, Column: 15})
+	params := newLeafNodeInArena(arena, 5, true, 15, 21, Point{Row: 0, Column: 15}, Point{Row: 0, Column: 21})
+	hidden := newParentNodeInArena(arena, 1, false, []*Node{modifier, typ, name, params}, []FieldID{0, 1, 2, 3}, 0)
+	hidden.fieldSources = []uint8{fieldSourceNone, fieldSourceDirect, fieldSourceDirect, fieldSourceDirect}
+
+	children, fieldIDs, _ := parser.buildReduceChildren([]stackEntry{{node: hidden}}, 0, 1, 1, 6, 0, arena)
+	if got, want := len(children), 4; got != want {
+		t.Fatalf("len(children) = %d, want %d", got, want)
+	}
+	if got := fieldIDs[0]; got != 0 {
+		t.Fatalf("fieldIDs[0] = %d, want 0", got)
+	}
+	if got, want := fieldIDs[1], FieldID(1); got != want {
+		t.Fatalf("fieldIDs[1] = %d, want %d", got, want)
+	}
+	if got, want := fieldIDs[2], FieldID(2); got != want {
+		t.Fatalf("fieldIDs[2] = %d, want %d", got, want)
+	}
+	if got, want := fieldIDs[3], FieldID(3); got != want {
+		t.Fatalf("fieldIDs[3] = %d, want %d", got, want)
+	}
+}
+
+func TestBuildReduceChildrenInheritedFieldSkipsProjectionWhenDescendantHasDirectFields(t *testing.T) {
+	lang := &Language{
+		SymbolNames: []string{"EOF", "_hidden_inner", "join", "identifier", ".", "member_access_expression", "visible_parent"},
+		SymbolMetadata: []SymbolMetadata{
+			{Name: "EOF", Visible: false, Named: false},
+			{Name: "_hidden_inner", Visible: false, Named: false},
+			{Name: "join", Visible: true, Named: false},
+			{Name: "identifier", Visible: true, Named: true},
+			{Name: ".", Visible: true, Named: false},
+			{Name: "member_access_expression", Visible: true, Named: true},
+			{Name: "visible_parent", Visible: true, Named: true},
+		},
+		FieldNames: []string{"", "type", "expression", "name"},
+		FieldMapSlices: [][2]uint16{{0, 1}},
+		FieldMapEntries: []FieldMapEntry{
+			{FieldID: 1, ChildIndex: 0, Inherited: true},
+		},
+	}
+
+	parser := NewParser(lang)
+	arena := newNodeArena(arenaClassFull)
+	joinTok := newLeafNodeInArena(arena, 2, false, 0, 4, Point{Row: 0, Column: 0}, Point{Row: 0, Column: 4})
+	ident := newLeafNodeInArena(arena, 3, true, 5, 6, Point{Row: 0, Column: 5}, Point{Row: 0, Column: 6})
+	exprBase := newLeafNodeInArena(arena, 3, true, 7, 8, Point{Row: 0, Column: 7}, Point{Row: 0, Column: 8})
+	dot := newLeafNodeInArena(arena, 4, false, 8, 9, Point{Row: 0, Column: 8}, Point{Row: 0, Column: 9})
+	exprName := newLeafNodeInArena(arena, 3, true, 9, 11, Point{Row: 0, Column: 9}, Point{Row: 0, Column: 11})
+	access := newParentNodeInArena(arena, 5, true, []*Node{exprBase, dot, exprName}, []FieldID{2, 0, 3}, 0)
+	access.fieldSources = []uint8{fieldSourceDirect, fieldSourceNone, fieldSourceDirect}
+	hidden := newParentNodeInArena(arena, 1, false, []*Node{joinTok, ident, access}, nil, 0)
+
+	children, fieldIDs, _ := parser.buildReduceChildren([]stackEntry{{node: hidden}}, 0, 1, 1, 6, 0, arena)
+	if got, want := len(children), 3; got != want {
+		t.Fatalf("len(children) = %d, want %d", got, want)
+	}
+	if got := fieldIDs[0]; got != 0 {
+		t.Fatalf("fieldIDs[0] = %d, want 0", got)
+	}
+	if got := fieldIDs[1]; got != 0 {
+		t.Fatalf("fieldIDs[1] = %d, want 0", got)
+	}
+	if got := fieldIDs[2]; got != 0 {
+		t.Fatalf("fieldIDs[2] = %d, want 0", got)
+	}
+}
+
 func TestBuildReduceChildrenNoAliasNoFieldsInlinesHiddenChildren(t *testing.T) {
 	lang := &Language{
 		SymbolNames: []string{"EOF", "_hidden", "identifier", "operator"},

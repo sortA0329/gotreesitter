@@ -601,6 +601,18 @@ func flattenedSpanHasFieldID(fieldIDs []FieldID, start, end int, fid FieldID) bo
 	return false
 }
 
+func flattenedSpanHasAnyDirectField(children []*Node, fieldIDs []FieldID, fieldSources []uint8, start, end int) bool {
+	for i := start; i < end; i++ {
+		if i < len(fieldIDs) && fieldIDs[i] != 0 && fieldSourceAt(fieldSources, i) == fieldSourceDirect {
+			return true
+		}
+		if i < len(children) && nodeHasAnyDirectField(children[i]) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *Parser) buildReduceChildren(entries []stackEntry, start, end, childCount int, parentSymbol Symbol, productionID uint16, arena *nodeArena) ([]*Node, []FieldID, []uint8) {
 	lang := p.language
 	symbolMeta := lang.SymbolMetadata
@@ -709,6 +721,9 @@ func (p *Parser) buildReduceChildren(entries []stackEntry, start, end, childCoun
 					source = fieldSourceInherited
 				}
 				if inherited && fieldEnd-spanStart == 1 && !flattenedSpanHasFieldID(fieldIDs, spanStart, fieldEnd, fid) {
+					continue
+				}
+				if inherited && !flattenedSpanHasFieldID(fieldIDs, spanStart, fieldEnd, fid) && flattenedSpanHasAnyDirectField(children, fieldIDs, fieldSources, spanStart, fieldEnd) {
 					continue
 				}
 				if !inherited || !fieldIDAppearsLater(rawFieldIDs, structuralChildIndex, fid) {
@@ -1064,6 +1079,23 @@ func nodeHasDirectFieldID(n *Node, fid FieldID) bool {
 	}
 	for i := range n.fieldIDs {
 		if n.fieldIDs[i] == fid {
+			return true
+		}
+	}
+	return false
+}
+
+func nodeHasAnyDirectField(n *Node) bool {
+	if n == nil {
+		return false
+	}
+	for i := range n.fieldIDs {
+		if n.fieldIDs[i] != 0 && fieldSourceAt(n.fieldSources, i) == fieldSourceDirect {
+			return true
+		}
+	}
+	for _, child := range n.children {
+		if nodeHasAnyDirectField(child) {
 			return true
 		}
 	}
