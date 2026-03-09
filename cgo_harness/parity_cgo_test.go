@@ -800,6 +800,12 @@ func TestParityIncrementalParse(t *testing.T) {
 					chosen = candidate
 					chosenOK = true
 				}
+				// Most languages only need the first fresh-parity-safe site.
+				// Continue scanning for html so we can preserve the coverage
+				// diagnostic, but avoid O(n) slow-candidate sweeps elsewhere.
+				if tc.name != "html" {
+					break
+				}
 			}
 			if tc.name == "html" {
 				t.Logf("[%s/incremental] valid edit sites=%d/%d", tc.name, validSiteCount, len(candidates))
