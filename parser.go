@@ -316,6 +316,67 @@ func (p *Parser) canFinalizeNoActionEOF(s *glrStack) bool {
 	return uint32(onlyNonExtra.symbol) >= tokenCount
 }
 
+func (p *Parser) tryInsertMissingSingleShift(s *glrStack, tok Token, nodeCount *int, arena *nodeArena, entryScratch *glrEntryScratch, gssScratch *gssScratch, trackChildErrors *bool) bool {
+	if p == nil || p.language == nil || s == nil || s.dead || tok.NoLookahead {
+		return false
+	}
+	if tok.Symbol == 0 || uint32(tok.Symbol) >= p.language.TokenCount {
+		return false
+	}
+
+	state := s.top().state
+	var (
+		candidateSym Symbol
+		candidateAct ParseAction
+		candidateCnt int
+	)
+	p.forEachActionIndexInState(state, func(sym Symbol, idx uint16) bool {
+		if sym == 0 || sym == tok.Symbol || uint32(sym) >= p.language.TokenCount {
+			return true
+		}
+		if int(sym) >= len(p.language.SymbolMetadata) {
+			return true
+		}
+		meta := p.language.SymbolMetadata[sym]
+		if !meta.Visible || !meta.Named {
+			return true
+		}
+		if int(idx) >= len(p.language.ParseActions) {
+			return true
+		}
+		actions := p.language.ParseActions[idx].Actions
+		if len(actions) != 1 {
+			return true
+		}
+		act := actions[0]
+		if act.Type != ParseActionShift || act.Extra {
+			return true
+		}
+		if p.lookupActionIndex(act.State, tok.Symbol) == 0 {
+			return true
+		}
+		candidateSym = sym
+		candidateAct = act
+		candidateCnt++
+		return candidateCnt < 2
+	})
+	if candidateCnt != 1 {
+		return false
+	}
+
+	missingTok := Token{
+		Symbol:     candidateSym,
+		StartByte:  tok.StartByte,
+		EndByte:    tok.StartByte,
+		StartPoint: tok.StartPoint,
+		EndPoint:   tok.StartPoint,
+		Missing:    true,
+	}
+	p.applyAction(s, candidateAct, missingTok, new(bool), nodeCount, arena, entryScratch, gssScratch, nil, false, trackChildErrors)
+	s.shifted = false
+	return true
+}
+
 func (p *Parser) parseIncrementalInternal(source []byte, oldTree *Tree, ts TokenSource, timing *incrementalParseTiming) *Tree {
 	// Fast path: unchanged source and no recorded edits.
 	if canReuseUnchangedTree(source, oldTree, p.language) {
@@ -880,6 +941,12 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 
 				// Try grammar-directed recovery by searching the stack for
 				// the nearest state that can recover on this lookahead.
+				if p.tryInsertMissingSingleShift(s, tok, &nodeCount, arena, &scratch.entries, &scratch.gss, &trackChildErrors) {
+					anyReduced = true
+					needToken = false
+					consecutiveReduces = 0
+					continue
+				}
 				if depth, recoverAct, ok := p.findRecoverActionOnStack(s, tok.Symbol, timing); ok {
 					if !s.truncate(depth + 1) {
 						s.dead = true

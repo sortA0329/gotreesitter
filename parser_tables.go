@@ -70,6 +70,65 @@ func (p *Parser) lookupActionIndex(state StateID, sym Symbol) uint16 {
 	return p.lookupActionIndexSmall(state, sym)
 }
 
+func (p *Parser) forEachActionIndexInState(state StateID, visit func(sym Symbol, idx uint16) bool) {
+	if p == nil || p.language == nil || visit == nil {
+		return
+	}
+	if int(state) < p.denseLimit {
+		if int(state) >= len(p.language.ParseTable) {
+			return
+		}
+		row := p.language.ParseTable[state]
+		for sym, idx := range row {
+			if idx == 0 {
+				continue
+			}
+			if !visit(Symbol(sym), idx) {
+				return
+			}
+		}
+		return
+	}
+
+	smallIdx := int(state) - p.smallBase
+	if smallIdx < 0 || smallIdx >= len(p.language.SmallParseTableMap) {
+		return
+	}
+	if smallIdx < len(p.smallLookup) && len(p.smallLookup[smallIdx]) > 0 {
+		for _, pair := range p.smallLookup[smallIdx] {
+			if !visit(Symbol(pair.sym), pair.val) {
+				return
+			}
+		}
+		return
+	}
+
+	offset := p.language.SmallParseTableMap[smallIdx]
+	table := p.language.SmallParseTable
+	if int(offset) >= len(table) {
+		return
+	}
+	groupCount := table[offset]
+	pos := int(offset) + 1
+	for i := uint16(0); i < groupCount; i++ {
+		if pos+1 >= len(table) {
+			return
+		}
+		sectionValue := table[pos]
+		symbolCount := table[pos+1]
+		pos += 2
+		for j := uint16(0); j < symbolCount; j++ {
+			if pos >= len(table) {
+				return
+			}
+			if !visit(Symbol(table[pos]), sectionValue) {
+				return
+			}
+			pos++
+		}
+	}
+}
+
 func (p *Parser) lookupActionIndexDense(state StateID, sym Symbol) uint16 {
 	if int(state) >= len(p.language.ParseTable) {
 		return 0
