@@ -39,9 +39,10 @@ type profileFile struct {
 }
 
 type corpusFile struct {
-	AbsPath string
-	RelPath string
-	Size    int64
+	AbsPath    string
+	RelPath    string
+	Size       int64
+	SourceRoot string
 }
 
 type corpusManifest struct {
@@ -78,6 +79,7 @@ func main() {
 		langsRaw          string
 		outDir            string
 		workDir           string
+		repoCachePath     string
 		keepWorkDir       bool
 		includeFixtures   bool
 		maxFilesPerBucket int
@@ -92,6 +94,7 @@ func main() {
 	flag.StringVar(&langsRaw, "langs", "top50", "language list: top50 or comma-separated names")
 	flag.StringVar(&outDir, "out", "cgo_harness/corpus_real", "output corpus directory")
 	flag.StringVar(&workDir, "work-dir", "", "temporary clone work directory (default: temp dir)")
+	flag.StringVar(&repoCachePath, "repo-cache", os.Getenv("GTS_PARITY_REPO_CACHE"), "optional root of cached git repos to mine for missing buckets")
 	flag.BoolVar(&keepWorkDir, "keep-work-dir", false, "keep work directory after command exits")
 	flag.BoolVar(&includeFixtures, "include-fixtures", false, "include upstream grammar corpus/tests/fixtures instead of restricting selection to real-world/example-style files")
 	flag.IntVar(&maxFilesPerBucket, "max-files-per-bucket", 1, "max files selected per bucket per language")
@@ -163,6 +166,7 @@ func main() {
 	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
 		fatalf("create repo root: %v", err)
 	}
+	repoMetaCache := map[string]repoMetadata{}
 
 	for _, lang := range languages {
 		entry, ok := lockEntries[lang]
@@ -185,6 +189,14 @@ func main() {
 			manifest.Missing = append(manifest.Missing, lang)
 			fmt.Fprintf(os.Stderr, "[warn] collect candidates failed for %q: %v\n", lang, err)
 			continue
+		}
+		if needsRepoCacheFallback(candidates, minMediumBytes, minLargeBytes) {
+			extra, err := collectCandidatesFromRepoCache(repoCachePath, repoDir, candidateExts, candidateNames, maxBytes, includeFixtures)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[warn] repo-cache fallback failed for %q: %v\n", lang, err)
+			} else if len(extra) > 0 {
+				candidates = appendUniqueCorpusFiles(candidates, extra)
+			}
 		}
 		if len(candidates) == 0 {
 			manifest.Missing = append(manifest.Missing, lang)
@@ -220,8 +232,8 @@ func main() {
 					Bucket:       sf.Bucket,
 					Bytes:        int64(len(out.Content)),
 					SHA256:       hex.EncodeToString(sum[:]),
-					SourceRepo:   entry.RepoURL,
-					SourceCommit: entry.Commit,
+					SourceRepo:   sourceRepoURL(sf.corpusFile, repoDir, entry, repoMetaCache),
+					SourceCommit: sourceRepoCommit(sf.corpusFile, repoDir, entry, repoMetaCache),
 					SourcePath:   sf.RelPath,
 					OutputPath:   outputPath,
 				})
@@ -258,6 +270,61 @@ func main() {
 	if len(manifest.Missing) > 0 {
 		fmt.Printf("Missing/failed: %d (%s)\n", len(manifest.Missing), strings.Join(manifest.Missing, ", "))
 	}
+}
+
+type repoMetadata struct {
+	URL    string
+	Commit string
+}
+
+func sourceRepoURL(cf corpusFile, primaryRoot string, entry lockEntry, cache map[string]repoMetadata) string {
+	if cf.SourceRoot == "" || sameDir(cf.SourceRoot, primaryRoot) {
+		return entry.RepoURL
+	}
+	return repoMetadataForRoot(cf.SourceRoot, cache).URL
+}
+
+func sourceRepoCommit(cf corpusFile, primaryRoot string, entry lockEntry, cache map[string]repoMetadata) string {
+	if cf.SourceRoot == "" || sameDir(cf.SourceRoot, primaryRoot) {
+		return entry.Commit
+	}
+	return repoMetadataForRoot(cf.SourceRoot, cache).Commit
+}
+
+func repoMetadataForRoot(root string, cache map[string]repoMetadata) repoMetadata {
+	root = filepath.Clean(root)
+	if meta, ok := cache[root]; ok {
+		return meta
+	}
+	base := filepath.Base(root)
+	meta := repoMetadata{
+		URL:    strings.TrimSpace(gitOutput(root, "config", "--get", "remote.origin.url")),
+		Commit: strings.TrimSpace(gitOutput(root, "rev-parse", "HEAD")),
+	}
+	if meta.URL == "" {
+		meta.URL = "local:" + base
+	}
+	if meta.Commit == "" {
+		meta.Commit = inferredLocalCacheCommit(base)
+	}
+	cache[root] = meta
+	return meta
+}
+
+func gitOutput(dir string, args ...string) string {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return string(out)
+}
+
+func sameDir(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 func resolveLanguageList(profilePath, langsRaw string) (string, []string, error) {
@@ -535,9 +602,10 @@ func collectCandidatesWithNames(repoDir string, exts, names []string, maxBytes i
 		}
 		seen[rel] = struct{}{}
 		out = append(out, corpusFile{
-			AbsPath: absPath,
-			RelPath: rel,
-			Size:    size,
+			AbsPath:    absPath,
+			RelPath:    rel,
+			Size:       size,
+			SourceRoot: repoDir,
 		})
 	}
 
@@ -623,6 +691,122 @@ func collectCandidatesWithNames(repoDir string, exts, names []string, maxBytes i
 		return out[i].RelPath < out[j].RelPath
 	})
 	return out, nil
+}
+
+func collectCandidatesFromRepoCache(repoCachePath, primaryRepoDir string, exts []string, names []string, maxBytes int, includeFixtures bool) ([]corpusFile, error) {
+	if strings.TrimSpace(repoCachePath) == "" {
+		return nil, nil
+	}
+	repoRoots, err := discoverRepoRoots(repoCachePath)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]corpusFile, 0, 64)
+	for _, root := range repoRoots {
+		if sameDir(root, primaryRepoDir) {
+			continue
+		}
+		candidates, err := collectCandidatesWithNames(root, exts, names, maxBytes, includeFixtures)
+		if err != nil {
+			continue
+		}
+		out = append(out, candidates...)
+	}
+	return out, nil
+}
+
+func discoverRepoRoots(root string) ([]string, error) {
+	root = filepath.Clean(root)
+	if strings.TrimSpace(root) == "" {
+		return nil, nil
+	}
+	if isGitRepo(root) {
+		return []string{root}, nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(entries))
+	for _, ent := range entries {
+		if !ent.IsDir() {
+			continue
+		}
+		path := filepath.Join(root, ent.Name())
+		out = append(out, path)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func isGitRepo(path string) bool {
+	return strings.TrimSpace(gitOutput(path, "rev-parse", "--show-toplevel")) != ""
+}
+
+func needsRepoCacheFallback(candidates []corpusFile, minMedium, minLarge int) bool {
+	var hasMedium, hasLarge bool
+	for _, cf := range candidates {
+		switch {
+		case cf.Size >= int64(minLarge):
+			hasLarge = true
+		case cf.Size >= int64(minMedium):
+			hasMedium = true
+		}
+		if hasMedium && hasLarge {
+			return false
+		}
+	}
+	return !hasMedium || !hasLarge
+}
+
+func appendUniqueCorpusFiles(dst, extra []corpusFile) []corpusFile {
+	seen := make(map[string]struct{}, len(dst)+len(extra))
+	for _, cf := range dst {
+		seen[corpusFileKey(cf)] = struct{}{}
+	}
+	for _, cf := range extra {
+		key := corpusFileKey(cf)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		dst = append(dst, cf)
+	}
+	return dst
+}
+
+func corpusFileKey(cf corpusFile) string {
+	if strings.TrimSpace(cf.AbsPath) != "" {
+		return filepath.Clean(cf.AbsPath)
+	}
+	return filepath.ToSlash(cf.RelPath)
+}
+
+func inferredLocalCacheCommit(base string) string {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return "unknown"
+	}
+	if idx := strings.LastIndexByte(base, '-'); idx >= 0 && idx+1 < len(base) {
+		suffix := base[idx+1:]
+		if len(suffix) >= 7 && len(suffix) <= 40 && isHexString(suffix) {
+			return suffix
+		}
+	}
+	return "unknown"
+}
+
+func isHexString(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		case r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return s != ""
 }
 
 func candidateMatchersForLanguage(lang string, exts []string) ([]string, []string) {
@@ -862,7 +1046,7 @@ func selectFilesByBucket(candidates []corpusFile, maxPerBucket, minSmall, minMed
 				if pool[i].Size != pool[j].Size {
 					return pool[i].Size < pool[j].Size
 				}
-				return pool[i].RelPath < pool[j].RelPath
+				return pool[i].AbsPath < pool[j].AbsPath
 			})
 		case "medium":
 			target := int64((minMedium + minLarge) / 2)
@@ -872,14 +1056,14 @@ func selectFilesByBucket(candidates []corpusFile, maxPerBucket, minSmall, minMed
 				if di != dj {
 					return di < dj
 				}
-				return pool[i].RelPath < pool[j].RelPath
+				return pool[i].AbsPath < pool[j].AbsPath
 			})
 		case "large":
 			sort.Slice(pool, func(i, j int) bool {
 				if pool[i].Size != pool[j].Size {
 					return pool[i].Size > pool[j].Size
 				}
-				return pool[i].RelPath < pool[j].RelPath
+				return pool[i].AbsPath < pool[j].AbsPath
 			})
 		}
 		for i := 0; i < len(pool) && len(result) < maxPerBucket; i++ {
@@ -900,10 +1084,10 @@ func selectFilesByBucket(candidates []corpusFile, maxPerBucket, minSmall, minMed
 		pick("large", large),
 	} {
 		for _, sf := range bucketPick {
-			if _, ok := used[sf.RelPath]; ok {
+			if _, ok := used[corpusFileKey(sf.corpusFile)]; ok {
 				continue
 			}
-			used[sf.RelPath] = struct{}{}
+			used[corpusFileKey(sf.corpusFile)] = struct{}{}
 			out = append(out, sf)
 		}
 	}
@@ -920,10 +1104,10 @@ func selectFilesByBucket(candidates []corpusFile, maxPerBucket, minSmall, minMed
 			if len(out) >= target {
 				break
 			}
-			if _, ok := used[cf.RelPath]; ok {
+			if _, ok := used[corpusFileKey(cf)]; ok {
 				continue
 			}
-			used[cf.RelPath] = struct{}{}
+			used[corpusFileKey(cf)] = struct{}{}
 			out = append(out, selectedCorpusFile{
 				corpusFile: cf,
 				Bucket:     classifyBucket(cf.Size, minSmall, minMedium, minLarge),

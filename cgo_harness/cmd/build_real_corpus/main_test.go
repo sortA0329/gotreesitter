@@ -2,7 +2,9 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -306,6 +308,86 @@ func TestCandidateMatchersForLanguageInfersKnownExtensionsAndNames(t *testing.T)
 	}
 }
 
+func TestCollectCandidatesFromRepoCacheAddsMissingMediumBucket(t *testing.T) {
+	primary := t.TempDir()
+	cacheRoot := t.TempDir()
+	repo := filepath.Join(cacheRoot, "sample-repo")
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	initGitRepo(t, repo, "https://example.com/sample-repo.git")
+	mustWriteSizedText(t, filepath.Join(repo, "src", "example.ts"), 4096)
+	gitRun(t, repo, "-c", "user.email=test@example.com", "-c", "user.name=test", "add", ".")
+	gitRun(t, repo, "-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "-m", "init")
+
+	candidates, err := collectCandidatesFromRepoCache(cacheRoot, primary, []string{".ts"}, nil, defaultMaxBytes, false)
+	if err != nil {
+		t.Fatalf("collectCandidatesFromRepoCache: %v", err)
+	}
+	if len(candidates) == 0 {
+		t.Fatalf("expected repo-cache candidates, got none")
+	}
+	if got := candidates[0].SourceRoot; got != repo {
+		t.Fatalf("SourceRoot = %q, want %q", got, repo)
+	}
+	if got := filepath.ToSlash(candidates[0].RelPath); got != "src/example.ts" {
+		t.Fatalf("RelPath = %q, want %q", got, "src/example.ts")
+	}
+}
+
+func TestCollectCandidatesFromPlainRepoCacheDirectoryAddsCandidates(t *testing.T) {
+	primary := t.TempDir()
+	cacheRoot := t.TempDir()
+	repo := filepath.Join(cacheRoot, "sample-repo-deadbeef")
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	mustWriteSizedText(t, filepath.Join(repo, "src", "example.ts"), 4096)
+
+	candidates, err := collectCandidatesFromRepoCache(cacheRoot, primary, []string{".ts"}, nil, defaultMaxBytes, false)
+	if err != nil {
+		t.Fatalf("collectCandidatesFromRepoCache: %v", err)
+	}
+	if len(candidates) == 0 {
+		t.Fatalf("expected repo-cache candidates, got none")
+	}
+	meta := repoMetadataForRoot(repo, map[string]repoMetadata{})
+	if got, want := meta.URL, "local:sample-repo-deadbeef"; got != want {
+		t.Fatalf("URL = %q, want %q", got, want)
+	}
+	if got, want := meta.Commit, "deadbeef"; got != want {
+		t.Fatalf("Commit = %q, want %q", got, want)
+	}
+}
+
+func TestRepoMetadataForRootReadsGitRemoteAndCommit(t *testing.T) {
+	repo := t.TempDir()
+	initGitRepo(t, repo, "https://example.com/real/repo.git")
+	mustWriteSizedText(t, filepath.Join(repo, "sample.js"), 512)
+	gitRun(t, repo, "-c", "user.email=test@example.com", "-c", "user.name=test", "add", ".")
+	gitRun(t, repo, "-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "-m", "init")
+
+	meta := repoMetadataForRoot(repo, map[string]repoMetadata{})
+	if got, want := meta.URL, "https://example.com/real/repo.git"; got != want {
+		t.Fatalf("URL = %q, want %q", got, want)
+	}
+	if len(strings.TrimSpace(meta.Commit)) < 7 {
+		t.Fatalf("Commit = %q, want non-empty git hash", meta.Commit)
+	}
+}
+
+func TestNeedsRepoCacheFallbackRequiresMissingMediumOrLarge(t *testing.T) {
+	if !needsRepoCacheFallback([]corpusFile{{Size: 300}}, 2000, 16000) {
+		t.Fatalf("small-only candidates should need fallback")
+	}
+	if !needsRepoCacheFallback([]corpusFile{{Size: 3000}}, 2000, 16000) {
+		t.Fatalf("medium-only candidates should need fallback")
+	}
+	if needsRepoCacheFallback([]corpusFile{{Size: 3000}, {Size: 20000}}, 2000, 16000) {
+		t.Fatalf("medium+large candidates should not need fallback")
+	}
+}
+
 func TestSplitTreeSitterCorpusSources(t *testing.T) {
 	content := []byte(`================================================================================
 First case
@@ -346,6 +428,21 @@ class B {}
 	}
 	if got, want := string(cases[1].Source), "class B {}\n\n"; got != want {
 		t.Fatalf("cases[1].Source = %q, want %q", got, want)
+	}
+}
+
+func initGitRepo(t *testing.T, repo, remote string) {
+	t.Helper()
+	gitRun(t, repo, "init")
+	gitRun(t, repo, "remote", "add", "origin", remote)
+}
+
+func gitRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
 	}
 }
 
