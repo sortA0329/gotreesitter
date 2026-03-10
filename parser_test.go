@@ -1634,6 +1634,32 @@ func TestBuildReduceChildrenCarriesHiddenChildFieldsThroughFieldlessParent(t *te
 	}
 }
 
+func TestBuildFieldIDsSkipsConflictingInheritedEntriesOnSameChild(t *testing.T) {
+	lang := &Language{
+		FieldNames: []string{"", "name", "type"},
+		FieldMapSlices: [][2]uint16{
+			{0, 2},
+		},
+		FieldMapEntries: []FieldMapEntry{
+			{FieldID: 1, ChildIndex: 0, Inherited: true},
+			{FieldID: 2, ChildIndex: 0, Inherited: true},
+		},
+	}
+
+	parser := NewParser(lang)
+	arena := newNodeArena(arenaClassFull)
+	fieldIDs, inherited := parser.buildFieldIDs(1, 0, arena)
+	if got, want := len(fieldIDs), 1; got != want {
+		t.Fatalf("len(fieldIDs) = %d, want %d", got, want)
+	}
+	if got := fieldIDs[0]; got != 0 {
+		t.Fatalf("fieldIDs[0] = %d, want 0", got)
+	}
+	if got := inherited[0]; got {
+		t.Fatal("inherited[0] = true, want false")
+	}
+}
+
 func TestBuildReduceChildrenDirectFieldWinsOverInheritedEntriesOnSameChild(t *testing.T) {
 	lang := &Language{
 		SymbolNames: []string{"EOF", "function_declaration", "identifier", "parameters", "block", "declaration"},

@@ -775,7 +775,7 @@ func (p *Parser) buildReduceChildren(entries []stackEntry, start, end, childCoun
 					if child == nil {
 						continue
 					}
-					if len(child.children) == 0 && !nodeHasDirectFieldID(child, fid) {
+					if nodeHasDirectFieldID(child, fid) || len(child.children) == 0 {
 						continue
 					}
 				}
@@ -1502,6 +1502,7 @@ func (p *Parser) buildFieldIDs(childCount int, productionID uint16, arena *nodeA
 
 	fieldIDs := arena.allocFieldIDSlice(childCount)
 	inherited := make([]bool, childCount)
+	conflictedInherited := make([]bool, childCount)
 	start := int(fm[0])
 	assigned := false
 	for i := 0; i < count; i++ {
@@ -1513,12 +1514,22 @@ func (p *Parser) buildFieldIDs(childCount int, productionID uint16, arena *nodeA
 		if int(entry.ChildIndex) < len(fieldIDs) {
 			idx := entry.ChildIndex
 			switch {
+			case conflictedInherited[idx]:
+				if !entry.Inherited {
+					fieldIDs[idx] = entry.FieldID
+					inherited[idx] = false
+					conflictedInherited[idx] = false
+				}
 			case fieldIDs[idx] == 0:
 				fieldIDs[idx] = entry.FieldID
 				inherited[idx] = entry.Inherited
 			case !entry.Inherited && inherited[idx]:
 				fieldIDs[idx] = entry.FieldID
 				inherited[idx] = false
+			case entry.Inherited && inherited[idx] && fieldIDs[idx] != entry.FieldID:
+				fieldIDs[idx] = 0
+				inherited[idx] = false
+				conflictedInherited[idx] = true
 			case entry.Inherited == inherited[idx]:
 				fieldIDs[idx] = entry.FieldID
 				inherited[idx] = entry.Inherited
