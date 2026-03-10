@@ -261,6 +261,35 @@ func (p *Parser) applyReduceActionFromGSS(s *glrStack, act ParseAction, tok Toke
 		return
 	}
 
+	if child := p.collapsibleUnarySelfReduction(act, tok, arena, windowEntries, 0, reducedEnd, children, fieldIDs); child != nil {
+		gotoState := p.lookupGoto(topState, act.Symbol)
+		targetState := topState
+		if gotoState != 0 {
+			targetState = gotoState
+		}
+		if tok.NoLookahead && targetState == topState {
+			child.isExtra = true
+		}
+		child.productionID = act.ProductionID
+		child.preGotoState = topState
+		child.parseState = targetState
+		p.pushStackNode(s, targetState, child, entryScratch, gssScratch)
+		for i := reducedEnd; i < actualEnd; i++ {
+			extra := windowEntries[i].node
+			if extra == nil {
+				continue
+			}
+			extra.parseState = targetState
+			p.pushStackNode(s, targetState, extra, entryScratch, gssScratch)
+		}
+		s.score += int(act.DynamicPrecedence)
+		*anyReduced = true
+		if tmpEntries != nil {
+			*tmpEntries = windowEntries[:0]
+		}
+		return
+	}
+
 	named := p.isNamedSymbol(act.Symbol)
 	var parent *Node
 	if deferParentLinks {
@@ -1206,6 +1235,32 @@ func (p *Parser) applyReduceAction(s *glrStack, act ParseAction, tok Token, anyR
 		return
 	}
 
+	if child := p.collapsibleUnarySelfReduction(act, tok, arena, entries, window.start, window.reducedEnd, children, fieldIDs); child != nil {
+		gotoState := p.lookupGoto(window.topState, act.Symbol)
+		targetState := window.topState
+		if gotoState != 0 {
+			targetState = gotoState
+		}
+		if tok.NoLookahead && targetState == window.topState {
+			child.isExtra = true
+		}
+		child.productionID = act.ProductionID
+		child.preGotoState = window.topState
+		child.parseState = targetState
+		p.pushStackNode(s, targetState, child, entryScratch, gssScratch)
+		for i := trailingStart; i < trailingEnd; i++ {
+			extra := entries[i].node
+			if extra == nil {
+				continue
+			}
+			extra.parseState = targetState
+			p.pushStackNode(s, targetState, extra, entryScratch, gssScratch)
+		}
+		s.score += int(act.DynamicPrecedence)
+		*anyReduced = true
+		return
+	}
+
 	named := p.isNamedSymbol(act.Symbol)
 	var parent *Node
 	if deferParentLinks {
@@ -1248,6 +1303,26 @@ func (p *Parser) applyReduceAction(s *glrStack, act ParseAction, tok Token, anyR
 
 	s.score += int(act.DynamicPrecedence)
 	*anyReduced = true
+}
+
+func (p *Parser) collapsibleUnarySelfReduction(act ParseAction, tok Token, arena *nodeArena, entries []stackEntry, start, reducedEnd int, children []*Node, fieldIDs []FieldID) *Node {
+	if p == nil || arena == nil || tok.NoLookahead {
+		return nil
+	}
+	if reducedEnd-start != 1 || len(children) != 1 || len(fieldIDs) != 0 {
+		return nil
+	}
+	child := children[0]
+	if child == nil || child.symbol != act.Symbol || child.ownerArena != arena || child.parent != nil {
+		return nil
+	}
+	if start < 0 || start >= len(entries) || entries[start].node != child {
+		return nil
+	}
+	if p.reduceProductionHasFields(act.ProductionID) || len(p.reduceAliasSequence(act.ProductionID)) != 0 {
+		return nil
+	}
+	return child
 }
 
 func recoverAction(entry *ParseActionEntry) (ParseAction, bool) {

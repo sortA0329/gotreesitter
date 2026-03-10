@@ -2047,6 +2047,94 @@ func TestBuildResultFromGLRWithGSSOnlyStack(t *testing.T) {
 	tree.Release()
 }
 
+func TestBuildResultFromNodesUsesErrorRootForMultipleFragments(t *testing.T) {
+	lang := &Language{
+		SymbolNames:    []string{"number", "expression"},
+		SymbolMetadata: []SymbolMetadata{{Visible: true, Named: true}, {Visible: true, Named: true}},
+		Name:           "test",
+	}
+	parser := &Parser{language: lang, hasRootSymbol: true, rootSymbol: 1}
+	arena := acquireNodeArena(arenaClassFull)
+	source := []byte("12")
+
+	left := newLeafNodeInArena(arena, 0, true, 0, 1, Point{}, Point{Column: 1})
+	right := newLeafNodeInArena(arena, 0, true, 1, 2, Point{Column: 1}, Point{Column: 2})
+	right.hasError = true
+
+	tree := parser.buildResultFromNodes([]*Node{left, right}, source, arena, nil, nil, nil)
+	if tree == nil || tree.RootNode() == nil {
+		t.Fatal("buildResultFromNodes returned nil tree/root")
+	}
+	if got := tree.RootNode().Type(lang); got != "ERROR" {
+		t.Fatalf("root type = %q, want %q", got, "ERROR")
+	}
+	if !tree.RootNode().HasError() {
+		t.Fatal("expected recovered multi-fragment root to have HasError=true")
+	}
+	tree.Release()
+}
+
+func TestBuildResultFromNodesFlattensLeadingRootFragment(t *testing.T) {
+	lang := &Language{
+		SymbolNames:    []string{"number", "expression"},
+		SymbolMetadata: []SymbolMetadata{{Visible: true, Named: true}, {Visible: true, Named: true}},
+		Name:           "test",
+	}
+	parser := &Parser{language: lang, hasRootSymbol: true, rootSymbol: 1}
+	arena := acquireNodeArena(arenaClassFull)
+	source := []byte("123")
+
+	left := newLeafNodeInArena(arena, 0, true, 0, 1, Point{}, Point{Column: 1})
+	middle := newLeafNodeInArena(arena, 0, true, 1, 2, Point{Column: 1}, Point{Column: 2})
+	right := newLeafNodeInArena(arena, 0, true, 2, 3, Point{Column: 2}, Point{Column: 3})
+	right.hasError = true
+	fragment := newParentNodeInArena(arena, 1, true, []*Node{left, middle}, nil, 0)
+	fragment.hasError = true
+
+	tree := parser.buildResultFromNodes([]*Node{fragment, right}, source, arena, nil, nil, nil)
+	if tree == nil || tree.RootNode() == nil {
+		t.Fatal("buildResultFromNodes returned nil tree/root")
+	}
+	root := tree.RootNode()
+	if got := root.Type(lang); got != "ERROR" {
+		t.Fatalf("root type = %q, want %q", got, "ERROR")
+	}
+	if got, want := root.ChildCount(), 3; got != want {
+		t.Fatalf("root child count = %d, want %d", got, want)
+	}
+	if first := root.Child(0); first == nil || first == fragment {
+		t.Fatalf("expected flattened first child, got %v", first)
+	}
+	tree.Release()
+}
+
+func TestBuildResultFromNodesKeepsExpectedRootForValidMultipleFragments(t *testing.T) {
+	lang := &Language{
+		SymbolNames:    []string{"number", "expression"},
+		SymbolMetadata: []SymbolMetadata{{Visible: true, Named: true}, {Visible: true, Named: true}},
+		Name:           "test",
+	}
+	parser := &Parser{language: lang, hasRootSymbol: true, rootSymbol: 1}
+	arena := acquireNodeArena(arenaClassFull)
+	source := []byte("12")
+
+	left := newLeafNodeInArena(arena, 0, true, 0, 1, Point{}, Point{Column: 1})
+	right := newLeafNodeInArena(arena, 0, true, 1, 2, Point{Column: 1}, Point{Column: 2})
+
+	tree := parser.buildResultFromNodes([]*Node{left, right}, source, arena, nil, nil, nil)
+	if tree == nil || tree.RootNode() == nil {
+		t.Fatal("buildResultFromNodes returned nil tree/root")
+	}
+	root := tree.RootNode()
+	if got := root.Type(lang); got != "expression" {
+		t.Fatalf("root type = %q, want %q", got, "expression")
+	}
+	if root.HasError() {
+		t.Fatal("expected valid multi-fragment root to stay error-free")
+	}
+	tree.Release()
+}
+
 func TestCompactAcceptedStacksPreservesAllAcceptedForFinalChoice(t *testing.T) {
 	lang := buildAmbiguousLanguage()
 	parser := NewParser(lang)
