@@ -210,6 +210,50 @@ func TestCollectCandidatesWithNamedFilesAllowsSpecialLanguageFiles(t *testing.T)
 	}
 }
 
+func TestCollectCandidatesWithNamedFilesAllowsMarkdownReadmeWhenRequested(t *testing.T) {
+	tmp := t.TempDir()
+	mustWriteSizedText(t, filepath.Join(tmp, "README.md"), 900)
+	mustWriteSizedText(t, filepath.Join(tmp, "README.txt"), 900)
+
+	candidates, err := collectCandidatesWithNames(tmp, []string{".md"}, []string{"readme.md"}, defaultMaxBytes, false)
+	if err != nil {
+		t.Fatalf("collectCandidatesWithNames: %v", err)
+	}
+
+	seen := map[string]bool{}
+	for _, c := range candidates {
+		seen[filepath.ToSlash(c.RelPath)] = true
+	}
+	if !seen["README.md"] {
+		t.Fatalf("expected README.md candidate missing: %#v", candidates)
+	}
+	if seen["README.txt"] {
+		t.Fatalf("README.txt should remain excluded: %#v", candidates)
+	}
+}
+
+func TestCollectCandidatesWithNamedFilesAllowsUndersizedCMakeHighlightSource(t *testing.T) {
+	tmp := t.TempDir()
+	mustWriteSizedText(t, filepath.Join(tmp, "CMakeLists.txt"), 900)
+	mustWriteSizedText(t, filepath.Join(tmp, "test", "highlight", "block.cmake"), 147)
+
+	candidates, err := collectCandidatesWithNames(tmp, []string{".cmake"}, []string{"cmakelists.txt"}, defaultMaxBytes, false)
+	if err != nil {
+		t.Fatalf("collectCandidatesWithNames: %v", err)
+	}
+
+	seen := map[string]bool{}
+	for _, c := range candidates {
+		seen[filepath.ToSlash(c.RelPath)] = true
+	}
+	if !seen["CMakeLists.txt"] {
+		t.Fatalf("expected CMakeLists.txt candidate missing: %#v", candidates)
+	}
+	if !seen["test/highlight/block.cmake"] {
+		t.Fatalf("expected undersized highlight source candidate missing: %#v", candidates)
+	}
+}
+
 func TestCandidateMatchersForLanguageInfersKnownExtensionsAndNames(t *testing.T) {
 	tests := []struct {
 		lang      string
@@ -221,6 +265,7 @@ func TestCandidateMatchersForLanguageInfersKnownExtensionsAndNames(t *testing.T)
 		{lang: "gomod", wantNames: []string{"go.mod"}},
 		{lang: "cmake", wantExts: []string{".cmake"}, wantNames: []string{"cmakelists.txt"}},
 		{lang: "make", wantExts: []string{".mk"}, wantNames: []string{"makefile"}},
+		{lang: "markdown", wantExts: []string{".md"}, wantNames: []string{"readme.md"}},
 	}
 
 	for _, tc := range tests {

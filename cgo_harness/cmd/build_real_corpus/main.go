@@ -524,7 +524,10 @@ func collectCandidatesWithNames(repoDir string, exts, names []string, maxBytes i
 			return
 		}
 		size := info.Size()
-		if size < defaultSmallMin || size > int64(maxBytes) {
+		if size > int64(maxBytes) {
+			return
+		}
+		if size < defaultSmallMin && !allowUndersizedSourceCandidate(rel, extSet, nameSet) {
 			return
 		}
 		if !looksText(absPath) {
@@ -645,8 +648,24 @@ func candidateMatchersForLanguage(lang string, exts []string) ([]string, []strin
 	case "make":
 		outExts = append(outExts, ".mk")
 		names = append(names, "makefile")
+	case "markdown":
+		outExts = append(outExts, ".md")
+		names = append(names, "readme.md")
 	}
 	return outExts, names
+}
+
+func allowUndersizedSourceCandidate(rel string, extSet, nameSet map[string]struct{}) bool {
+	rel = strings.ToLower(filepath.ToSlash(rel))
+	if !isAllowedSourceTestPath(rel) {
+		return false
+	}
+	if strings.HasSuffix(rel, ".cmake") {
+		_, hasExt := extSet[".cmake"]
+		_, hasName := nameSet["cmakelists.txt"]
+		return hasExt || hasName
+	}
+	return false
 }
 
 type materializedCorpusOutput struct {
