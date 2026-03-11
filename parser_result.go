@@ -323,6 +323,8 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, lang *Language) {
 	normalizeHaskellRootImportField(root, lang)
 	normalizeHaskellDeclarationsSpan(root, source, lang)
 	normalizeIniSectionStarts(root, lang)
+	normalizeCTranslationUnitRoot(root, lang)
+	normalizeGoSourceFileRoot(root, lang)
 	normalizeJavaScriptTopLevelObjectLiterals(root, lang)
 	normalizeLuaChunkLocalDeclarationFields(root, source, lang)
 	normalizeErlangSourceFileForms(root, lang)
@@ -356,6 +358,94 @@ func bytesAreTrivia(b []byte) bool {
 		}
 	}
 	return true
+}
+
+func normalizeCTranslationUnitRoot(root *Node, lang *Language) {
+	if root == nil || lang == nil || root.Type(lang) != "ERROR" {
+		return
+	}
+	if lang.Name != "c" && lang.Name != "cpp" {
+		return
+	}
+	sym, ok := symbolByName(lang, "translation_unit")
+	if !ok || !rootLooksLikeCTopLevel(root, lang) {
+		return
+	}
+	root.symbol = sym
+	root.isNamed = int(sym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[sym].Named
+}
+
+func rootLooksLikeCTopLevel(root *Node, lang *Language) bool {
+	if root == nil || lang == nil || len(root.children) == 0 {
+		return false
+	}
+	sawTopLevel := false
+	for _, child := range root.children {
+		if child == nil {
+			continue
+		}
+		switch child.Type(lang) {
+		case "preproc_if",
+			"preproc_ifdef",
+			"preproc_include",
+			"preproc_def",
+			"preproc_function_def",
+			"preproc_call",
+			"declaration",
+			"function_definition",
+			"linkage_specification",
+			"type_definition",
+			"struct_specifier",
+			"union_specifier",
+			"enum_specifier",
+			"class_specifier",
+			"namespace_definition",
+			"template_declaration",
+			"comment":
+			sawTopLevel = true
+		default:
+			return false
+		}
+	}
+	return sawTopLevel
+}
+
+func normalizeGoSourceFileRoot(root *Node, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "go" || root.Type(lang) != "ERROR" {
+		return
+	}
+	sym, ok := symbolByName(lang, "source_file")
+	if !ok || !rootLooksLikeGoTopLevel(root, lang) {
+		return
+	}
+	root.symbol = sym
+	root.isNamed = int(sym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[sym].Named
+}
+
+func rootLooksLikeGoTopLevel(root *Node, lang *Language) bool {
+	if root == nil || lang == nil || len(root.children) == 0 {
+		return false
+	}
+	sawTopLevel := false
+	for _, child := range root.children {
+		if child == nil {
+			continue
+		}
+		switch child.Type(lang) {
+		case "package_clause",
+			"import_declaration",
+			"function_declaration",
+			"method_declaration",
+			"const_declaration",
+			"type_declaration",
+			"var_declaration",
+			"comment":
+			sawTopLevel = true
+		default:
+			return false
+		}
+	}
+	return sawTopLevel
 }
 
 func flattenRootSelfFragments(nodes []*Node, arena *nodeArena, rootSymbol Symbol) []*Node {
