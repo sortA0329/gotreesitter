@@ -2121,6 +2121,45 @@ func TestNormalizeJavaScriptTopLevelObjectLiteralsRewritesObjectLiteral(t *testi
 	}
 }
 
+func TestNormalizeJavaScriptTopLevelExpressionStatementBoundsSnapToChildren(t *testing.T) {
+	lang := &Language{
+		Name:        "javascript",
+		SymbolNames: []string{"EOF", "program", "expression_statement", "identifier", ";"},
+		SymbolMetadata: []SymbolMetadata{
+			{Name: "EOF", Visible: false, Named: false},
+			{Name: "program", Visible: true, Named: true},
+			{Name: "expression_statement", Visible: true, Named: true},
+			{Name: "identifier", Visible: true, Named: true},
+			{Name: ";", Visible: true, Named: false},
+		},
+	}
+
+	arena := newNodeArena(arenaClassFull)
+	expr := newLeafNodeInArena(arena, 3, true, 10, 20, Point{Row: 1, Column: 2}, Point{Row: 1, Column: 12})
+	semi := newLeafNodeInArena(arena, 4, false, 20, 21, Point{Row: 1, Column: 12}, Point{Row: 1, Column: 13})
+	stmt := newParentNodeInArena(arena, 2, true, []*Node{expr, semi}, nil, 0)
+	stmt.startByte = 0
+	stmt.startPoint = Point{}
+	stmt.endByte = 22
+	stmt.endPoint = Point{Row: 2}
+	root := newParentNodeInArena(arena, 1, true, []*Node{stmt}, nil, 0)
+
+	normalizeJavaScriptTopLevelExpressionStatementBounds(root, lang)
+
+	if got, want := stmt.StartByte(), uint32(10); got != want {
+		t.Fatalf("stmt.StartByte = %d, want %d", got, want)
+	}
+	if got, want := stmt.EndByte(), uint32(21); got != want {
+		t.Fatalf("stmt.EndByte = %d, want %d", got, want)
+	}
+	if got, want := stmt.StartPoint(), (Point{Row: 1, Column: 2}); got != want {
+		t.Fatalf("stmt.StartPoint = %#v, want %#v", got, want)
+	}
+	if got, want := stmt.EndPoint(), (Point{Row: 1, Column: 13}); got != want {
+		t.Fatalf("stmt.EndPoint = %#v, want %#v", got, want)
+	}
+}
+
 func TestNormalizeLuaChunkLocalDeclarationFields(t *testing.T) {
 	lang := &Language{
 		Name:        "lua",

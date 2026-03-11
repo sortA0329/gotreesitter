@@ -328,6 +328,7 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, lang *Language) {
 	normalizeIniSectionStarts(root, lang)
 	normalizeCTranslationUnitRoot(root, lang)
 	normalizeGoSourceFileRoot(root, lang)
+	normalizeJavaScriptTopLevelExpressionStatementBounds(root, lang)
 	normalizeJavaScriptTopLevelObjectLiterals(root, lang)
 	normalizeLuaChunkLocalDeclarationFields(root, source, lang)
 	normalizeErlangSourceFileForms(root, lang)
@@ -2572,6 +2573,25 @@ func normalizeJavaScriptTopLevelObjectLiterals(root *Node, lang *Language) {
 		if ok {
 			root.children[i] = repl
 		}
+	}
+}
+
+func normalizeJavaScriptTopLevelExpressionStatementBounds(root *Node, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "javascript" || root.Type(lang) != "program" {
+		return
+	}
+	for _, child := range root.children {
+		if child == nil || child.Type(lang) != "expression_statement" || len(child.children) == 0 {
+			continue
+		}
+		first, last := firstAndLastNonNilChild(child.children)
+		if first == nil || last == nil {
+			continue
+		}
+		child.startByte = first.startByte
+		child.startPoint = first.startPoint
+		child.endByte = last.endByte
+		child.endPoint = last.endPoint
 	}
 }
 
