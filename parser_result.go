@@ -59,6 +59,34 @@ func nodesFromGSS(stack gssStack) []*Node {
 	return nodes
 }
 
+func filterZeroWidthExtras(nodes []*Node, arena *nodeArena) []*Node {
+	if len(nodes) == 0 {
+		return nodes
+	}
+	keep := 0
+	for _, n := range nodes {
+		if n == nil || !n.isExtra || n.endByte > n.startByte {
+			keep++
+		}
+	}
+	if keep == len(nodes) || keep == 0 {
+		return nodes
+	}
+	filtered := make([]*Node, 0, keep)
+	for _, n := range nodes {
+		if n != nil && n.isExtra && n.endByte == n.startByte {
+			continue
+		}
+		filtered = append(filtered, n)
+	}
+	if arena != nil {
+		out := arena.allocNodeSlice(len(filtered))
+		copy(out, filtered)
+		return out
+	}
+	return filtered
+}
+
 // buildResult constructs the final Tree from a stack of entries.
 func (p *Parser) buildResult(stack []stackEntry, source []byte, arena *nodeArena, oldTree *Tree, reuseState *parseReuseState, linkScratch *[]*Node) *Tree {
 	var nodes []*Node
@@ -117,7 +145,7 @@ func (p *Parser) buildResultFromNodes(nodes []*Node, source []byte, arena *nodeA
 		candidate = repairPythonRootNode(candidate, arena, p.language)
 		extendNodeToTrailingWhitespace(candidate, source)
 		p.normalizeRootSourceStart(candidate, source)
-		normalizeKnownSpanAttribution(candidate, source, p.language)
+		normalizeKnownSpanAttribution(candidate, source, p)
 		if !hasExpectedRoot || candidate.symbol == expectedRootSymbol {
 			if shouldWireParentLinks {
 				wireParentLinksWithScratch(candidate, linkScratch)
@@ -137,7 +165,7 @@ func (p *Parser) buildResultFromNodes(nodes []*Node, source []byte, arena *nodeA
 		root := newParentNodeInArena(arena, expectedRootSymbol, true, rootChildren, nil, 0)
 		extendNodeToTrailingWhitespace(root, source)
 		p.normalizeRootSourceStart(root, source)
-		normalizeKnownSpanAttribution(root, source, p.language)
+		normalizeKnownSpanAttribution(root, source, p)
 		if shouldWireParentLinks {
 			wireParentLinksWithScratch(root, linkScratch)
 		}
@@ -153,9 +181,13 @@ func (p *Parser) buildResultFromNodes(nodes []*Node, source []byte, arena *nodeA
 	for _, n := range nodes {
 		if n.isExtra {
 			allExtras = append(allExtras, n)
-			// Ignore invisible extras in final-root recovery; they should not
-			// force an error wrapper or inflate root child counts.
-			if p != nil && p.language != nil && int(n.symbol) < len(p.language.SymbolMetadata) && p.language.SymbolMetadata[n.symbol].Visible {
+			// Ignore invisible extras and zero-width extras in final-root
+			// recovery; they should not force an error wrapper or inflate root
+			// child counts.
+			if p != nil && p.language != nil &&
+				int(n.symbol) < len(p.language.SymbolMetadata) &&
+				p.language.SymbolMetadata[n.symbol].Visible &&
+				n.endByte > n.startByte {
 				extras = append(extras, n)
 			}
 		} else {
@@ -246,7 +278,7 @@ func (p *Parser) buildResultFromNodes(nodes []*Node, source []byte, arena *nodeA
 			extendNodeToTrailingWhitespace(realRoot, source)
 		}
 		p.normalizeRootSourceStart(realRoot, source)
-		normalizeKnownSpanAttribution(realRoot, source, p.language)
+		normalizeKnownSpanAttribution(realRoot, source, p)
 		if returnRealRoot {
 			if shouldWireParentLinks {
 				wireParentLinksWithScratch(realRoot, linkScratch)
@@ -255,10 +287,10 @@ func (p *Parser) buildResultFromNodes(nodes []*Node, source []byte, arena *nodeA
 		}
 	}
 
-	rootChildren := nodes
-	rootSymbol := nodes[len(nodes)-1].symbol
+	rootChildren := filterZeroWidthExtras(nodes, arena)
+	rootSymbol := rootChildren[len(rootChildren)-1].symbol
 	rootHasError := false
-	for _, n := range nodes {
+	for _, n := range rootChildren {
 		if n != nil && (n.IsError() || n.HasError()) {
 			rootHasError = true
 			break
@@ -276,13 +308,13 @@ func (p *Parser) buildResultFromNodes(nodes []*Node, source []byte, arena *nodeA
 		}
 	}
 	root := newParentNodeInArena(arena, rootSymbol, true, rootChildren, nil, 0)
-	if rootHasError && !(p != nil && p.language != nil && p.language.Name == "python" && hasExpectedRoot && pythonModuleChildrenLookComplete(nodes, p.language)) {
+	if rootHasError && !(p != nil && p.language != nil && p.language.Name == "python" && hasExpectedRoot && pythonModuleChildrenLookComplete(rootChildren, p.language)) {
 		root.hasError = true
 	}
 	root = repairPythonRootNode(root, arena, p.language)
 	extendNodeToTrailingWhitespace(root, source)
 	p.normalizeRootSourceStart(root, source)
-	normalizeKnownSpanAttribution(root, source, p.language)
+	normalizeKnownSpanAttribution(root, source, p)
 	if shouldWireParentLinks {
 		wireParentLinksWithScratch(root, linkScratch)
 	}
@@ -304,8 +336,13 @@ func (p *Parser) normalizeRootSourceStart(root *Node, source []byte) {
 // normalizeKnownSpanAttribution applies narrow compatibility fixes where
 // C tree-sitter attributes trailing trivia to a grouped node but this runtime
 // currently drops it during child normalization.
-func normalizeKnownSpanAttribution(root *Node, source []byte, lang *Language) {
+func normalizeKnownSpanAttribution(root *Node, source []byte, p *Parser) {
+	var lang *Language
+	if p != nil {
+		lang = p.language
+	}
 	normalizeCobolLeadingAreaStart(root, source, lang)
+	normalizeCobolTopLevelDefinitionEnd(root, source, lang)
 	normalizeCooklangTrailingStepTail(root, source, lang)
 	normalizeDartConstructorSignatureKinds(root, source, lang)
 	normalizeDartSingleTypeArgumentFreeCalls(root, lang)
@@ -322,17 +359,30 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, lang *Language) {
 	normalizeHaskellZeroWidthTokens(root, lang)
 	normalizeHaskellRootImportField(root, lang)
 	normalizeHaskellDeclarationsSpan(root, source, lang)
+	normalizeHaskellLocalBindsStarts(root, source, lang)
+	normalizeHaskellQuasiquoteStarts(root, source, lang)
 	normalizeBashProgramVariableAssignments(root, lang)
 	normalizeHCLConfigFileRoot(root, lang)
 	normalizeHTMLRecoveredNestedCustomTags(root, lang)
 	normalizeIniSectionStarts(root, lang)
 	normalizeCTranslationUnitRoot(root, lang)
-	normalizeGoSourceFileRoot(root, lang)
+	normalizeCSizeofUnknownTypeIdentifiers(root, source, lang)
+	normalizeCCastUnknownTypeIdentifiers(root, source, lang)
+	normalizeGoSourceFileRoot(root, source, p)
+	normalizeGoGroupedSpecListSemicolons(root, source, lang)
+	normalizeGoStatementListEnds(root, source, lang)
+	normalizeGoCaseClauseEnds(root, source, lang)
+	normalizeTypeScriptPredefinedGenericCalls(root, source, lang)
+	normalizeTypeScriptEnumBodyFields(root, lang)
+	normalizeJavaScriptTrailingContinueComments(root, source, lang)
 	normalizeJavaScriptTopLevelExpressionStatementBounds(root, lang)
 	normalizeJavaScriptTopLevelObjectLiterals(root, lang)
+	normalizeRubyThenStarts(root, lang)
+	normalizeRubyTopLevelModuleBounds(root, source, lang)
 	normalizeLuaChunkLocalDeclarationFields(root, source, lang)
 	normalizeErlangSourceFileForms(root, lang)
 	normalizeMakeConditionalConsequenceFields(root, lang)
+	normalizeNimTopLevelCallEnd(root, source, lang)
 	normalizeNginxAttributeLineBreaks(root, source, lang)
 	normalizeTopLevelTrailingLineBreakSpan(root, source, lang)
 	normalizeCSharpTypeConstraintKeywords(root, lang)
@@ -345,13 +395,30 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, lang *Language) {
 	normalizePerlPushExpressionLists(root, source, lang)
 	normalizePerlReturnExpressionLists(root, lang)
 	normalizePowerShellProgramShape(root, source, lang)
+	normalizeCommentTrailingExtraTrivia(root, source, lang)
+	normalizePascalTopLevelProgramEnd(root, source, lang)
+	normalizePascalTrailingExtraTrivia(root, source, lang)
+	normalizeRSTTopLevelSectionEnd(root, source, lang)
 	normalizeSQLRecoveredSelectRoot(root, lang)
+	normalizeScalaObjectTemplateBodyFragments(root, source, lang)
+	normalizeScalaTemplateBodyObjectFragments(root, source, lang)
+	normalizeScalaTemplateBodyRecoveredMembers(root, source, lang)
+	normalizeScalaRecoveredObjectTemplateBodies(root, source, lang)
+	normalizeScalaSplitFunctionDefinitions(root, source, lang)
+	normalizeScalaTopLevelClassFragments(root, source, lang)
+	normalizeScalaCompilationUnitRoot(root, lang)
+	normalizeScalaDefinitionFields(root, source, lang)
+	normalizeScalaTemplateBodyFunctionAnnotations(root, source, lang)
+	normalizeScalaImportPathFields(root, lang)
+	normalizeScalaTemplateBodyFunctionEnds(root, source, lang)
 	normalizeScalaTrailingCommentOwnership(root, source, lang)
 	normalizeScalaFunctionModifierFields(root, lang)
 	normalizeScalaInterpolatedStringTail(root, source, lang)
 	normalizeSvelteTrailingExtraTrivia(root, source, lang)
 	normalizeHTMLRecoveredNestedCustomTagRanges(root, source, lang)
 	normalizeZigEmptyInitListFields(root, lang)
+	normalizeScalaCaseClauseEnds(root, source, lang)
+	normalizeRootEOFNewlineSpan(root, source, lang)
 }
 
 func bytesAreTrivia(b []byte) bool {
@@ -364,6 +431,18 @@ func bytesAreTrivia(b []byte) bool {
 		}
 	}
 	return true
+}
+
+func lastNonTriviaByteEnd(source []byte) uint32 {
+	for i := len(source); i > 0; i-- {
+		switch source[i-1] {
+		case ' ', '\t', '\n', '\r', '\f':
+			continue
+		default:
+			return uint32(i)
+		}
+	}
+	return 0
 }
 
 func normalizeHCLConfigFileRoot(root *Node, lang *Language) {
@@ -875,16 +954,236 @@ func rootLooksLikeCTopLevel(root *Node, lang *Language) bool {
 	return sawTopLevel
 }
 
-func normalizeGoSourceFileRoot(root *Node, lang *Language) {
-	if root == nil || lang == nil || lang.Name != "go" || root.Type(lang) != "ERROR" {
+func normalizeCSizeofUnknownTypeIdentifiers(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "c" {
 		return
 	}
+	typeDescriptorSym, ok := lang.SymbolByName("type_descriptor")
+	if !ok {
+		return
+	}
+	typeIdentifierSym, ok := lang.SymbolByName("type_identifier")
+	if !ok {
+		return
+	}
+	identifierSym, ok := lang.SymbolByName("identifier")
+	if !ok {
+		return
+	}
+	parenthesizedSym, ok := lang.SymbolByName("parenthesized_expression")
+	if !ok {
+		return
+	}
+	identifierNamed := false
+	if int(identifierSym) < len(lang.SymbolMetadata) {
+		identifierNamed = lang.SymbolMetadata[identifierSym].Named
+	}
+	parenthesizedNamed := false
+	if int(parenthesizedSym) < len(lang.SymbolMetadata) {
+		parenthesizedNamed = lang.SymbolMetadata[parenthesizedSym].Named
+	}
+	valueFieldID, hasValueField := lang.FieldByName("value")
+	localTypes := collectCLocalTypeNames(root, source, lang)
+
+	var rewrite func(*Node)
+	rewrite = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type(lang) == "sizeof_expression" && len(n.children) == 4 {
+			typeDescriptor := n.children[2]
+			if typeDescriptor != nil && typeDescriptor.symbol == typeDescriptorSym && len(typeDescriptor.children) == 1 {
+				typeIdent := typeDescriptor.children[0]
+				if typeIdent != nil && typeIdent.symbol == typeIdentifierSym {
+					name := typeIdent.Text(source)
+					if _, ok := localTypes[name]; !ok {
+						ident := newLeafNodeInArena(n.ownerArena, identifierSym, identifierNamed, typeIdent.startByte, typeIdent.endByte, typeIdent.startPoint, typeIdent.endPoint)
+						paren := newParentNodeInArena(n.ownerArena, parenthesizedSym, parenthesizedNamed, []*Node{n.children[1], ident, n.children[3]}, nil, 0)
+						replaceChildRangeWithSingleNode(n, 1, 4, paren)
+						if hasValueField && len(n.children) > 1 {
+							ensureNodeFieldStorage(n, len(n.children))
+							n.fieldIDs[1] = valueFieldID
+							n.fieldSources[1] = fieldSourceDirect
+						}
+					}
+				}
+			}
+		}
+		for _, child := range n.children {
+			rewrite(child)
+		}
+	}
+	rewrite(root)
+}
+
+func normalizeCCastUnknownTypeIdentifiers(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "c" {
+		return
+	}
+	typeDescriptorSym, ok := lang.SymbolByName("type_descriptor")
+	if !ok {
+		return
+	}
+	typeIdentifierSym, ok := lang.SymbolByName("type_identifier")
+	if !ok {
+		return
+	}
+	identifierSym, ok := lang.SymbolByName("identifier")
+	if !ok {
+		return
+	}
+	parenthesizedSym, ok := lang.SymbolByName("parenthesized_expression")
+	if !ok {
+		return
+	}
+	callSym, ok := lang.SymbolByName("call_expression")
+	if !ok {
+		return
+	}
+	argumentListSym, ok := lang.SymbolByName("argument_list")
+	if !ok {
+		return
+	}
+	functionFieldID, hasFunctionField := lang.FieldByName("function")
+	argumentsFieldID, hasArgumentsField := lang.FieldByName("arguments")
+	if !hasFunctionField || !hasArgumentsField {
+		return
+	}
+	identifierNamed := false
+	if int(identifierSym) < len(lang.SymbolMetadata) {
+		identifierNamed = lang.SymbolMetadata[identifierSym].Named
+	}
+	parenthesizedNamed := false
+	if int(parenthesizedSym) < len(lang.SymbolMetadata) {
+		parenthesizedNamed = lang.SymbolMetadata[parenthesizedSym].Named
+	}
+	callNamed := false
+	if int(callSym) < len(lang.SymbolMetadata) {
+		callNamed = lang.SymbolMetadata[callSym].Named
+	}
+	argumentListNamed := false
+	if int(argumentListSym) < len(lang.SymbolMetadata) {
+		argumentListNamed = lang.SymbolMetadata[argumentListSym].Named
+	}
+	localTypes := collectCLocalTypeNames(root, source, lang)
+
+	var rewrite func(*Node)
+	rewrite = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type(lang) == "cast_expression" && len(n.children) == 4 {
+			typeDescriptor := n.children[1]
+			value := n.children[3]
+			if typeDescriptor != nil && value != nil && typeDescriptor.symbol == typeDescriptorSym && len(typeDescriptor.children) == 1 {
+				typeIdent := typeDescriptor.children[0]
+				if typeIdent != nil && typeIdent.symbol == typeIdentifierSym && value.Type(lang) == "parenthesized_expression" {
+					name := typeIdent.Text(source)
+					if _, ok := localTypes[name]; !ok {
+						ident := newLeafNodeInArena(n.ownerArena, identifierSym, identifierNamed, typeIdent.startByte, typeIdent.endByte, typeIdent.startPoint, typeIdent.endPoint)
+						function := newParentNodeInArena(n.ownerArena, parenthesizedSym, parenthesizedNamed, []*Node{n.children[0], ident, n.children[2]}, nil, 0)
+						argsChildren := append([]*Node(nil), value.children...)
+						if n.ownerArena != nil && len(argsChildren) > 0 {
+							buf := n.ownerArena.allocNodeSlice(len(argsChildren))
+							copy(buf, argsChildren)
+							argsChildren = buf
+						}
+						arguments := newParentNodeInArena(n.ownerArena, argumentListSym, argumentListNamed, argsChildren, nil, 0)
+						children := []*Node{function, arguments}
+						if n.ownerArena != nil {
+							buf := n.ownerArena.allocNodeSlice(len(children))
+							copy(buf, children)
+							children = buf
+						}
+						fieldIDs := make([]FieldID, len(children))
+						fieldIDs[0] = functionFieldID
+						fieldIDs[1] = argumentsFieldID
+						if n.ownerArena != nil {
+							buf := n.ownerArena.allocFieldIDSlice(len(fieldIDs))
+							copy(buf, fieldIDs)
+							fieldIDs = buf
+						}
+						n.symbol = callSym
+						n.isNamed = callNamed
+						n.children = children
+						n.fieldIDs = fieldIDs
+						n.fieldSources = make([]uint8, len(children))
+						n.fieldSources[0] = fieldSourceDirect
+						n.fieldSources[1] = fieldSourceDirect
+						n.productionID = 0
+						for i, child := range n.children {
+							if child == nil {
+								continue
+							}
+							child.parent = n
+							child.childIndex = i
+						}
+					}
+				}
+			}
+		}
+		for _, child := range n.children {
+			rewrite(child)
+		}
+	}
+	rewrite(root)
+}
+
+func collectCLocalTypeNames(root *Node, source []byte, lang *Language) map[string]struct{} {
+	localTypes := make(map[string]struct{})
+	if root == nil || lang == nil || lang.Name != "c" {
+		return localTypes
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type(lang) == "type_definition" {
+			for _, child := range n.children {
+				if child == nil || child.Type(lang) != "type_identifier" {
+					continue
+				}
+				if name := child.Text(source); name != "" {
+					localTypes[name] = struct{}{}
+				}
+			}
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+	return localTypes
+}
+
+func normalizeGoSourceFileRoot(root *Node, source []byte, p *Parser) {
+	if root == nil || p == nil || p.language == nil || p.language.Name != "go" || root.Type(p.language) != "ERROR" {
+		return
+	}
+	lang := p.language
 	sym, ok := symbolByName(lang, "source_file")
-	if !ok || !rootLooksLikeGoTopLevel(root, lang) {
+	if !ok {
+		return
+	}
+	if !rootLooksLikeGoTopLevel(root, lang) {
+		recoverGoRootTopLevelChunks(root, source, p)
+	}
+	if !rootLooksLikeGoTopLevel(root, lang) {
 		return
 	}
 	root.symbol = sym
 	root.isNamed = int(sym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[sym].Named
+	root.hasError = false
+	for _, child := range root.children {
+		if child != nil && (child.IsError() || child.HasError()) {
+			root.hasError = true
+			break
+		}
+	}
+	if root.endByte < uint32(len(source)) && bytesAreTrivia(source[root.endByte:]) {
+		extendNodeEndTo(root, uint32(len(source)), source)
+	}
 }
 
 func rootLooksLikeGoTopLevel(root *Node, lang *Language) bool {
@@ -911,6 +1210,1054 @@ func rootLooksLikeGoTopLevel(root *Node, lang *Language) bool {
 		}
 	}
 	return sawTopLevel
+}
+
+func recoverGoRootTopLevelChunks(root *Node, source []byte, p *Parser) {
+	if root == nil || p == nil || p.language == nil || p.skipRecoveryReparse || len(source) == 0 || len(root.children) == 0 {
+		return
+	}
+	firstBad := firstGoNonTopLevelChildIndex(root, p.language)
+	if firstBad <= 0 {
+		return
+	}
+	start := goRootRecoveryStartByte(root.children[firstBad], source)
+	if int(start) >= len(source) {
+		return
+	}
+	recovered, ok := goReparsedTopLevelChunks(source, start, p, root.ownerArena)
+	if !ok {
+		return
+	}
+	newChildren := make([]*Node, 0, firstBad+len(recovered))
+	newChildren = append(newChildren, root.children[:firstBad]...)
+	newChildren = append(newChildren, recovered...)
+	if !goChildrenLookLikeTopLevel(newChildren, p.language) {
+		return
+	}
+	if arena := root.ownerArena; arena != nil {
+		buf := arena.allocNodeSlice(len(newChildren))
+		copy(buf, newChildren)
+		root.children = buf
+	} else {
+		root.children = newChildren
+	}
+	root.fieldIDs = nil
+	root.fieldSources = nil
+	populateParentNode(root, root.children)
+}
+
+func firstGoNonTopLevelChildIndex(root *Node, lang *Language) int {
+	if root == nil || lang == nil {
+		return -1
+	}
+	for i, child := range root.children {
+		if child == nil {
+			continue
+		}
+		switch child.Type(lang) {
+		case "package_clause",
+			"import_declaration",
+			"function_declaration",
+			"method_declaration",
+			"const_declaration",
+			"type_declaration",
+			"var_declaration",
+			"comment":
+			continue
+		default:
+			return i
+		}
+	}
+	return -1
+}
+
+func goChildrenLookLikeTopLevel(children []*Node, lang *Language) bool {
+	root := &Node{children: children}
+	return rootLooksLikeGoTopLevel(root, lang)
+}
+
+func goRootRecoveryStartByte(node *Node, source []byte) uint32 {
+	if node == nil {
+		return uint32(len(source))
+	}
+	start := node.startByte
+	for start > 0 && source[start-1] != '\n' {
+		start--
+	}
+	return start
+}
+
+func goReparsedTopLevelChunks(source []byte, start uint32, p *Parser, arena *nodeArena) ([]*Node, bool) {
+	if p == nil || p.language == nil || int(start) >= len(source) {
+		return nil, false
+	}
+	const prefix = "package p\n"
+	prefixPoint := advancePointByBytes(Point{}, []byte(prefix))
+	chunkStarts := goTopLevelChunkStarts(source, start)
+	if len(chunkStarts) == 0 {
+		return nil, false
+	}
+	recovered := make([]*Node, 0, len(chunkStarts))
+	for i, chunkStart := range chunkStarts {
+		chunkEnd := uint32(len(source))
+		if i+1 < len(chunkStarts) {
+			chunkEnd = chunkStarts[i+1]
+		}
+		if chunkStart >= chunkEnd {
+			continue
+		}
+		wrapped := make([]byte, 0, len(prefix)+int(chunkEnd-chunkStart))
+		wrapped = append(wrapped, prefix...)
+		wrapped = append(wrapped, source[chunkStart:chunkEnd]...)
+		tree, err := p.parseForRecovery(wrapped)
+		if err != nil || tree == nil || tree.RootNode() == nil {
+			if tree != nil {
+				tree.Release()
+			}
+			return nil, false
+		}
+		if tree.RootNode().HasError() {
+			tree.Release()
+			recoveredNode, ok := goRecoverWrappedFunctionChunk(source, chunkStart, chunkEnd, p, arena)
+			if !ok {
+				return nil, false
+			}
+			recovered = append(recovered, recoveredNode)
+			continue
+		}
+		startPoint := advancePointByBytes(Point{}, source[:chunkStart])
+		if startPoint.Row < prefixPoint.Row {
+			tree.Release()
+			return nil, false
+		}
+		offsetRoot := tree.RootNodeWithOffset(
+			chunkStart-uint32(len(prefix)),
+			Point{Row: startPoint.Row - prefixPoint.Row, Column: startPoint.Column},
+		)
+		tree.Release()
+		if offsetRoot == nil {
+			return nil, false
+		}
+		var added int
+		for j := 0; j < offsetRoot.NamedChildCount(); j++ {
+			child := offsetRoot.NamedChild(j)
+			if child == nil || child.Type(p.language) == "package_clause" {
+				continue
+			}
+			recovered = append(recovered, cloneTreeNodesIntoArena(child, arena))
+			added++
+		}
+		if added == 0 {
+			return nil, false
+		}
+	}
+	return recovered, len(recovered) > 0
+}
+
+func goRecoverWrappedFunctionChunk(source []byte, chunkStart, chunkEnd uint32, p *Parser, arena *nodeArena) (*Node, bool) {
+	if p == nil || p.language == nil || len(source) == 0 || chunkStart >= chunkEnd || int(chunkEnd) > len(source) {
+		return nil, false
+	}
+	const prefix = "package p\n"
+	wrapped := make([]byte, 0, len(prefix)+int(chunkEnd-chunkStart))
+	wrapped = append(wrapped, prefix...)
+	wrapped = append(wrapped, source[chunkStart:chunkEnd]...)
+	funcStart := len(prefix)
+	openBrace := bytes.IndexByte(wrapped[funcStart:], '{')
+	if openBrace < 0 {
+		return nil, false
+	}
+	openBrace += funcStart
+	closeBrace := findMatchingBraceByte(wrapped, openBrace, len(wrapped))
+	if closeBrace < 0 || closeBrace <= openBrace {
+		return nil, false
+	}
+
+	skeleton := make([]byte, 0, openBrace+4)
+	skeleton = append(skeleton, wrapped[:openBrace]...)
+	skeleton = append(skeleton, '{', '}', '\n')
+	tree, err := p.parseForRecovery(skeleton)
+	if err != nil || tree == nil || tree.RootNode() == nil || tree.RootNode().HasError() {
+		if tree != nil {
+			tree.Release()
+		}
+		return nil, false
+	}
+	defer tree.Release()
+
+	startPoint := advancePointByBytes(Point{}, source[:chunkStart])
+	prefixPoint := advancePointByBytes(Point{}, []byte(prefix))
+	if startPoint.Row < prefixPoint.Row {
+		return nil, false
+	}
+	offsetRoot := tree.RootNodeWithOffset(
+		chunkStart-uint32(len(prefix)),
+		Point{Row: startPoint.Row - prefixPoint.Row, Column: startPoint.Column},
+	)
+	if offsetRoot == nil {
+		return nil, false
+	}
+
+	fn := goFirstFunctionLikeChild(offsetRoot, p.language)
+	if fn == nil || fn.ChildCount() < 4 {
+		return nil, false
+	}
+	openBraceAbs := chunkStart + uint32(openBrace-len(prefix))
+	closeBraceAbs := chunkStart + uint32(closeBrace-len(prefix))
+	bodyNodes, ok := goRecoverFunctionBodyNodes(source, openBraceAbs+1, closeBraceAbs, p, arena)
+	if !ok {
+		return nil, false
+	}
+	recoveredFn := cloneTreeNodesIntoArena(fn, arena)
+	block, ok := goBuildRecoveredBlockNode(source, openBraceAbs, closeBraceAbs, bodyNodes, arena, p.language)
+	if !ok {
+		return nil, false
+	}
+	recoveredFn.children[len(recoveredFn.children)-1] = block
+	block.parent = recoveredFn
+	block.childIndex = len(recoveredFn.children) - 1
+	populateParentNode(recoveredFn, recoveredFn.children)
+	return recoveredFn, true
+}
+
+func goRecoverFunctionBodyNodes(source []byte, start, end uint32, p *Parser, arena *nodeArena) ([]*Node, bool) {
+	if int(start) >= len(source) || start >= end {
+		return nil, false
+	}
+	ranges := goFunctionStatementRanges(source, start, end)
+	if len(ranges) == 0 {
+		return nil, true
+	}
+	out := make([]*Node, 0, len(ranges))
+	for _, r := range ranges {
+		nodes, ok := goRecoverStatementNodesFromRange(source, r[0], r[1], p, arena)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, nodes...)
+	}
+	return out, true
+}
+
+func goRecoverStatementNodesFromRange(source []byte, start, end uint32, p *Parser, arena *nodeArena) ([]*Node, bool) {
+	if start >= end {
+		return nil, true
+	}
+	const prefix = "package p\nfunc _() {\n"
+	stmt := source[start:end]
+	wrapped := make([]byte, 0, len(prefix)+len(stmt)+4)
+	wrapped = append(wrapped, prefix...)
+	wrapped = append(wrapped, stmt...)
+	wrapped = append(wrapped, '\n', '}', '\n')
+	tree, err := p.parseForRecovery(wrapped)
+	if err == nil && tree != nil && tree.RootNode() != nil {
+		startPoint := advancePointByBytes(Point{}, source[:start])
+		prefixPoint := advancePointByBytes(Point{}, []byte(prefix))
+		if startPoint.Row >= prefixPoint.Row {
+			offsetRoot := tree.RootNodeWithOffset(start-uint32(len(prefix)), Point{Row: startPoint.Row - prefixPoint.Row, Column: startPoint.Column})
+			if offsetRoot != nil {
+				if !offsetRoot.HasError() {
+					nodes := goExtractRecoveredStatementNodes(offsetRoot, source, p.language, arena)
+					tree.Release()
+					if len(nodes) > 0 {
+						return nodes, true
+					}
+				}
+				if node := goExtractSingleRecoveredStatement(offsetRoot, source, p.language, arena); node != nil {
+					tree.Release()
+					return []*Node{node}, true
+				}
+			}
+		}
+		tree.Release()
+	}
+	if node, ok := goRecoverIfStatementFromRange(source, start, end, p, arena); ok {
+		return []*Node{node}, true
+	}
+	return nil, false
+}
+
+func goRecoverIfStatementFromRange(source []byte, start, end uint32, p *Parser, arena *nodeArena) (*Node, bool) {
+	if p == nil || p.language == nil || start >= end || int(end) > len(source) {
+		return nil, false
+	}
+	trimmedStart := start
+	for trimmedStart < end {
+		switch source[trimmedStart] {
+		case ' ', '\t', '\r', '\n':
+			trimmedStart++
+		default:
+			goto trimmedStartReady
+		}
+	}
+	return nil, false
+
+trimmedStartReady:
+	trimmedEnd := end
+	for trimmedEnd > trimmedStart {
+		switch source[trimmedEnd-1] {
+		case ' ', '\t', '\r', '\n':
+			trimmedEnd--
+		default:
+			goto trimmedEndReady
+		}
+	}
+	return nil, false
+
+trimmedEndReady:
+	stmt := source[trimmedStart:trimmedEnd]
+	if !bytes.HasPrefix(stmt, []byte("if ")) {
+		return nil, false
+	}
+	openBrace := bytes.IndexByte(stmt, '{')
+	if openBrace < 0 {
+		return nil, false
+	}
+	closeBrace := findMatchingBraceByte(stmt, openBrace, len(stmt))
+	if closeBrace < 0 || closeBrace <= openBrace {
+		return nil, false
+	}
+	openBraceAbs := trimmedStart + uint32(openBrace)
+	closeBraceAbs := trimmedStart + uint32(closeBrace)
+	condStart := trimmedStart + uint32(len("if "))
+	condEnd := openBraceAbs
+	for condStart < condEnd {
+		switch source[condStart] {
+		case ' ', '\t', '\r', '\n':
+			condStart++
+		default:
+			goto condStartReady
+		}
+	}
+	return nil, false
+
+condStartReady:
+	for condEnd > condStart {
+		switch source[condEnd-1] {
+		case ' ', '\t', '\r', '\n':
+			condEnd--
+		default:
+			goto condEndReady
+		}
+	}
+	return nil, false
+
+condEndReady:
+	condition, ok := goRecoverExpressionNodeFromRange(source, condStart, condEnd, p, arena)
+	if !ok || condition == nil {
+		return nil, false
+	}
+	bodyAbsStart := openBraceAbs + 1
+	bodyAbsEnd := closeBraceAbs
+	bodyNodes, ok := goRecoverFunctionBodyNodes(source, bodyAbsStart, bodyAbsEnd, p, arena)
+	if !ok {
+		return nil, false
+	}
+	block, ok := goBuildRecoveredBlockNode(source, openBraceAbs, closeBraceAbs, bodyNodes, arena, p.language)
+	if !ok {
+		return nil, false
+	}
+	ifStmtSym, ok := symbolByName(p.language, "if_statement")
+	if !ok {
+		return nil, false
+	}
+	ifTokenSym, ok := symbolByName(p.language, "if")
+	if !ok {
+		return nil, false
+	}
+	ifStmtNamed := int(ifStmtSym) < len(p.language.SymbolMetadata) && p.language.SymbolMetadata[ifStmtSym].Named
+	ifLeafStart := advancePointByBytes(Point{}, source[:trimmedStart])
+	ifLeafEnd := advancePointByBytes(ifLeafStart, source[trimmedStart:trimmedStart+2])
+	ifLeaf := newLeafNodeInArena(arena, ifTokenSym, false, trimmedStart, trimmedStart+2, ifLeafStart, ifLeafEnd)
+	children := []*Node{ifLeaf, condition, block}
+	if arena != nil {
+		buf := arena.allocNodeSlice(len(children))
+		copy(buf, children)
+		children = buf
+	}
+	return newParentNodeInArena(arena, ifStmtSym, ifStmtNamed, children, goSyntheticIfFieldIDs(arena, len(children), p.language), 0), true
+}
+
+func goFunctionStatementRanges(source []byte, start, end uint32) [][2]uint32 {
+	var ranges [][2]uint32
+	chunkStart := uint32(0)
+	inChunk := false
+	var (
+		braceDepth     int
+		parenDepth     int
+		bracketDepth   int
+		inLineComment  bool
+		inBlockComment bool
+		inString       bool
+		inRune         bool
+		inRawString    bool
+		escape         bool
+	)
+	flush := func(pos uint32) {
+		if !inChunk || pos <= chunkStart {
+			inChunk = false
+			return
+		}
+		ranges = append(ranges, [2]uint32{chunkStart, pos})
+		inChunk = false
+	}
+	for i := int(start); i < int(end); i++ {
+		b := source[i]
+		if !inChunk && (b == ' ' || b == '\t' || b == '\r' || b == '\n') {
+			continue
+		}
+		if !inChunk {
+			chunkStart = uint32(i)
+			inChunk = true
+		}
+		if inLineComment {
+			if b == '\n' {
+				inLineComment = false
+				if braceDepth == 0 && parenDepth == 0 && bracketDepth == 0 {
+					flush(uint32(i))
+				}
+			}
+			continue
+		}
+		if inBlockComment {
+			if b == '*' && i+1 < int(end) && source[i+1] == '/' {
+				inBlockComment = false
+				i++
+				continue
+			}
+			continue
+		}
+		if inString {
+			if escape {
+				escape = false
+				continue
+			}
+			if b == '\\' {
+				escape = true
+				continue
+			}
+			if b == '"' {
+				inString = false
+			}
+			continue
+		}
+		if inRune {
+			if escape {
+				escape = false
+				continue
+			}
+			if b == '\\' {
+				escape = true
+				continue
+			}
+			if b == '\'' {
+				inRune = false
+			}
+			continue
+		}
+		if inRawString {
+			if b == '`' {
+				inRawString = false
+			}
+			continue
+		}
+		switch b {
+		case '/':
+			if i+1 < int(end) && source[i+1] == '/' {
+				inLineComment = true
+				i++
+				continue
+			}
+			if i+1 < int(end) && source[i+1] == '*' {
+				inBlockComment = true
+				i++
+				continue
+			}
+		case '"':
+			inString = true
+		case '\'':
+			inRune = true
+		case '`':
+			inRawString = true
+		case '{':
+			braceDepth++
+		case '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+		case '(':
+			parenDepth++
+		case ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+		case '[':
+			bracketDepth++
+		case ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+		case '\n':
+			if braceDepth == 0 && parenDepth == 0 && bracketDepth == 0 {
+				flush(uint32(i))
+			}
+		}
+	}
+	if inChunk {
+		flush(end)
+	}
+	return ranges
+}
+
+func goFirstFunctionLikeChild(root *Node, lang *Language) *Node {
+	if root == nil || lang == nil {
+		return nil
+	}
+	for i := 0; i < root.ChildCount(); i++ {
+		child := root.Child(i)
+		if child == nil {
+			continue
+		}
+		switch child.Type(lang) {
+		case "function_declaration", "method_declaration":
+			return child
+		}
+	}
+	return nil
+}
+
+func goExtractRecoveredStatementNodes(root *Node, source []byte, lang *Language, arena *nodeArena) []*Node {
+	fn := goFirstFunctionLikeChild(root, lang)
+	if fn == nil || fn.ChildCount() == 0 {
+		return nil
+	}
+	block := fn.Child(fn.ChildCount() - 1)
+	if block == nil || block.Type(lang) != "block" || block.ChildCount() < 2 {
+		return nil
+	}
+	var out []*Node
+	for i := 1; i < block.ChildCount()-1; i++ {
+		child := block.Child(i)
+		if child == nil {
+			continue
+		}
+		switch child.Type(lang) {
+		case "statement_list", "statement_list_repeat1":
+			for j := 0; j < child.ChildCount(); j++ {
+				grand := child.Child(j)
+				if grand != nil {
+					if arena != nil {
+						cloned := cloneTreeNodesIntoArena(grand, arena)
+						recomputeNodePointsFromBytes(cloned, source)
+						out = append(out, cloned)
+					} else {
+						out = append(out, grand)
+					}
+				}
+			}
+		default:
+			if arena != nil {
+				cloned := cloneTreeNodesIntoArena(child, arena)
+				recomputeNodePointsFromBytes(cloned, source)
+				out = append(out, cloned)
+			} else {
+				out = append(out, child)
+			}
+		}
+	}
+	return out
+}
+
+func goExtractSingleRecoveredStatement(root *Node, source []byte, lang *Language, arena *nodeArena) *Node {
+	nodes := goExtractRecoveredStatementNodes(root, source, lang, arena)
+	if len(nodes) == 1 {
+		return nodes[0]
+	}
+	return nil
+}
+
+func goExtractRecoveredIfStatement(root *Node, source []byte, lang *Language) *Node {
+	nodes := goExtractRecoveredStatementNodes(root, source, lang, nil)
+	if len(nodes) == 1 && nodes[0] != nil && nodes[0].Type(lang) == "if_statement" {
+		return nodes[0]
+	}
+	return nil
+}
+
+func goRecoverExpressionNodeFromRange(source []byte, start, end uint32, p *Parser, arena *nodeArena) (*Node, bool) {
+	if p == nil || p.language == nil || start >= end || int(end) > len(source) {
+		return nil, false
+	}
+	const prefix = "package p\nvar _ = "
+	expr := bytes.TrimSpace(source[start:end])
+	if len(expr) == 0 {
+		return nil, false
+	}
+	wrapped := make([]byte, 0, len(prefix)+len(expr)+1)
+	wrapped = append(wrapped, prefix...)
+	wrapped = append(wrapped, expr...)
+	wrapped = append(wrapped, '\n')
+	tree, err := p.parseForRecovery(wrapped)
+	if err != nil || tree == nil || tree.RootNode() == nil {
+		if tree != nil {
+			tree.Release()
+		}
+		return nil, false
+	}
+	defer tree.Release()
+	startPoint := advancePointByBytes(Point{}, source[:start])
+	prefixPoint := advancePointByBytes(Point{}, []byte(prefix))
+	if startPoint.Row < prefixPoint.Row {
+		return nil, false
+	}
+	offsetRoot := tree.RootNodeWithOffset(start-uint32(len(prefix)), Point{Row: startPoint.Row - prefixPoint.Row, Column: startPoint.Column})
+	if offsetRoot == nil || offsetRoot.HasError() {
+		return nil, false
+	}
+	exprNode := goExtractRecoveredVarInitializer(offsetRoot, p.language, arena)
+	recomputeNodePointsFromBytes(exprNode, source)
+	return exprNode, exprNode != nil
+}
+
+func goExtractRecoveredVarInitializer(root *Node, lang *Language, arena *nodeArena) *Node {
+	if root == nil || lang == nil {
+		return nil
+	}
+	var walk func(*Node) *Node
+	walk = func(n *Node) *Node {
+		if n == nil {
+			return nil
+		}
+		if n.Type(lang) == "expression_list" {
+			for i := 0; i < n.ChildCount(); i++ {
+				child := n.Child(i)
+				if child != nil && child.IsNamed() {
+					if arena != nil {
+						return cloneTreeNodesIntoArena(child, arena)
+					}
+					return child
+				}
+			}
+		}
+		for i := 0; i < n.ChildCount(); i++ {
+			if out := walk(n.Child(i)); out != nil {
+				return out
+			}
+		}
+		return nil
+	}
+	return walk(root)
+}
+
+func goBuildRecoveredBlockNode(source []byte, openBrace, closeBrace uint32, bodyNodes []*Node, arena *nodeArena, lang *Language) (*Node, bool) {
+	if lang == nil || int(closeBrace) >= len(source) || openBrace >= closeBrace {
+		return nil, false
+	}
+	blockSym, ok := symbolByName(lang, "block")
+	if !ok {
+		return nil, false
+	}
+	blockNamed := int(blockSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[blockSym].Named
+	stmtListSym, ok := symbolByName(lang, "statement_list")
+	if !ok {
+		return nil, false
+	}
+	stmtListNamed := int(stmtListSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[stmtListSym].Named
+	openSym, ok := symbolByName(lang, "{")
+	if !ok {
+		return nil, false
+	}
+	closeSym, ok := symbolByName(lang, "}")
+	if !ok {
+		return nil, false
+	}
+	openTok := newLeafNodeInArena(arena, openSym, false, openBrace, openBrace+1, advancePointByBytes(Point{}, source[:openBrace]), advancePointByBytes(Point{}, source[:openBrace+1]))
+	closeTok := newLeafNodeInArena(arena, closeSym, false, closeBrace, closeBrace+1, advancePointByBytes(Point{}, source[:closeBrace]), advancePointByBytes(Point{}, source[:closeBrace+1]))
+	var stmtList *Node
+	if len(bodyNodes) > 0 {
+		stmtChildren := bodyNodes
+		if arena != nil {
+			buf := arena.allocNodeSlice(len(bodyNodes))
+			copy(buf, bodyNodes)
+			stmtChildren = buf
+		}
+		stmtList = newParentNodeInArena(arena, stmtListSym, stmtListNamed, stmtChildren, nil, 0)
+	}
+	children := make([]*Node, 0, 3)
+	children = append(children, openTok)
+	if stmtList != nil {
+		children = append(children, stmtList)
+	}
+	children = append(children, closeTok)
+	return newParentNodeInArena(arena, blockSym, blockNamed, children, nil, 0), true
+}
+
+func recomputeNodePointsFromBytes(n *Node, source []byte) {
+	if n == nil || len(source) == 0 {
+		return
+	}
+	if int(n.startByte) <= len(source) {
+		n.startPoint = advancePointByBytes(Point{}, source[:n.startByte])
+	}
+	if int(n.endByte) <= len(source) {
+		n.endPoint = advancePointByBytes(Point{}, source[:n.endByte])
+	}
+	for _, child := range n.children {
+		recomputeNodePointsFromBytes(child, source)
+	}
+}
+
+func goSyntheticIfFieldIDs(arena *nodeArena, childCount int, lang *Language) []FieldID {
+	fieldIDs := make([]FieldID, childCount)
+	if arena != nil {
+		fieldIDs = arena.allocFieldIDSlice(childCount)
+	}
+	if fid, ok := lang.FieldByName("condition"); ok && childCount > 1 {
+		fieldIDs[1] = fid
+	}
+	if fid, ok := lang.FieldByName("consequence"); ok && childCount > 2 {
+		fieldIDs[2] = fid
+	}
+	return fieldIDs
+}
+
+func normalizeGoGroupedSpecListSemicolons(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "go" {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		switch n.Type(lang) {
+		case "import_spec_list",
+			"var_spec_list",
+			"const_spec_list",
+			"field_declaration_list",
+			"source_file",
+			"import_declaration",
+			"var_declaration",
+			"const_declaration",
+			"type_declaration",
+			"statement_list",
+			"statement_list_repeat1":
+		default:
+			goto descend
+		}
+		if len(n.children) > 0 {
+			kept := n.children[:0]
+			changed := false
+			for _, child := range n.children {
+				if child != nil && child.Type(lang) == ";" && goShouldDropSemicolonNode(child, source) {
+					changed = true
+					continue
+				}
+				kept = append(kept, child)
+			}
+			if changed {
+				n.children = kept
+				n.fieldIDs = nil
+				n.fieldSources = nil
+				populateParentNode(n, n.children)
+			}
+		}
+	descend:
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func goShouldDropSemicolonNode(n *Node, source []byte) bool {
+	if n == nil {
+		return false
+	}
+	if n.startByte >= n.endByte || int(n.endByte) > len(source) {
+		return true
+	}
+	text := source[n.startByte:n.endByte]
+	if bytes.IndexByte(text, ';') >= 0 {
+		return false
+	}
+	return bytes.IndexByte(text, '\n') >= 0 || bytes.IndexByte(text, '\r') >= 0
+}
+
+func normalizeGoStatementListEnds(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "go" || len(source) == 0 {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		for i := 0; i+1 < len(n.children); i++ {
+			curr := n.children[i]
+			next := n.children[i+1]
+			if curr == nil || next == nil {
+				continue
+			}
+			switch curr.Type(lang) {
+			case "statement_list", "statement_list_repeat1":
+			default:
+				continue
+			}
+			if curr.endByte >= next.startByte || int(next.startByte) > len(source) {
+				continue
+			}
+			gap := source[curr.endByte:next.startByte]
+			if !bytesAreTrivia(gap) {
+				continue
+			}
+			target := goTrailingNewlineBoundary(curr.endByte, next.startByte, source)
+			if target > curr.endByte {
+				extendNodeEndTo(curr, target, source)
+			}
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func normalizeGoCaseClauseEnds(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "go" || len(source) == 0 {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		for i := 0; i+1 < len(n.children); i++ {
+			curr := n.children[i]
+			next := n.children[i+1]
+			if curr == nil || next == nil {
+				continue
+			}
+			switch curr.Type(lang) {
+			case "expression_case", "default_case", "type_case", "communication_case":
+			default:
+				continue
+			}
+			tail := goTrailingCaseStatementList(curr, lang)
+			if tail == nil {
+				continue
+			}
+			if tail.endByte < curr.endByte &&
+				int(curr.endByte) <= len(source) &&
+				bytesAreTrivia(source[tail.endByte:curr.endByte]) {
+				target := goTrailingNewlineBoundary(tail.endByte, curr.endByte, source)
+				if target > tail.endByte {
+					extendNodeEndTo(tail, target, source)
+				}
+			}
+			if curr.endByte >= next.startByte || int(next.startByte) > len(source) {
+				continue
+			}
+			target := goTrailingNewlineBoundary(curr.endByte, next.startByte, source)
+			if target > curr.endByte {
+				extendNodeEndTo(curr, target, source)
+				if tail.endByte < target &&
+					bytesAreTrivia(source[tail.endByte:target]) {
+					extendNodeEndTo(tail, target, source)
+				}
+			}
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func goTrailingNewlineBoundary(start, end uint32, source []byte) uint32 {
+	if start >= end || int(end) > len(source) || !bytesAreTrivia(source[start:end]) {
+		return start
+	}
+	gap := source[start:end]
+	if newline := bytes.LastIndexByte(gap, '\n'); newline >= 0 {
+		return start + uint32(newline+1)
+	}
+	return start
+}
+
+func goTrailingCaseStatementList(n *Node, lang *Language) *Node {
+	if n == nil || lang == nil || len(n.children) == 0 {
+		return nil
+	}
+	last := n.children[len(n.children)-1]
+	if last == nil {
+		return nil
+	}
+	switch last.Type(lang) {
+	case "statement_list", "statement_list_repeat1":
+		return last
+	default:
+		return nil
+	}
+}
+
+func goTopLevelChunkStarts(source []byte, start uint32) []uint32 {
+	if int(start) >= len(source) {
+		return nil
+	}
+	var starts []uint32
+	var (
+		braceDepth     int
+		parenDepth     int
+		bracketDepth   int
+		inLineComment  bool
+		inBlockComment bool
+		inString       bool
+		inRune         bool
+		inRawString    bool
+		escape         bool
+		lineStart      = uint32(0)
+		atLineStart    = true
+	)
+	for i := 0; i < len(source); i++ {
+		b := source[i]
+		if inLineComment {
+			if b == '\n' {
+				inLineComment = false
+				lineStart = uint32(i + 1)
+				atLineStart = true
+			}
+			continue
+		}
+		if inBlockComment {
+			if b == '*' && i+1 < len(source) && source[i+1] == '/' {
+				inBlockComment = false
+				i++
+				continue
+			}
+			if b == '\n' {
+				lineStart = uint32(i + 1)
+				atLineStart = true
+			}
+			continue
+		}
+		if inString {
+			if escape {
+				escape = false
+				continue
+			}
+			if b == '\\' {
+				escape = true
+				continue
+			}
+			if b == '"' {
+				inString = false
+			}
+			if b == '\n' {
+				lineStart = uint32(i + 1)
+				atLineStart = true
+			}
+			continue
+		}
+		if inRune {
+			if escape {
+				escape = false
+				continue
+			}
+			if b == '\\' {
+				escape = true
+				continue
+			}
+			if b == '\'' {
+				inRune = false
+			}
+			if b == '\n' {
+				lineStart = uint32(i + 1)
+				atLineStart = true
+			}
+			continue
+		}
+		if inRawString {
+			if b == '`' {
+				inRawString = false
+				continue
+			}
+			if b == '\n' {
+				lineStart = uint32(i + 1)
+				atLineStart = true
+			}
+			continue
+		}
+		if atLineStart {
+			j := i
+			for j < len(source) && (source[j] == ' ' || source[j] == '\t' || source[j] == '\r') {
+				j++
+			}
+			if braceDepth == 0 && parenDepth == 0 && bracketDepth == 0 && uint32(j) >= start && goLineStartsTopLevelChunk(source[j:]) {
+				starts = append(starts, uint32(j))
+			}
+			atLineStart = false
+		}
+		switch b {
+		case '/':
+			if i+1 < len(source) && source[i+1] == '/' {
+				inLineComment = true
+				i++
+				continue
+			}
+			if i+1 < len(source) && source[i+1] == '*' {
+				inBlockComment = true
+				i++
+				continue
+			}
+		case '"':
+			inString = true
+		case '\'':
+			inRune = true
+		case '`':
+			inRawString = true
+		case '{':
+			braceDepth++
+		case '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+		case '(':
+			parenDepth++
+		case ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+		case '[':
+			bracketDepth++
+		case ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+		case '\n':
+			lineStart = uint32(i + 1)
+			atLineStart = true
+		}
+		_ = lineStart
+	}
+	return starts
+}
+
+func goLineStartsTopLevelChunk(line []byte) bool {
+	switch {
+	case len(line) == 0:
+		return false
+	case bytes.HasPrefix(line, []byte("//")),
+		bytes.HasPrefix(line, []byte("/*")),
+		bytes.HasPrefix(line, []byte("func ")),
+		bytes.HasPrefix(line, []byte("var ")),
+		bytes.HasPrefix(line, []byte("const ")),
+		bytes.HasPrefix(line, []byte("type ")),
+		bytes.HasPrefix(line, []byte("import ")):
+		return true
+	default:
+		return false
+	}
 }
 
 func flattenRootSelfFragments(nodes []*Node, arena *nodeArena, rootSymbol Symbol) []*Node {
@@ -2105,6 +3452,85 @@ func normalizeCobolLeadingAreaStart(root *Node, source []byte, lang *Language) {
 	setNodeStartTo(div)
 }
 
+func normalizeCobolTopLevelDefinitionEnd(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "cobol" || root.Type(lang) != "start" || len(root.children) != 1 {
+		return
+	}
+	def := root.children[0]
+	if def == nil || def.IsExtra() || def.Type(lang) != "program_definition" {
+		return
+	}
+	end := lastNonTriviaByteEnd(source)
+	if end == 0 || end >= def.endByte {
+		return
+	}
+	def.endByte = end
+	def.endPoint = advancePointByBytes(Point{}, source[:end])
+}
+
+func normalizeNimTopLevelCallEnd(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "nim" || root.Type(lang) != "source_file" || len(root.children) != 1 {
+		return
+	}
+	call := root.children[0]
+	if call == nil || call.IsExtra() || call.Type(lang) != "call" {
+		return
+	}
+	end := lastNonTriviaByteEnd(source)
+	if end == 0 || end >= call.endByte {
+		return
+	}
+	call.endByte = end
+	call.endPoint = advancePointByBytes(Point{}, source[:end])
+}
+
+func normalizePascalTopLevelProgramEnd(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "pascal" || root.Type(lang) != "root" || len(root.children) == 0 {
+		return
+	}
+	program := root.children[0]
+	if program == nil || program.IsExtra() || program.Type(lang) != "program" {
+		return
+	}
+	end := lastNonTriviaByteEnd(source)
+	if end == 0 || end >= program.endByte {
+		return
+	}
+	program.endByte = end
+	program.endPoint = advancePointByBytes(Point{}, source[:end])
+}
+
+func normalizeCommentTrailingExtraTrivia(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "comment" || root.Type(lang) != "source" {
+		return
+	}
+	trimTrailingExtraTriviaRoot(root, source)
+}
+
+func normalizePascalTrailingExtraTrivia(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "pascal" || root.Type(lang) != "root" {
+		return
+	}
+	trimTrailingExtraTriviaRoot(root, source)
+}
+
+func normalizeRSTTopLevelSectionEnd(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "rst" || root.Type(lang) != "document" || len(root.children) == 0 {
+		return
+	}
+	trimTrailingExtraTriviaRoot(root, source)
+	section := root.children[0]
+	if section == nil || section.IsExtra() || section.Type(lang) != "section" {
+		return
+	}
+	end := lastNonTriviaByteEnd(source)
+	if end == 0 || end >= section.endByte {
+		return
+	}
+	section.endByte = end
+	section.endPoint = advancePointByBytes(Point{}, source[:end])
+}
+
 func bytesAreCooklangStepTail(b []byte) bool {
 	sawPunctuation := false
 	for _, c := range b {
@@ -2448,6 +3874,23 @@ func normalizeTopLevelTrailingLineBreakSpan(root *Node, source []byte, lang *Lan
 	extendNodeEndTo(child, root.endByte, source)
 }
 
+func normalizeRootEOFNewlineSpan(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || len(source) == 0 || root.endByte >= uint32(len(source)) {
+		return
+	}
+	switch {
+	case lang.Name == "go" && root.Type(lang) == "source_file":
+	case lang.Name == "scala" && root.Type(lang) == "compilation_unit":
+	default:
+		return
+	}
+	gap := source[root.endByte:]
+	if !bytesAreTrivia(gap) || !bytesContainLineBreak(gap) {
+		return
+	}
+	extendNodeEndTo(root, uint32(len(source)), source)
+}
+
 func normalizeHaskellImportsSpan(root *Node, source []byte, lang *Language) {
 	if root == nil || len(root.children) < 2 || len(source) == 0 || lang == nil || lang.Name != "haskell" {
 		return
@@ -2548,6 +3991,60 @@ func normalizeHaskellDeclarationsSpan(root *Node, source []byte, lang *Language)
 	}
 }
 
+func normalizeHaskellLocalBindsStarts(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "haskell" || len(source) == 0 {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type(lang) == "let_in" && len(n.children) >= 2 {
+			letNode := n.children[0]
+			localBinds := n.children[1]
+			if letNode != nil && localBinds != nil && letNode.Type(lang) == "let" && localBinds.Type(lang) == "local_binds" && letNode.endByte < localBinds.startByte && localBinds.startByte <= uint32(len(source)) {
+				gap := source[letNode.endByte:localBinds.startByte]
+				if len(gap) > 0 && bytesAreTrivia(gap) && !bytesContainLineBreak(gap) {
+					localBinds.startByte = letNode.endByte
+					localBinds.startPoint = letNode.endPoint
+				}
+			}
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func normalizeHaskellQuasiquoteStarts(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "haskell" || len(source) == 0 {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type(lang) == "quasiquote" && n.startByte > 0 {
+			start := int(n.startByte)
+			if source[start-1] == ' ' && start < len(source) && source[start] == '[' {
+				n.startByte--
+				if n.startPoint.Column > 0 {
+					n.startPoint.Column--
+				} else if n.startPoint.Row > 0 {
+					n.startPoint = advancePointByBytes(Point{}, source[:n.startByte])
+				}
+			}
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
 func normalizeJavaScriptTopLevelObjectLiterals(root *Node, lang *Language) {
 	if root == nil || lang == nil || lang.Name != "javascript" || root.Type(lang) != "program" {
 		return
@@ -2576,8 +4073,76 @@ func normalizeJavaScriptTopLevelObjectLiterals(root *Node, lang *Language) {
 	}
 }
 
+func normalizeRubyTopLevelModuleBounds(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "ruby" || root.Type(lang) != "program" || len(source) == 0 {
+		return
+	}
+	end := lastNonTriviaByteEnd(source)
+	for _, child := range root.children {
+		if child == nil || child.IsExtra() || child.Type(lang) != "module" {
+			continue
+		}
+		if len(child.children) > 0 && child.children[0] != nil && child.startByte < child.children[0].startByte {
+			child.startByte = child.children[0].startByte
+			child.startPoint = child.children[0].startPoint
+		}
+		if child.endByte == root.endByte && end > child.startByte && end < child.endByte {
+			child.endByte = end
+			child.endPoint = advancePointByBytes(Point{}, source[:end])
+		}
+	}
+}
+
+func normalizeRubyThenStarts(root *Node, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "ruby" {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		switch n.Type(lang) {
+		case "elsif", "if", "unless", "when":
+			normalizeRubyThenChildStarts(n, lang)
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func normalizeRubyThenChildStarts(parent *Node, lang *Language) {
+	if parent == nil || lang == nil || len(parent.children) < 2 {
+		return
+	}
+	for i, child := range parent.children {
+		if child == nil || child.Type(lang) != "then" || i == 0 {
+			continue
+		}
+		prev := (*Node)(nil)
+		for j := i - 1; j >= 0; j-- {
+			if parent.children[j] != nil {
+				prev = parent.children[j]
+				break
+			}
+		}
+		if prev == nil || prev.endByte >= child.startByte {
+			continue
+		}
+		child.startByte = prev.endByte
+		child.startPoint = prev.endPoint
+	}
+}
+
 func normalizeJavaScriptTopLevelExpressionStatementBounds(root *Node, lang *Language) {
-	if root == nil || lang == nil || lang.Name != "javascript" || root.Type(lang) != "program" {
+	if root == nil || lang == nil || root.Type(lang) != "program" {
+		return
+	}
+	switch lang.Name {
+	case "javascript", "typescript", "tsx":
+	default:
 		return
 	}
 	for _, child := range root.children {
@@ -2592,6 +4157,305 @@ func normalizeJavaScriptTopLevelExpressionStatementBounds(root *Node, lang *Lang
 		child.startPoint = first.startPoint
 		child.endByte = last.endByte
 		child.endPoint = last.endPoint
+	}
+}
+
+func normalizeJavaScriptTrailingContinueComments(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "javascript" || len(source) == 0 {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		normalizeJavaScriptTrailingContinueCommentSiblings(n, source, lang)
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func normalizeJavaScriptTrailingContinueCommentSiblings(parent *Node, source []byte, lang *Language) {
+	if parent == nil || len(parent.children) < 3 || parent.Type(lang) != "statement_block" {
+		return
+	}
+	for i := 1; i+1 < len(parent.children); i++ {
+		if comment, ok := extractJavaScriptTrailingContinueComment(parent.children[i], source, lang); ok {
+			insertJavaScriptStatementBlockComment(parent, i, comment)
+			i++
+			continue
+		}
+		stmt := parent.children[i]
+		if stmt == nil || stmt.Type(lang) != "if_statement" || len(stmt.children) < 3 {
+			continue
+		}
+		branch := stmt.children[len(stmt.children)-1]
+		comment, ok := extractJavaScriptTrailingContinueComment(branch, source, lang)
+		if !ok {
+			continue
+		}
+		stmt.endByte = branch.endByte
+		stmt.endPoint = branch.endPoint
+		insertJavaScriptStatementBlockComment(parent, i, comment)
+		i++
+	}
+}
+
+func extractJavaScriptTrailingContinueComment(node *Node, source []byte, lang *Language) (*Node, bool) {
+	if node == nil || lang == nil || node.Type(lang) != "continue_statement" || len(node.children) < 3 {
+		return nil, false
+	}
+	comment := node.children[len(node.children)-1]
+	if comment == nil || comment.Type(lang) != "comment" || comment.startByte >= comment.endByte {
+		return nil, false
+	}
+	if int(comment.endByte) > len(source) || !bytes.HasPrefix(source[comment.startByte:comment.endByte], []byte("//")) {
+		return nil, false
+	}
+	prev := node.children[len(node.children)-2]
+	if prev == nil || prev.endByte > comment.startByte || bytesContainLineBreak(source[prev.endByte:comment.startByte]) {
+		return nil, false
+	}
+	node.children = node.children[:len(node.children)-1]
+	if len(node.fieldIDs) > len(node.children) {
+		node.fieldIDs = node.fieldIDs[:len(node.children)]
+		if len(node.fieldSources) > len(node.children) {
+			node.fieldSources = node.fieldSources[:len(node.children)]
+		}
+	}
+	node.endByte = prev.endByte
+	node.endPoint = prev.endPoint
+	return comment, true
+}
+
+func insertJavaScriptStatementBlockComment(parent *Node, childIdx int, comment *Node) {
+	if parent == nil || comment == nil || childIdx < 0 || childIdx >= len(parent.children) {
+		return
+	}
+	parent.children = append(parent.children[:childIdx+1], append([]*Node{comment}, parent.children[childIdx+1:]...)...)
+	if len(parent.fieldIDs) > 0 {
+		fieldIDs := append([]FieldID(nil), parent.fieldIDs[:childIdx+1]...)
+		fieldIDs = append(fieldIDs, 0)
+		fieldIDs = append(fieldIDs, parent.fieldIDs[childIdx+1:]...)
+		parent.fieldIDs = fieldIDs
+		if len(parent.fieldSources) > 0 {
+			fieldSources := append([]uint8(nil), parent.fieldSources[:childIdx+1]...)
+			fieldSources = append(fieldSources, fieldSourceNone)
+			fieldSources = append(fieldSources, parent.fieldSources[childIdx+1:]...)
+			parent.fieldSources = fieldSources
+		}
+	}
+	populateParentNode(parent, parent.children)
+}
+
+func normalizeTypeScriptPredefinedGenericCalls(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil {
+		return
+	}
+	switch lang.Name {
+	case "tsx", "typescript":
+	default:
+		return
+	}
+
+	callSym, ok := lang.SymbolByName("call_expression")
+	if !ok {
+		return
+	}
+	typeArgsSym, ok := lang.SymbolByName("type_arguments")
+	if !ok {
+		return
+	}
+	argsSym, ok := lang.SymbolByName("arguments")
+	if !ok {
+		return
+	}
+	predefinedTypeSym, ok := lang.SymbolByName("predefined_type")
+	if !ok {
+		return
+	}
+
+	callNamed := int(callSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[callSym].Named
+	typeArgsNamed := int(typeArgsSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[typeArgsSym].Named
+	argsNamed := int(argsSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[argsSym].Named
+	predefinedTypeNamed := int(predefinedTypeSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[predefinedTypeSym].Named
+
+	functionFieldID, _ := lang.FieldByName("function")
+	typeArgsFieldID, _ := lang.FieldByName("type_arguments")
+	argumentsFieldID, _ := lang.FieldByName("arguments")
+
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		for i, child := range n.children {
+			if rewritten := rewriteTypeScriptPredefinedGenericCall(child, source, lang, callSym, callNamed, typeArgsSym, typeArgsNamed, argsSym, argsNamed, predefinedTypeSym, predefinedTypeNamed, functionFieldID, typeArgsFieldID, argumentsFieldID); rewritten != nil {
+				n.children[i] = rewritten
+				rewritten.parent = n
+				rewritten.childIndex = i
+				child = rewritten
+			}
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func rewriteTypeScriptPredefinedGenericCall(node *Node, source []byte, lang *Language, callSym Symbol, callNamed bool, typeArgsSym Symbol, typeArgsNamed bool, argsSym Symbol, argsNamed bool, predefinedTypeSym Symbol, predefinedTypeNamed bool, functionFieldID FieldID, typeArgsFieldID FieldID, argumentsFieldID FieldID) *Node {
+	if node == nil || lang == nil || node.Type(lang) != "binary_expression" || len(node.children) != 3 {
+		return nil
+	}
+	left := node.children[0]
+	gt := node.children[1]
+	paren := node.children[2]
+	if left == nil || gt == nil || paren == nil || left.Type(lang) != "binary_expression" || gt.Type(lang) != ">" || paren.Type(lang) != "parenthesized_expression" {
+		return nil
+	}
+	if len(left.children) != 3 || len(paren.children) != 3 {
+		return nil
+	}
+	callee := left.children[0]
+	lt := left.children[1]
+	typeArg := left.children[2]
+	if callee == nil || lt == nil || typeArg == nil || lt.Type(lang) != "<" {
+		return nil
+	}
+	switch callee.Type(lang) {
+	case "identifier", "member_expression":
+	default:
+		return nil
+	}
+	typeArg = normalizeTypeScriptGenericCallTypeArgument(typeArg, source, lang, predefinedTypeSym, predefinedTypeNamed)
+	if typeArg == nil {
+		return nil
+	}
+	arena := node.ownerArena
+	if typeArg.ownerArena != arena {
+		typeArg = cloneNodeInArena(arena, typeArg)
+	}
+	typeArgs := newParentNodeInArena(arena, typeArgsSym, typeArgsNamed, []*Node{lt, typeArg, gt}, nil, 0)
+	argsChildren := typeScriptGenericCallArgumentChildren(paren, lang)
+	if arena != nil && len(argsChildren) > 0 {
+		buf := arena.allocNodeSlice(len(argsChildren))
+		copy(buf, argsChildren)
+		argsChildren = buf
+	}
+	args := newParentNodeInArena(arena, argsSym, argsNamed, argsChildren, nil, paren.productionID)
+
+	callChildren := phpAllocChildren(arena, 3)
+	callChildren[0] = callee
+	callChildren[1] = typeArgs
+	callChildren[2] = args
+	fieldIDs := phpSyntheticFieldIDs(arena, 3, lang, map[int]string{
+		0: "function",
+		1: "type_arguments",
+		2: "arguments",
+	})
+	call := newParentNodeInArena(arena, callSym, callNamed, callChildren, fieldIDs, node.productionID)
+	call.fieldSources = defaultFieldSourcesInArena(arena, fieldIDs)
+
+	// Ensure direct field ownership even when some grammars omit field metadata.
+	if len(call.fieldIDs) == 3 {
+		if functionFieldID != 0 {
+			call.fieldIDs[0] = functionFieldID
+		}
+		if typeArgsFieldID != 0 {
+			call.fieldIDs[1] = typeArgsFieldID
+		}
+		if argumentsFieldID != 0 {
+			call.fieldIDs[2] = argumentsFieldID
+		}
+		call.fieldSources = defaultFieldSourcesInArena(arena, call.fieldIDs)
+	}
+	return call
+}
+
+func typeScriptGenericCallArgumentChildren(paren *Node, lang *Language) []*Node {
+	if paren == nil || lang == nil {
+		return nil
+	}
+	if len(paren.children) != 3 || paren.children[1] == nil || paren.children[1].Type(lang) != "sequence_expression" {
+		return append([]*Node(nil), paren.children...)
+	}
+	seq := paren.children[1]
+	out := make([]*Node, 0, len(seq.children)+2)
+	out = append(out, paren.children[0])
+	out = append(out, seq.children...)
+	out = append(out, paren.children[2])
+	return out
+}
+
+func normalizeTypeScriptGenericCallTypeArgument(node *Node, source []byte, lang *Language, predefinedTypeSym Symbol, predefinedTypeNamed bool) *Node {
+	if node == nil || lang == nil {
+		return nil
+	}
+	switch node.Type(lang) {
+	case "predefined_type", "type_identifier":
+		return node
+	case "identifier":
+		if typeKeywordSym, ok := typeScriptPredefinedTypeSymbol(lang, node.Text(source)); ok {
+			typeKeywordNamed := int(typeKeywordSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[typeKeywordSym].Named
+			typeLeaf := newLeafNodeInArena(node.ownerArena, typeKeywordSym, typeKeywordNamed, node.startByte, node.endByte, node.startPoint, node.endPoint)
+			return newParentNodeInArena(node.ownerArena, predefinedTypeSym, predefinedTypeNamed, []*Node{typeLeaf}, nil, 0)
+		}
+		if typeIdentifierSym, ok := lang.SymbolByName("type_identifier"); ok {
+			typeIdentifierNamed := int(typeIdentifierSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[typeIdentifierSym].Named
+			return newLeafNodeInArena(node.ownerArena, typeIdentifierSym, typeIdentifierNamed, node.startByte, node.endByte, node.startPoint, node.endPoint)
+		}
+	}
+	return nil
+}
+
+func normalizeTypeScriptEnumBodyFields(root *Node, lang *Language) {
+	if root == nil || lang == nil {
+		return
+	}
+	switch lang.Name {
+	case "tsx", "typescript":
+	default:
+		return
+	}
+
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type(lang) == "enum_body" && len(n.fieldIDs) > 0 {
+			limit := len(n.children)
+			if len(n.fieldIDs) < limit {
+				limit = len(n.fieldIDs)
+			}
+			for i := 0; i < limit; i++ {
+				child := n.children[i]
+				if child == nil || child.Type(lang) != "enum_assignment" {
+					continue
+				}
+				n.fieldIDs[i] = 0
+				if len(n.fieldSources) > i {
+					n.fieldSources[i] = fieldSourceNone
+				}
+			}
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func typeScriptPredefinedTypeSymbol(lang *Language, text string) (Symbol, bool) {
+	if lang == nil {
+		return 0, false
+	}
+	switch text {
+	case "any", "bigint", "boolean", "never", "number", "object", "string", "symbol", "undefined", "unknown", "void":
+		return lang.SymbolByName(text)
+	default:
+		return 0, false
 	}
 }
 
@@ -2790,6 +4654,29 @@ func normalizeSvelteTrailingExtraTrivia(root *Node, source []byte, lang *Languag
 		return
 	}
 	if last.Type(lang) != "_tag_value_token1" {
+		return
+	}
+	if last.startByte >= last.endByte || last.endByte != root.endByte || int(last.endByte) > len(source) {
+		return
+	}
+	if !bytesAreTrivia(source[last.startByte:last.endByte]) {
+		return
+	}
+	root.children = root.children[:len(root.children)-1]
+	if len(root.fieldIDs) > len(root.children) {
+		root.fieldIDs = root.fieldIDs[:len(root.children)]
+	}
+	if len(root.fieldSources) > len(root.children) {
+		root.fieldSources = root.fieldSources[:len(root.children)]
+	}
+}
+
+func trimTrailingExtraTriviaRoot(root *Node, source []byte) {
+	if root == nil || len(root.children) == 0 || len(source) == 0 {
+		return
+	}
+	last := root.children[len(root.children)-1]
+	if last == nil || !last.IsExtra() || len(last.children) != 0 {
 		return
 	}
 	if last.startByte >= last.endByte || last.endByte != root.endByte || int(last.endByte) > len(source) {
@@ -5329,6 +7216,2421 @@ func rewritePerlReturnExpressionList(arena *nodeArena, ret *Node, lang *Language
 	return newParentNodeInArena(arena, listSym, listNamed, outerChildren, nil, list.productionID)
 }
 
+func normalizeScalaObjectTemplateBodyFragments(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "scala" || len(root.children) < 3 || len(source) == 0 {
+		return
+	}
+	templateBodySym, ok := symbolByName(lang, "template_body")
+	if !ok {
+		return
+	}
+	templateBodyNamed := int(templateBodySym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[templateBodySym].Named
+	arena := root.ownerArena
+	changed := false
+	for i := 0; i+2 < len(root.children); i++ {
+		obj := root.children[i]
+		openBrace := scalaErrorTokenNode(root.children[i+1], "{", lang)
+		if !scalaObjectNeedsTemplateBody(obj, lang) || openBrace == nil {
+			continue
+		}
+		closeIdx := scalaFindTemplateBodyClose(root.children, i+2, lang)
+		var closeByte uint32
+		synthClose := false
+		if closeIdx >= 0 {
+			if closeNode := scalaErrorTokenNode(root.children[closeIdx], "}", lang); closeNode != nil {
+				closeByte = closeNode.endByte
+			}
+		} else {
+			matching := findMatchingBraceByte(source, int(openBrace.startByte), len(source))
+			if matching < 0 {
+				continue
+			}
+			closeByte = uint32(matching + 1)
+			closeIdx = scalaFindTemplateBodyCloseByByte(root.children, i+2, closeByte)
+			if closeIdx < 0 {
+				continue
+			}
+			synthClose = true
+		}
+		bodyChildren, ok := scalaTemplateBodyFragmentChildren(root.children[i+1:closeIdx+1], arena, lang, source, closeByte, synthClose)
+		if !ok {
+			continue
+		}
+		replacementChildren := make([]*Node, 0, len(obj.children)+1)
+		replacementChildren = append(replacementChildren, obj.children...)
+		replacementChildren = append(replacementChildren, newParentNodeInArena(arena, templateBodySym, templateBodyNamed, bodyChildren, nil, 0))
+		replacement := newParentNodeInArena(arena, obj.symbol, obj.isNamed, replacementChildren, obj.fieldIDs, obj.productionID)
+		replaceChildRangeWithSingleNode(root, i, closeIdx+1, replacement)
+		changed = true
+	}
+	if changed {
+		populateParentNode(root, root.children)
+	}
+}
+
+func normalizeScalaTemplateBodyObjectFragments(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "scala" || len(source) == 0 {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type(lang) == "template_body" && len(n.children) >= 4 {
+			for i := 0; i+2 < len(n.children); i++ {
+				objTok := n.children[i]
+				ident := n.children[i+1]
+				open := n.children[i+2]
+				if objTok == nil || ident == nil || open == nil || objTok.Type(lang) != "object" || ident.Type(lang) != "identifier" || open.Type(lang) != "{" {
+					continue
+				}
+				startIdx := i
+				if i > 0 {
+					prev := n.children[i-1]
+					if prev != nil && prev.Type(lang) == "_automatic_semicolon" && prev.startByte == objTok.startByte && prev.endByte == objTok.startByte {
+						startIdx = i - 1
+					}
+				}
+				closePos := scalaFindMatchingBraceByteWithTrivia(source, int(open.startByte), n.endByte)
+				if closePos < 0 {
+					continue
+				}
+				objectEnd := uint32(closePos + 1)
+				recovered, ok := scalaRecoverTopLevelObjectNodeFromRange(source, objTok.startByte, objectEnd, lang, n.ownerArena)
+				if !ok || recovered == nil {
+					continue
+				}
+				endIdx := len(n.children)
+				for j := startIdx; j < len(n.children); j++ {
+					child := n.children[j]
+					if child == nil {
+						continue
+					}
+					if child.startByte >= objectEnd {
+						endIdx = j
+						break
+					}
+				}
+				if endIdx <= startIdx {
+					continue
+				}
+				replaceChildRangeWithSingleNode(n, startIdx, endIdx, recovered)
+				scalaRecoverTemplateBodyTailMembers(n, recovered.endByte, source, lang)
+				populateParentNode(n, n.children)
+				i = startIdx
+			}
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+type scalaTemplateMemberKind uint8
+
+const (
+	scalaTemplateMemberUnknown scalaTemplateMemberKind = iota
+	scalaTemplateMemberClass
+	scalaTemplateMemberObject
+	scalaTemplateMemberFunction
+	scalaTemplateMemberImport
+	scalaTemplateMemberVal
+	scalaTemplateMemberComment
+	scalaTemplateMemberBlockComment
+)
+
+type scalaTemplateMemberSpan struct {
+	start uint32
+	end   uint32
+	kind  scalaTemplateMemberKind
+}
+
+func normalizeScalaTemplateBodyRecoveredMembers(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "scala" || len(source) == 0 {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type(lang) == "template_body" && n.HasError() {
+			scalaRecoverTemplateBodyMembers(n, source, lang)
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func normalizeScalaRecoveredObjectTemplateBodies(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "scala" || len(source) == 0 {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if scalaDefinitionTemplateBodyNeedsRecovery(n, lang) {
+			for i, child := range n.children {
+				if child == nil || child.Type(lang) != "template_body" {
+					continue
+				}
+				rebuilt, ok := scalaRebuildTemplateBodyFromSource(child, source, lang, n.ownerArena)
+				if !ok || rebuilt == nil {
+					break
+				}
+				n.children[i] = rebuilt
+				rebuilt.parent = n
+				rebuilt.childIndex = i
+				for cur := n; cur != nil; cur = cur.parent {
+					cur.hasError = false
+					populateParentNode(cur, cur.children)
+				}
+				break
+			}
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func scalaDefinitionTemplateBodyNeedsRecovery(n *Node, lang *Language) bool {
+	if n == nil || lang == nil {
+		return false
+	}
+	switch n.Type(lang) {
+	case "object_definition", "class_definition", "trait_definition":
+	default:
+		return false
+	}
+	var body *Node
+	for _, child := range n.children {
+		if child != nil && child.Type(lang) == "template_body" {
+			body = child
+			break
+		}
+	}
+	if body == nil || len(body.children) < 3 {
+		return false
+	}
+	sawRepeatComment := false
+	sawOpenComment := false
+	sawBlockComment := false
+	for _, child := range body.children {
+		if child == nil {
+			continue
+		}
+		switch child.Type(lang) {
+		case "{", "}":
+			continue
+		case "/*":
+			sawOpenComment = true
+			continue
+		case "block_comment":
+			sawBlockComment = true
+			continue
+		case "block_comment_repeat1":
+			sawRepeatComment = true
+			continue
+		}
+	}
+	return sawRepeatComment && sawOpenComment && !sawBlockComment
+}
+
+func scalaRebuildTemplateBodyFromSource(body *Node, source []byte, lang *Language, arena *nodeArena) (*Node, bool) {
+	if body == nil || lang == nil || body.Type(lang) != "template_body" || len(body.children) < 2 {
+		return nil, false
+	}
+	open := body.children[0]
+	close := body.children[len(body.children)-1]
+	if open == nil || close == nil || open.Type(lang) != "{" || close.Type(lang) != "}" {
+		return nil, false
+	}
+	children := make([]*Node, 0, len(body.children))
+	children = append(children, open)
+	memberStart := open.endByte
+	if comment, ok := scalaBuildTemplateBodyLeadingBlockComment(source, open.endByte, close.startByte, lang, arena); ok && comment != nil {
+		children = append(children, comment)
+		memberStart = comment.endByte
+	}
+	spans := scalaTemplateBodyMemberSpans(source, memberStart, close.startByte)
+	for _, span := range spans {
+		recovered, ok := scalaRecoverTemplateBodyMemberNode(source, span, lang, arena)
+		if !ok || recovered == nil {
+			continue
+		}
+		children = append(children, recovered)
+	}
+	if len(children) < 2 {
+		return nil, false
+	}
+	children = append(children, close)
+	if arena != nil {
+		buf := arena.allocNodeSlice(len(children))
+		copy(buf, children)
+		children = buf
+	}
+	return newParentNodeInArena(arena, body.symbol, body.isNamed, children, nil, body.productionID), true
+}
+
+func scalaBuildTemplateBodyLeadingBlockComment(source []byte, start, limit uint32, lang *Language, arena *nodeArena) (*Node, bool) {
+	if start >= limit || int(limit) > len(source) || lang == nil {
+		return nil, false
+	}
+	pos := int(start)
+	endLimit := int(limit)
+	for pos < endLimit {
+		switch source[pos] {
+		case ' ', '\t', '\n', '\r':
+			pos++
+		default:
+			goto triviaDone
+		}
+	}
+triviaDone:
+	if pos+1 >= endLimit || source[pos] != '/' || source[pos+1] != '*' {
+		return nil, false
+	}
+	closeRel := bytes.Index(source[pos+2:endLimit], []byte("*/"))
+	if closeRel < 0 {
+		return nil, false
+	}
+	closeStart := pos + 2 + closeRel
+	closeEnd := closeStart + 2
+	closeLeafStart := closeStart
+	for closeLeafStart > pos {
+		switch source[closeLeafStart-1] {
+		case ' ', '\t':
+			closeLeafStart--
+		default:
+			goto closeLeafDone
+		}
+	}
+closeLeafDone:
+	commentSym, ok := symbolByName(lang, "block_comment")
+	if !ok {
+		return nil, false
+	}
+	openSym, ok := symbolByName(lang, "/*")
+	if !ok {
+		return nil, false
+	}
+	closeSym, ok := symbolByName(lang, "*/")
+	if !ok {
+		return nil, false
+	}
+	commentNamed := int(commentSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[commentSym].Named
+	openNamed := int(openSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[openSym].Named
+	closeNamed := int(closeSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[closeSym].Named
+	openNode := newLeafNodeInArena(
+		arena,
+		openSym,
+		openNamed,
+		uint32(pos),
+		uint32(pos+2),
+		advancePointByBytes(Point{}, source[:pos]),
+		advancePointByBytes(Point{}, source[:pos+2]),
+	)
+	closeNode := newLeafNodeInArena(
+		arena,
+		closeSym,
+		closeNamed,
+		uint32(closeLeafStart),
+		uint32(closeEnd),
+		advancePointByBytes(Point{}, source[:closeLeafStart]),
+		advancePointByBytes(Point{}, source[:closeEnd]),
+	)
+	children := []*Node{openNode, closeNode}
+	if arena != nil {
+		buf := arena.allocNodeSlice(len(children))
+		copy(buf, children)
+		children = buf
+	}
+	comment := newParentNodeInArena(arena, commentSym, commentNamed, children, nil, 0)
+	comment.isExtra = true
+	return comment, true
+}
+
+func normalizeScalaSplitFunctionDefinitions(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "scala" || len(source) == 0 {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type(lang) == "template_body" && n.HasError() {
+			scalaRecoverSplitFunctionDefinition(n, source, lang)
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func scalaRecoverSplitFunctionDefinition(body *Node, source []byte, lang *Language) {
+	if body == nil || lang == nil || body.Type(lang) != "template_body" || len(body.children) < 4 {
+		return
+	}
+	for i := 0; i+2 < len(body.children); i++ {
+		header := body.children[i]
+		if header == nil {
+			continue
+		}
+		switch header.Type(lang) {
+		case "function_declaration", "_function_declaration":
+		default:
+			continue
+		}
+		eqIdx := i + 1
+		openIdx := i + 2
+		if eqIdx >= len(body.children) || openIdx >= len(body.children) {
+			continue
+		}
+		open := body.children[openIdx]
+		if open == nil || open.Type(lang) != "{" {
+			continue
+		}
+		eqLeaf := body.children[eqIdx]
+		if eqLeaf == nil {
+			continue
+		}
+		eqToken := eqLeaf
+		if eqLeaf.Type(lang) == "ERROR" {
+			eqToken = scalaErrorTokenNode(eqLeaf, "=", lang)
+		}
+		if eqToken == nil || eqToken.Type(lang) != "=" {
+			continue
+		}
+		closePos := scalaFindMatchingBraceByteWithTrivia(source, int(open.startByte), body.endByte)
+		if closePos < 0 {
+			continue
+		}
+		recovered, ok := scalaRecoverSplitFunctionDefinitionFromRange(source, header.startByte, uint32(closePos+1), lang, body.ownerArena)
+		if !ok || recovered == nil {
+			continue
+		}
+		startIdx, endIdx, ok := scalaTemplateBodyChildRange(body.children, header.startByte, uint32(closePos+1))
+		if !ok {
+			continue
+		}
+		replaceChildRangeWithSingleNode(body, startIdx, endIdx, recovered)
+		for n := body; n != nil; n = n.parent {
+			n.hasError = false
+			populateParentNode(n, n.children)
+		}
+		return
+	}
+}
+
+func scalaRecoverTemplateBodyMembers(body *Node, source []byte, lang *Language) {
+	if body == nil || lang == nil || body.Type(lang) != "template_body" || len(body.children) < 3 {
+		return
+	}
+	open := body.children[0]
+	close := body.children[len(body.children)-1]
+	if open == nil || close == nil || open.Type(lang) != "{" || close.Type(lang) != "}" {
+		return
+	}
+	spans := scalaTemplateBodyMemberSpans(source, open.endByte, close.startByte)
+	if len(spans) == 0 {
+		return
+	}
+	changed := false
+	for _, span := range spans {
+		recovered, ok := scalaRecoverTemplateBodyMemberNode(source, span, lang, body.ownerArena)
+		if !ok || recovered == nil {
+			continue
+		}
+		startIdx, endIdx, ok := scalaTemplateBodyChildRange(body.children, span.start, span.end)
+		if !ok {
+			continue
+		}
+		replaceChildRangeWithSingleNode(body, startIdx, endIdx, recovered)
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	for n := body; n != nil; n = n.parent {
+		n.hasError = false
+		populateParentNode(n, n.children)
+	}
+}
+
+func scalaTemplateBodyChildRange(children []*Node, start, end uint32) (int, int, bool) {
+	startIdx := -1
+	endIdx := -1
+	for i, child := range children {
+		if child == nil {
+			continue
+		}
+		if startIdx < 0 && (child.startByte >= start || child.endByte > start) {
+			startIdx = i
+		}
+		if startIdx >= 0 && child.startByte >= end {
+			endIdx = i
+			break
+		}
+	}
+	if startIdx < 0 {
+		return 0, 0, false
+	}
+	if endIdx < 0 {
+		endIdx = len(children)
+	}
+	if endIdx <= startIdx {
+		return 0, 0, false
+	}
+	return startIdx, endIdx, true
+}
+
+func scalaRecoverTemplateBodyMemberNode(source []byte, span scalaTemplateMemberSpan, lang *Language, arena *nodeArena) (*Node, bool) {
+	if span.end <= span.start || int(span.end) > len(source) {
+		return nil, false
+	}
+	switch span.kind {
+	case scalaTemplateMemberClass:
+		return scalaRecoverTopLevelClassNodeFromRange(source, span.start, span.end, lang, arena)
+	case scalaTemplateMemberObject:
+		return scalaRecoverTopLevelObjectNodeFromRange(source, span.start, span.end, lang, arena)
+	case scalaTemplateMemberFunction:
+		return scalaRecoverTopLevelFunctionNodeFromRange(source, span.start, span.end, lang, arena)
+	case scalaTemplateMemberImport:
+		return scalaRecoverTopLevelNamedNodeFromRange(source, span.start, span.end, lang, arena, "import_declaration")
+	case scalaTemplateMemberVal:
+		return scalaRecoverTopLevelNamedNodeFromRange(source, span.start, span.end, lang, arena, "val_definition")
+	case scalaTemplateMemberComment:
+		return scalaRecoverTopLevelNamedNodeFromRange(source, span.start, span.end, lang, arena, "comment")
+	case scalaTemplateMemberBlockComment:
+		if comment, ok := scalaBuildTemplateBodyLeadingBlockComment(source, span.start, span.end, lang, arena); ok && comment != nil {
+			return comment, true
+		}
+		return scalaRecoverTopLevelNamedNodeFromRange(source, span.start, span.end, lang, arena, "block_comment")
+	default:
+		return nil, false
+	}
+}
+
+func scalaRecoverTemplateBodyTailMembers(body *Node, start uint32, source []byte, lang *Language) {
+	if body == nil || lang == nil || body.Type(lang) != "template_body" || len(body.children) < 2 {
+		return
+	}
+	closeIdx := len(body.children) - 1
+	close := body.children[closeIdx]
+	if close == nil || close.Type(lang) != "}" || start >= close.startByte {
+		return
+	}
+	for i := 0; i < closeIdx; i++ {
+		child := body.children[i]
+		if child != nil && child.startByte >= start && !child.IsExtra() {
+			return
+		}
+	}
+	spans := scalaTemplateBodyMemberSpans(source, start, close.startByte)
+	if len(spans) == 0 {
+		return
+	}
+	recovered := make([]*Node, 0, len(spans))
+	for _, span := range spans {
+		node, ok := scalaRecoverTemplateBodyMemberNode(source, span, lang, body.ownerArena)
+		if !ok || node == nil {
+			continue
+		}
+		recovered = append(recovered, node)
+	}
+	if len(recovered) == 0 {
+		return
+	}
+	newChildren := make([]*Node, 0, len(body.children)+len(recovered))
+	newChildren = append(newChildren, body.children[:closeIdx]...)
+	newChildren = append(newChildren, recovered...)
+	newChildren = append(newChildren, body.children[closeIdx:]...)
+	body.children = newChildren
+	if len(body.fieldIDs) > 0 {
+		fieldIDs := make([]FieldID, 0, len(body.children))
+		fieldIDs = append(fieldIDs, body.fieldIDs[:closeIdx]...)
+		for range recovered {
+			fieldIDs = append(fieldIDs, 0)
+		}
+		fieldIDs = append(fieldIDs, body.fieldIDs[closeIdx:]...)
+		body.fieldIDs = fieldIDs
+	}
+	if len(body.fieldSources) > 0 {
+		fieldSources := make([]uint8, 0, len(body.children))
+		fieldSources = append(fieldSources, body.fieldSources[:closeIdx]...)
+		for range recovered {
+			fieldSources = append(fieldSources, fieldSourceNone)
+		}
+		fieldSources = append(fieldSources, body.fieldSources[closeIdx:]...)
+		body.fieldSources = fieldSources
+	}
+	for i, child := range body.children {
+		if child == nil {
+			continue
+		}
+		child.parent = body
+		child.childIndex = i
+	}
+}
+
+func scalaTemplateBodyMemberSpans(source []byte, bodyStart, bodyEnd uint32) []scalaTemplateMemberSpan {
+	if bodyStart >= bodyEnd || int(bodyEnd) > len(source) {
+		return nil
+	}
+	var spans []scalaTemplateMemberSpan
+	pos := int(bodyStart)
+	limit := int(bodyEnd)
+	for pos < limit {
+		start, kind, ok := scalaFindNextTemplateBodyMemberStart(source, pos, limit)
+		if !ok {
+			break
+		}
+		end := scalaFindTemplateBodyMemberEnd(source, start, limit)
+		if end <= start {
+			pos = start + 1
+			continue
+		}
+		spans = append(spans, scalaTemplateMemberSpan{
+			start: uint32(start),
+			end:   uint32(end),
+			kind:  kind,
+		})
+		pos = end
+	}
+	return spans
+}
+
+func scalaFindNextTemplateBodyMemberStart(source []byte, pos, limit int) (int, scalaTemplateMemberKind, bool) {
+	braceDepth := 0
+	parenDepth := 0
+	bracketDepth := 0
+	inLineComment := false
+	inBlockComment := false
+	var stringQuote byte
+	tripleQuote := false
+	lineStart := true
+	for i := pos; i < limit; i++ {
+		ch := source[i]
+		next := byte(0)
+		if i+1 < limit {
+			next = source[i+1]
+		}
+		if inLineComment {
+			if ch == '\n' {
+				inLineComment = false
+				lineStart = true
+			}
+			continue
+		}
+		if inBlockComment {
+			if ch == '*' && next == '/' {
+				inBlockComment = false
+				i++
+				continue
+			}
+			if ch == '\n' {
+				lineStart = true
+			}
+			continue
+		}
+		if stringQuote != 0 {
+			if tripleQuote {
+				if i+2 < limit && source[i] == stringQuote && source[i+1] == stringQuote && source[i+2] == stringQuote {
+					stringQuote = 0
+					tripleQuote = false
+					i += 2
+				}
+				continue
+			}
+			if ch == '\\' {
+				i++
+				continue
+			}
+			if ch == stringQuote {
+				stringQuote = 0
+			}
+			continue
+		}
+		if braceDepth == 0 && parenDepth == 0 && bracketDepth == 0 && ch == '/' {
+			switch next {
+			case '/':
+				return i, scalaTemplateMemberComment, true
+			case '*':
+				return i, scalaTemplateMemberBlockComment, true
+			}
+		}
+		if lineStart {
+			j := skipHorizontalTrivia(source, i, limit)
+			if braceDepth == 0 && parenDepth == 0 && bracketDepth == 0 {
+				if kind, ok := scalaTemplateMemberKindAt(source, j, limit); ok {
+					return j, kind, true
+				}
+			}
+			lineStart = false
+		}
+		switch {
+		case ch == '/' && next == '/':
+			inLineComment = true
+			i++
+			continue
+		case ch == '/' && next == '*':
+			inBlockComment = true
+			i++
+			continue
+		case ch == '"' || ch == '\'':
+			if i+2 < limit && source[i+1] == ch && source[i+2] == ch {
+				stringQuote = ch
+				tripleQuote = true
+				i += 2
+				continue
+			}
+			stringQuote = ch
+			tripleQuote = false
+			continue
+		case ch == '{':
+			braceDepth++
+		case ch == '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+		case ch == '(':
+			parenDepth++
+		case ch == ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+		case ch == '[':
+			bracketDepth++
+		case ch == ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+		}
+		if ch == '\n' {
+			lineStart = true
+		}
+	}
+	return 0, scalaTemplateMemberUnknown, false
+}
+
+func scalaFindTemplateBodyMemberEnd(source []byte, start, limit int) int {
+	if start+1 < limit && source[start] == '/' {
+		switch source[start+1] {
+		case '/':
+			end := start + 2
+			for end < limit && source[end] != '\n' && source[end] != '\r' {
+				end++
+			}
+			return trimTrailingHorizontalAndVerticalTrivia(source, start, end)
+		case '*':
+			end := start + 2
+			for end+1 < limit {
+				if source[end] == '*' && source[end+1] == '/' {
+					end += 2
+					return trimTrailingHorizontalAndVerticalTrivia(source, start, end)
+				}
+				end++
+			}
+			return trimTrailingHorizontalAndVerticalTrivia(source, start, limit)
+		}
+	}
+	braceDepth := 0
+	parenDepth := 0
+	bracketDepth := 0
+	inLineComment := false
+	inBlockComment := false
+	var stringQuote byte
+	tripleQuote := false
+	lineStart := false
+	for i := start + 1; i < limit; i++ {
+		ch := source[i]
+		next := byte(0)
+		if i+1 < limit {
+			next = source[i+1]
+		}
+		if inLineComment {
+			if ch == '\n' {
+				inLineComment = false
+				lineStart = true
+			}
+			continue
+		}
+		if inBlockComment {
+			if ch == '*' && next == '/' {
+				inBlockComment = false
+				i++
+				continue
+			}
+			if ch == '\n' {
+				lineStart = true
+			}
+			continue
+		}
+		if stringQuote != 0 {
+			if tripleQuote {
+				if i+2 < limit && source[i] == stringQuote && source[i+1] == stringQuote && source[i+2] == stringQuote {
+					stringQuote = 0
+					tripleQuote = false
+					i += 2
+				}
+				continue
+			}
+			if ch == '\\' {
+				i++
+				continue
+			}
+			if ch == stringQuote {
+				stringQuote = 0
+			}
+			continue
+		}
+		if braceDepth == 0 && parenDepth == 0 && bracketDepth == 0 && ch == '/' && (next == '/' || next == '*') {
+			return trimTrailingHorizontalAndVerticalTrivia(source, start, i)
+		}
+		if lineStart {
+			j := skipHorizontalTrivia(source, i, limit)
+			if braceDepth == 0 && parenDepth == 0 && bracketDepth == 0 {
+				switch {
+				case j < limit && source[j] == '}':
+					return j
+				case j+1 < limit && source[j] == '/' && (source[j+1] == '/' || source[j+1] == '*'):
+					return trimTrailingHorizontalAndVerticalTrivia(source, start, i)
+				default:
+					if _, ok := scalaTemplateMemberKindAt(source, j, limit); ok {
+						return trimTrailingHorizontalAndVerticalTrivia(source, start, i)
+					}
+				}
+			}
+			lineStart = false
+		}
+		switch {
+		case ch == '/' && next == '/':
+			inLineComment = true
+			i++
+			continue
+		case ch == '/' && next == '*':
+			inBlockComment = true
+			i++
+			continue
+		case ch == '"' || ch == '\'':
+			if i+2 < limit && source[i+1] == ch && source[i+2] == ch {
+				stringQuote = ch
+				tripleQuote = true
+				i += 2
+				continue
+			}
+			stringQuote = ch
+			tripleQuote = false
+			continue
+		case ch == '{':
+			braceDepth++
+		case ch == '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+		case ch == '(':
+			parenDepth++
+		case ch == ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+		case ch == '[':
+			bracketDepth++
+		case ch == ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+		}
+		if ch == '\n' {
+			lineStart = true
+		}
+	}
+	return trimTrailingHorizontalAndVerticalTrivia(source, start, limit)
+}
+
+func scalaTemplateMemberKindAt(source []byte, pos, limit int) (scalaTemplateMemberKind, bool) {
+	if pos >= limit {
+		return scalaTemplateMemberUnknown, false
+	}
+	switch {
+	case bytes.HasPrefix(source[pos:limit], []byte("private lazy val ")):
+		return scalaTemplateMemberVal, true
+	case bytes.HasPrefix(source[pos:limit], []byte("lazy val ")):
+		return scalaTemplateMemberVal, true
+	case bytes.HasPrefix(source[pos:limit], []byte("private val ")):
+		return scalaTemplateMemberVal, true
+	case bytes.HasPrefix(source[pos:limit], []byte("override val ")):
+		return scalaTemplateMemberVal, true
+	case bytes.HasPrefix(source[pos:limit], []byte("val ")):
+		return scalaTemplateMemberVal, true
+	case bytes.HasPrefix(source[pos:limit], []byte("implicit class ")):
+		return scalaTemplateMemberClass, true
+	case bytes.HasPrefix(source[pos:limit], []byte("final class ")):
+		return scalaTemplateMemberClass, true
+	case bytes.HasPrefix(source[pos:limit], []byte("class ")):
+		return scalaTemplateMemberClass, true
+	case bytes.HasPrefix(source[pos:limit], []byte("object ")):
+		return scalaTemplateMemberObject, true
+	case bytes.HasPrefix(source[pos:limit], []byte("import ")):
+		return scalaTemplateMemberImport, true
+	case pos < limit && source[pos] == '@':
+		return scalaTemplateMemberFunction, true
+	case bytes.HasPrefix(source[pos:limit], []byte("private def ")):
+		return scalaTemplateMemberFunction, true
+	case bytes.HasPrefix(source[pos:limit], []byte("override def ")):
+		return scalaTemplateMemberFunction, true
+	case bytes.HasPrefix(source[pos:limit], []byte("def ")):
+		return scalaTemplateMemberFunction, true
+	default:
+		return scalaTemplateMemberUnknown, false
+	}
+}
+
+func skipHorizontalTrivia(source []byte, pos, limit int) int {
+	for pos < limit {
+		switch source[pos] {
+		case ' ', '\t':
+			pos++
+		default:
+			return pos
+		}
+	}
+	return pos
+}
+
+func trimTrailingHorizontalAndVerticalTrivia(source []byte, start, end int) int {
+	if end > len(source) {
+		end = len(source)
+	}
+	for end > start {
+		switch source[end-1] {
+		case ' ', '\t', '\n', '\r', '\f':
+			end--
+		default:
+			return end
+		}
+	}
+	return end
+}
+
+type scalaStatementSpan struct {
+	start uint32
+	end   uint32
+}
+
+func scalaRecoverSplitFunctionDefinitionFromRange(source []byte, fnStart, fnEnd uint32, lang *Language, arena *nodeArena) (*Node, bool) {
+	if lang == nil || int(fnStart) >= len(source) || fnEnd <= fnStart || int(fnEnd) > len(source) {
+		return nil, false
+	}
+	parser := NewParser(lang)
+	tree, err := parser.Parse(source[fnStart:fnEnd])
+	if err != nil || tree == nil || tree.RootNode() == nil {
+		if tree != nil {
+			tree.Release()
+		}
+		return nil, false
+	}
+	defer tree.Release()
+	startPoint := advancePointByBytes(Point{}, source[:fnStart])
+	offsetRoot := tree.RootNodeWithOffset(fnStart, startPoint)
+	if offsetRoot == nil || offsetRoot.ChildCount() < 3 {
+		return nil, false
+	}
+	header := offsetRoot.Child(0)
+	eqLeaf := offsetRoot.Child(1)
+	open := offsetRoot.Child(2)
+	if header == nil || open == nil || open.Type(lang) != "{" {
+		return nil, false
+	}
+	switch header.Type(lang) {
+	case "function_declaration", "_function_declaration":
+	default:
+		return nil, false
+	}
+	if eqLeaf == nil || eqLeaf.Type(lang) == "ERROR" {
+		if eqLeaf == nil {
+			return nil, false
+		}
+		eqLeaf = scalaErrorTokenNode(eqLeaf, "=", lang)
+	}
+	if eqLeaf == nil || eqLeaf.Type(lang) != "=" {
+		return nil, false
+	}
+	closePos := scalaFindMatchingBraceByteWithTrivia(source, int(open.startByte), fnEnd)
+	if closePos < 0 {
+		return nil, false
+	}
+	block, ok := scalaRecoverFunctionBlockFromRange(source, open.startByte, uint32(closePos+1), lang, arena)
+	if !ok || block == nil {
+		return nil, false
+	}
+	functionSym, ok := symbolByName(lang, "function_definition")
+	if !ok {
+		return nil, false
+	}
+	functionNamed := int(functionSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[functionSym].Named
+	children := make([]*Node, 0, len(header.children)+2)
+	for _, child := range header.children {
+		if child == nil {
+			continue
+		}
+		children = append(children, cloneTreeNodesIntoArena(child, arena))
+	}
+	children = append(children, cloneTreeNodesIntoArena(eqLeaf, arena))
+	children = append(children, block)
+	if arena != nil {
+		buf := arena.allocNodeSlice(len(children))
+		copy(buf, children)
+		children = buf
+	}
+	return newParentNodeInArena(arena, functionSym, functionNamed, children, nil, 0), true
+}
+
+func scalaRecoverFunctionBlockFromRange(source []byte, blockStart, blockEnd uint32, lang *Language, arena *nodeArena) (*Node, bool) {
+	if lang == nil || blockEnd <= blockStart || int(blockEnd) > len(source) {
+		return nil, false
+	}
+	blockSym, ok := symbolByName(lang, "block")
+	if !ok {
+		return nil, false
+	}
+	blockNamed := int(blockSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[blockSym].Named
+	openSym, ok := symbolByName(lang, "{")
+	if !ok {
+		return nil, false
+	}
+	openNamed := int(openSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[openSym].Named
+	closeSym, ok := symbolByName(lang, "}")
+	if !ok {
+		return nil, false
+	}
+	closeNamed := int(closeSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[closeSym].Named
+	open := newLeafNodeInArena(arena, openSym, openNamed, blockStart, blockStart+1, advancePointByBytes(Point{}, source[:blockStart]), advancePointByBytes(Point{}, source[:blockStart+1]))
+	close := newLeafNodeInArena(arena, closeSym, closeNamed, blockEnd-1, blockEnd, advancePointByBytes(Point{}, source[:blockEnd-1]), advancePointByBytes(Point{}, source[:blockEnd]))
+	statementSpans := scalaBlockStatementSpans(source, blockStart+1, blockEnd-1)
+	if len(statementSpans) == 0 {
+		return nil, false
+	}
+	children := make([]*Node, 0, len(statementSpans)+2)
+	children = append(children, open)
+	for _, span := range statementSpans {
+		stmt, ok := scalaRecoverBlockStatementNode(source, span.start, span.end, lang, arena)
+		if !ok || stmt == nil {
+			return nil, false
+		}
+		children = append(children, stmt)
+	}
+	children = append(children, close)
+	if arena != nil {
+		buf := arena.allocNodeSlice(len(children))
+		copy(buf, children)
+		children = buf
+	}
+	return newParentNodeInArena(arena, blockSym, blockNamed, children, nil, 0), true
+}
+
+func scalaBlockStatementSpans(source []byte, blockStart, blockEnd uint32) []scalaStatementSpan {
+	if blockStart >= blockEnd || int(blockEnd) > len(source) {
+		return nil
+	}
+	var spans []scalaStatementSpan
+	pos := int(blockStart)
+	limit := int(blockEnd)
+	for pos < limit {
+		start, ok := scalaFindNextBlockStatementStart(source, pos, limit)
+		if !ok {
+			break
+		}
+		end := scalaFindNextBlockStatementBoundary(source, start, limit)
+		if end <= start {
+			pos = start + 1
+			continue
+		}
+		spans = append(spans, scalaStatementSpan{start: uint32(start), end: uint32(end)})
+		pos = end
+	}
+	return spans
+}
+
+func scalaFindNextBlockStatementStart(source []byte, pos, limit int) (int, bool) {
+	lineStart := true
+	for i := pos; i < limit; i++ {
+		if lineStart {
+			j := skipHorizontalTrivia(source, i, limit)
+			if j < limit && source[j] != '\n' && source[j] != '\r' && source[j] != '}' {
+				return j, true
+			}
+			lineStart = false
+		}
+		if source[i] == '\n' {
+			lineStart = true
+		}
+	}
+	return 0, false
+}
+
+func scalaFindNextBlockStatementBoundary(source []byte, start, limit int) int {
+	braceDepth := 0
+	parenDepth := 0
+	bracketDepth := 0
+	inLineComment := false
+	inBlockComment := false
+	var stringQuote byte
+	tripleQuote := false
+	lineStart := false
+	for i := start + 1; i < limit; i++ {
+		ch := source[i]
+		next := byte(0)
+		if i+1 < limit {
+			next = source[i+1]
+		}
+		if inLineComment {
+			if ch == '\n' {
+				inLineComment = false
+				lineStart = true
+			}
+			continue
+		}
+		if inBlockComment {
+			if ch == '*' && next == '/' {
+				inBlockComment = false
+				i++
+				continue
+			}
+			if ch == '\n' {
+				lineStart = true
+			}
+			continue
+		}
+		if stringQuote != 0 {
+			if tripleQuote {
+				if i+2 < limit && source[i] == stringQuote && source[i+1] == stringQuote && source[i+2] == stringQuote {
+					stringQuote = 0
+					tripleQuote = false
+					i += 2
+				}
+				continue
+			}
+			if ch == '\\' {
+				i++
+				continue
+			}
+			if ch == stringQuote {
+				stringQuote = 0
+			}
+			continue
+		}
+		if lineStart {
+			j := skipHorizontalTrivia(source, i, limit)
+			if braceDepth == 0 && parenDepth == 0 && bracketDepth == 0 && j < limit {
+				switch source[j] {
+				case '}', '\n', '\r':
+					return trimTrailingHorizontalAndVerticalTrivia(source, start, i)
+				}
+				return trimTrailingHorizontalAndVerticalTrivia(source, start, i)
+			}
+			lineStart = false
+		}
+		switch {
+		case ch == '/' && next == '/':
+			inLineComment = true
+			i++
+			continue
+		case ch == '/' && next == '*':
+			inBlockComment = true
+			i++
+			continue
+		case ch == '"' || ch == '\'':
+			if i+2 < limit && source[i+1] == ch && source[i+2] == ch {
+				stringQuote = ch
+				tripleQuote = true
+				i += 2
+				continue
+			}
+			stringQuote = ch
+			tripleQuote = false
+			continue
+		case ch == '{':
+			braceDepth++
+		case ch == '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+		case ch == '(':
+			parenDepth++
+		case ch == ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+		case ch == '[':
+			bracketDepth++
+		case ch == ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+		}
+		if ch == '\n' {
+			lineStart = true
+		}
+	}
+	return trimTrailingHorizontalAndVerticalTrivia(source, start, limit)
+}
+
+func scalaRecoverBlockStatementNode(source []byte, start, end uint32, lang *Language, arena *nodeArena) (*Node, bool) {
+	if end <= start || int(end) > len(source) {
+		return nil, false
+	}
+	parser := NewParser(lang)
+	tree, err := parser.Parse(source[start:end])
+	if err == nil && tree != nil && tree.RootNode() != nil {
+		defer tree.Release()
+		startPoint := advancePointByBytes(Point{}, source[:start])
+		offsetRoot := tree.RootNodeWithOffset(start, startPoint)
+		if offsetRoot != nil {
+			for i := 0; i < offsetRoot.ChildCount(); i++ {
+				child := offsetRoot.Child(i)
+				if child == nil || child.HasError() {
+					continue
+				}
+				switch child.Type(lang) {
+				case "val_definition", "call_expression":
+					return cloneTreeNodesIntoArena(child, arena), true
+				}
+			}
+		}
+	}
+	if bytes.HasPrefix(source[start:end], []byte("val ")) {
+		return scalaRecoverValDefinitionIfExpressionFromRange(source, start, end, lang, arena)
+	}
+	return nil, false
+}
+
+func scalaRecoverValDefinitionIfExpressionFromRange(source []byte, start, end uint32, lang *Language, arena *nodeArena) (*Node, bool) {
+	if end <= start || int(end) > len(source) || lang == nil {
+		return nil, false
+	}
+	valSym, ok := symbolByName(lang, "val")
+	if !ok {
+		return nil, false
+	}
+	identifierSym, ok := symbolByName(lang, "identifier")
+	if !ok {
+		return nil, false
+	}
+	eqSym, ok := symbolByName(lang, "=")
+	if !ok {
+		return nil, false
+	}
+	valDefSym, ok := symbolByName(lang, "val_definition")
+	if !ok {
+		return nil, false
+	}
+	ifExprSym, ok := symbolByName(lang, "if_expression")
+	if !ok {
+		return nil, false
+	}
+	ifSym, ok := symbolByName(lang, "if")
+	if !ok {
+		return nil, false
+	}
+	elseSym, ok := symbolByName(lang, "else")
+	if !ok {
+		return nil, false
+	}
+	valNamed := int(valSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[valSym].Named
+	identifierNamed := int(identifierSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[identifierSym].Named
+	eqNamed := int(eqSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[eqSym].Named
+	valDefNamed := int(valDefSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[valDefSym].Named
+	ifExprNamed := int(ifExprSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[ifExprSym].Named
+	ifNamed := int(ifSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[ifSym].Named
+	elseNamed := int(elseSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[elseSym].Named
+
+	ifPos := bytes.Index(source[start:end], []byte("if "))
+	elsePos := bytes.Index(source[start:end], []byte(" else "))
+	if ifPos < 0 || elsePos < 0 {
+		return nil, false
+	}
+	ifPos += int(start)
+	elsePos += int(start) + 1
+	condStart := ifPos + len("if ")
+	condEnd := scalaFindMatchingParenByteWithTrivia(source, condStart, int(end))
+	if condEnd < condStart {
+		return nil, false
+	}
+	consequenceStart := skipHorizontalTrivia(source, condEnd+1, int(end))
+	if consequenceStart >= elsePos {
+		return nil, false
+	}
+	alternativeStart := skipHorizontalTrivia(source, elsePos+len("else"), int(end))
+	if alternativeStart >= int(end) {
+		return nil, false
+	}
+	condition, ok := scalaRecoverSingleExpressionNode(source, uint32(condStart), uint32(condEnd+1), lang, arena, "parenthesized_expression")
+	if !ok {
+		return nil, false
+	}
+	consequence, ok := scalaRecoverSingleExpressionNode(source, uint32(consequenceStart), uint32(elsePos), lang, arena, "infix_expression")
+	if !ok {
+		return nil, false
+	}
+	alternative, ok := scalaRecoverSingleExpressionNode(source, uint32(alternativeStart), end, lang, arena, "identifier")
+	if !ok {
+		return nil, false
+	}
+	valLeaf := newLeafNodeInArena(arena, valSym, valNamed, start, start+3, advancePointByBytes(Point{}, source[:start]), advancePointByBytes(Point{}, source[:start+3]))
+	nameStart := start + 4
+	nameEnd := nameStart + 3
+	nameLeaf := newLeafNodeInArena(arena, identifierSym, identifierNamed, nameStart, nameEnd, advancePointByBytes(Point{}, source[:nameStart]), advancePointByBytes(Point{}, source[:nameEnd]))
+	eqStart := start + 8
+	eqLeaf := newLeafNodeInArena(arena, eqSym, eqNamed, eqStart, eqStart+1, advancePointByBytes(Point{}, source[:eqStart]), advancePointByBytes(Point{}, source[:eqStart+1]))
+	ifLeaf := newLeafNodeInArena(arena, ifSym, ifNamed, uint32(ifPos), uint32(ifPos+2), advancePointByBytes(Point{}, source[:ifPos]), advancePointByBytes(Point{}, source[:ifPos+2]))
+	elseLeaf := newLeafNodeInArena(arena, elseSym, elseNamed, uint32(elsePos), uint32(elsePos+4), advancePointByBytes(Point{}, source[:elsePos]), advancePointByBytes(Point{}, source[:elsePos+4]))
+	ifChildren := []*Node{ifLeaf, condition, consequence, elseLeaf, alternative}
+	if arena != nil {
+		buf := arena.allocNodeSlice(len(ifChildren))
+		copy(buf, ifChildren)
+		ifChildren = buf
+	}
+	ifNode := newParentNodeInArena(arena, ifExprSym, ifExprNamed, ifChildren, nil, 0)
+	valChildren := []*Node{valLeaf, nameLeaf, eqLeaf, ifNode}
+	if arena != nil {
+		buf := arena.allocNodeSlice(len(valChildren))
+		copy(buf, valChildren)
+		valChildren = buf
+	}
+	return newParentNodeInArena(arena, valDefSym, valDefNamed, valChildren, nil, 0), true
+}
+
+func scalaRecoverSingleExpressionNode(source []byte, start, end uint32, lang *Language, arena *nodeArena, want string) (*Node, bool) {
+	if end <= start || int(end) > len(source) {
+		return nil, false
+	}
+	parser := NewParser(lang)
+	tree, err := parser.Parse(source[start:end])
+	if err != nil || tree == nil || tree.RootNode() == nil {
+		if tree != nil {
+			tree.Release()
+		}
+		return nil, false
+	}
+	defer tree.Release()
+	startPoint := advancePointByBytes(Point{}, source[:start])
+	offsetRoot := tree.RootNodeWithOffset(start, startPoint)
+	if offsetRoot == nil {
+		return nil, false
+	}
+	for i := 0; i < offsetRoot.ChildCount(); i++ {
+		child := offsetRoot.Child(i)
+		if child == nil || child.HasError() {
+			continue
+		}
+		if child.Type(lang) == want {
+			return cloneTreeNodesIntoArena(child, arena), true
+		}
+	}
+	if want == "identifier" {
+		sym, ok := symbolByName(lang, "identifier")
+		if !ok {
+			return nil, false
+		}
+		named := int(sym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[sym].Named
+		return newLeafNodeInArena(arena, sym, named, start, end, advancePointByBytes(Point{}, source[:start]), advancePointByBytes(Point{}, source[:end])), true
+	}
+	return nil, false
+}
+
+func scalaRecoverLeadingAnnotations(source []byte, start, fnStart, fnEnd uint32, lang *Language, arena *nodeArena) []*Node {
+	if lang == nil || fnStart <= start || fnEnd <= fnStart || int(fnEnd) > len(source) {
+		return nil
+	}
+	pos := int(start)
+	limit := int(fnStart)
+	for pos < limit {
+		switch source[pos] {
+		case ' ', '\t', '\n', '\r':
+			pos++
+		default:
+			goto found
+		}
+	}
+found:
+	if pos >= limit || source[pos] != '@' {
+		return nil
+	}
+	parser := NewParser(lang)
+	tree, err := parser.Parse(source[pos:fnEnd])
+	if err != nil || tree == nil || tree.RootNode() == nil {
+		if tree != nil {
+			tree.Release()
+		}
+		return nil
+	}
+	defer tree.Release()
+	startPoint := advancePointByBytes(Point{}, source[:pos])
+	offsetRoot := tree.RootNodeWithOffset(uint32(pos), startPoint)
+	if offsetRoot == nil {
+		return nil
+	}
+	for i := 0; i < offsetRoot.ChildCount(); i++ {
+		child := offsetRoot.Child(i)
+		if child == nil || child.Type(lang) != "function_definition" || child.HasError() {
+			continue
+		}
+		var annotations []*Node
+		for _, fnChild := range child.children {
+			if fnChild == nil || fnChild.Type(lang) != "annotation" {
+				break
+			}
+			annotations = append(annotations, cloneTreeNodesIntoArena(fnChild, arena))
+		}
+		if len(annotations) > 0 {
+			return annotations
+		}
+	}
+	return nil
+}
+
+func scalaFindMatchingBraceByteWithTrivia(source []byte, openPos int, limit uint32) int {
+	return scalaFindMatchingDelimiterByteWithTrivia(source, openPos, int(limit), '{', '}')
+}
+
+func scalaFindMatchingParenByteWithTrivia(source []byte, openPos int, limit int) int {
+	return scalaFindMatchingDelimiterByteWithTrivia(source, openPos, limit, '(', ')')
+}
+
+func scalaFindMatchingDelimiterByteWithTrivia(source []byte, openPos, limit int, openDelim, closeDelim byte) int {
+	if openPos < 0 || openPos >= len(source) {
+		return -1
+	}
+	if limit > len(source) {
+		limit = len(source)
+	}
+	depth := 0
+	inLineComment := false
+	inBlockComment := false
+	var stringQuote byte
+	tripleQuote := false
+	for i := openPos; i < limit; i++ {
+		ch := source[i]
+		next := byte(0)
+		if i+1 < limit {
+			next = source[i+1]
+		}
+		if inLineComment {
+			if ch == '\n' {
+				inLineComment = false
+			}
+			continue
+		}
+		if inBlockComment {
+			if ch == '*' && next == '/' {
+				inBlockComment = false
+				i++
+			}
+			continue
+		}
+		if stringQuote != 0 {
+			if tripleQuote {
+				if i+2 < limit && source[i] == stringQuote && source[i+1] == stringQuote && source[i+2] == stringQuote {
+					stringQuote = 0
+					tripleQuote = false
+					i += 2
+				}
+				continue
+			}
+			if ch == '\\' {
+				i++
+				continue
+			}
+			if ch == stringQuote {
+				stringQuote = 0
+			}
+			continue
+		}
+		switch {
+		case ch == '/' && next == '/':
+			inLineComment = true
+			i++
+			continue
+		case ch == '/' && next == '*':
+			inBlockComment = true
+			i++
+			continue
+		case ch == '"' || ch == '\'':
+			if i+2 < limit && source[i+1] == ch && source[i+2] == ch {
+				stringQuote = ch
+				tripleQuote = true
+				i += 2
+				continue
+			}
+			stringQuote = ch
+			tripleQuote = false
+			continue
+		case ch == openDelim:
+			depth++
+		case ch == closeDelim:
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func normalizeScalaTopLevelClassFragments(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "scala" || root.Type(lang) != "ERROR" || len(root.children) == 0 || len(source) == 0 {
+		return
+	}
+	for _, child := range root.children {
+		if child != nil && child.Type(lang) == "class_definition" {
+			return
+		}
+	}
+	lastObjectEnd := uint32(0)
+	for _, child := range root.children {
+		if child != nil && child.Type(lang) == "object_definition" && child.endByte > lastObjectEnd {
+			lastObjectEnd = child.endByte
+		}
+	}
+	if lastObjectEnd == 0 || int(lastObjectEnd) >= len(source) {
+		return
+	}
+	classStartRel := bytes.Index(source[lastObjectEnd:], []byte("\nfinal class "))
+	if classStartRel < 0 {
+		classStartRel = bytes.Index(source[lastObjectEnd:], []byte("\nclass "))
+		if classStartRel < 0 {
+			return
+		}
+	}
+	classStart := int(lastObjectEnd) + classStartRel + 1
+	classNode, ok := scalaRecoverTopLevelClassNode(source, uint32(classStart), lang, root.ownerArena)
+	if !ok || classNode == nil {
+		return
+	}
+	startIdx := len(root.children)
+	for i, child := range root.children {
+		if child != nil && child.startByte >= uint32(classStart) {
+			startIdx = i
+			break
+		}
+	}
+	if startIdx >= len(root.children) {
+		return
+	}
+	replaceChildRangeWithSingleNode(root, startIdx, len(root.children), classNode)
+	populateParentNode(root, root.children)
+}
+
+func scalaObjectNeedsTemplateBody(node *Node, lang *Language) bool {
+	if node == nil || lang == nil || node.Type(lang) != "object_definition" || len(node.children) != 2 {
+		return false
+	}
+	return node.children[0] != nil && node.children[0].Type(lang) == "object" &&
+		node.children[1] != nil && node.children[1].Type(lang) == "identifier"
+}
+
+func scalaSingleTokenError(node *Node, token string, lang *Language) bool {
+	return scalaErrorTokenNode(node, token, lang) != nil
+}
+
+func scalaErrorTokenNode(node *Node, token string, lang *Language) *Node {
+	if node == nil || lang == nil || node.Type(lang) != "ERROR" || len(node.children) != 1 || node.children[0] == nil {
+		return nil
+	}
+	if node.children[0].Type(lang) == token {
+		return node.children[0]
+	}
+	return nil
+}
+
+func scalaFindTemplateBodyClose(nodes []*Node, start int, lang *Language) int {
+	for i := start; i < len(nodes); i++ {
+		if scalaSingleTokenError(nodes[i], "}", lang) {
+			return i
+		}
+	}
+	return -1
+}
+
+func scalaFindTemplateBodyCloseByByte(nodes []*Node, start int, closeByte uint32) int {
+	last := -1
+	for i := start; i < len(nodes); i++ {
+		n := nodes[i]
+		if n == nil {
+			continue
+		}
+		if n.startByte >= closeByte {
+			break
+		}
+		last = i
+		if n.endByte >= closeByte {
+			return i
+		}
+	}
+	return last
+}
+
+func scalaTemplateBodyFragmentChildren(nodes []*Node, arena *nodeArena, lang *Language, source []byte, closeByte uint32, synthClose bool) ([]*Node, bool) {
+	out := make([]*Node, 0, len(nodes))
+	var appendNode func(*Node)
+	appendNode = func(n *Node) {
+		if n == nil {
+			return
+		}
+		switch n.Type(lang) {
+		case "_indent", "_outdent":
+			return
+		case "_block_repeat1":
+			for _, child := range n.children {
+				appendNode(child)
+			}
+			return
+		case "ERROR":
+			if len(n.children) == 1 && n.children[0] != nil {
+				switch n.children[0].Type(lang) {
+				case "{", "}":
+					out = append(out, n.children[0])
+					return
+				}
+			}
+		}
+		out = append(out, n)
+	}
+	for _, node := range nodes {
+		appendNode(node)
+	}
+	if len(out) == 0 || out[0] == nil || out[0].Type(lang) != "{" {
+		return nil, false
+	}
+	if synthClose && (len(out) == 1 || out[len(out)-1] == nil || out[len(out)-1].Type(lang) != "}") {
+		closeSym, ok := symbolByName(lang, "}")
+		if !ok {
+			return nil, false
+		}
+		closeNamed := int(closeSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[closeSym].Named
+		start := closeByte - 1
+		if int(closeByte) > len(source) || start >= closeByte {
+			return nil, false
+		}
+		close := newLeafNodeInArena(
+			arena,
+			closeSym,
+			closeNamed,
+			start,
+			closeByte,
+			advancePointByBytes(Point{}, source[:start]),
+			advancePointByBytes(Point{}, source[:closeByte]),
+		)
+		out = append(out, close)
+	}
+	if len(out) < 2 || out[len(out)-1] == nil || out[len(out)-1].Type(lang) != "}" {
+		return nil, false
+	}
+	if arena != nil {
+		buf := arena.allocNodeSlice(len(out))
+		copy(buf, out)
+		out = buf
+	}
+	return out, true
+}
+
+func scalaRecoverTopLevelClassNode(source []byte, classStart uint32, lang *Language, arena *nodeArena) (*Node, bool) {
+	if lang == nil || int(classStart) >= len(source) {
+		return nil, false
+	}
+	openRel := bytes.IndexByte(source[classStart:], '{')
+	if openRel < 0 {
+		return nil, false
+	}
+	openBrace := int(classStart) + openRel
+	closeBrace := findMatchingBraceByte(source, openBrace, len(source))
+	if closeBrace < 0 || closeBrace <= openBrace {
+		return nil, false
+	}
+	return scalaRecoverTopLevelClassNodeFromRange(source, classStart, uint32(closeBrace+1), lang, arena)
+}
+
+func scalaRecoverTopLevelClassNodeFromRange(source []byte, classStart, classEnd uint32, lang *Language, arena *nodeArena) (*Node, bool) {
+	if lang == nil || int(classStart) >= len(source) || classEnd <= classStart || int(classEnd) > len(source) {
+		return nil, false
+	}
+	parser := NewParser(lang)
+	tree, err := parser.Parse(source[classStart:classEnd])
+	if err != nil || tree == nil || tree.RootNode() == nil {
+		if tree != nil {
+			tree.Release()
+		}
+		return nil, false
+	}
+	defer tree.Release()
+	startPoint := advancePointByBytes(Point{}, source[:classStart])
+	offsetRoot := tree.RootNodeWithOffset(classStart, startPoint)
+	if offsetRoot == nil {
+		return nil, false
+	}
+	for i := 0; i < offsetRoot.ChildCount(); i++ {
+		child := offsetRoot.Child(i)
+		if child == nil || child.Type(lang) != "class_definition" || child.HasError() {
+			continue
+		}
+		recovered := cloneTreeNodesIntoArena(child, arena)
+		if recovered.endByte < classEnd && bytesAreTrivia(source[recovered.endByte:classEnd]) {
+			extendNodeEndTo(recovered, classEnd, source)
+		}
+		if recovered.endByte == classEnd {
+			return recovered, true
+		}
+	}
+	classSym, ok := symbolByName(lang, "class_definition")
+	if !ok {
+		return nil, false
+	}
+	classNamed := int(classSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[classSym].Named
+	templateBodySym, ok := symbolByName(lang, "template_body")
+	if !ok {
+		return nil, false
+	}
+	templateBodyNamed := int(templateBodySym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[templateBodySym].Named
+	headerIdx := -1
+	classIdx := -1
+	constructorIdx := -1
+	openIdx := -1
+	extendsIdx := -1
+	for i := 0; i < offsetRoot.ChildCount(); i++ {
+		child := offsetRoot.Child(i)
+		if child == nil {
+			continue
+		}
+		switch child.Type(lang) {
+		case "class_definition":
+			if headerIdx < 0 {
+				headerIdx = i
+			}
+		case "class":
+			classIdx = i
+		case "_class_constructor":
+			if classIdx >= 0 && constructorIdx < 0 {
+				constructorIdx = i
+			}
+		case "extends_clause":
+			if constructorIdx >= 0 && extendsIdx < 0 {
+				extendsIdx = i
+			}
+		case "{":
+			if constructorIdx >= 0 || headerIdx >= 0 {
+				openIdx = i
+				i = offsetRoot.ChildCount()
+			}
+		}
+		if openIdx < 0 && headerIdx >= 0 {
+			if brace := scalaErrorTokenNode(child, "{", lang); brace != nil {
+				openIdx = i
+				i = offsetRoot.ChildCount()
+			}
+		}
+	}
+	if headerIdx >= 0 && openIdx >= 0 {
+		header := offsetRoot.Child(headerIdx)
+		closeIdx := scalaFindTemplateBodyCloseByByte(offsetRoot.children, openIdx+1, classEnd)
+		if closeIdx < openIdx {
+			closeIdx = len(offsetRoot.children) - 1
+		}
+		bodyChildren, ok := scalaTemplateBodyFragmentChildren(offsetRoot.children[openIdx:closeIdx+1], arena, lang, source, classEnd, true)
+		if !ok {
+			return nil, false
+		}
+		templateBody := newParentNodeInArena(arena, templateBodySym, templateBodyNamed, bodyChildren, nil, 0)
+		children := make([]*Node, 0, len(header.children)+1)
+		for _, child := range header.children {
+			if child == nil {
+				continue
+			}
+			children = append(children, cloneTreeNodesIntoArena(child, arena))
+		}
+		children = append(children, templateBody)
+		if arena != nil {
+			buf := arena.allocNodeSlice(len(children))
+			copy(buf, children)
+			children = buf
+		}
+		recovered := newParentNodeInArena(arena, classSym, classNamed, children, nil, header.productionID)
+		if recovered.endByte < classEnd && bytesAreTrivia(source[recovered.endByte:classEnd]) {
+			extendNodeEndTo(recovered, classEnd, source)
+		}
+		return recovered, true
+	}
+	if classIdx < 0 || constructorIdx < 0 || openIdx < 0 {
+		return nil, false
+	}
+	constructor := offsetRoot.Child(constructorIdx)
+	if constructor == nil || constructor.ChildCount() < 2 {
+		return nil, false
+	}
+	nameNode := constructor.Child(0)
+	paramsNode := constructor.Child(1)
+	if nameNode == nil || paramsNode == nil || nameNode.Type(lang) != "identifier" || paramsNode.Type(lang) != "class_parameters" {
+		return nil, false
+	}
+	closeByte := classEnd
+	closeIdx := scalaFindTemplateBodyCloseByByte(offsetRoot.children, openIdx+1, closeByte)
+	if closeIdx < openIdx {
+		closeIdx = len(offsetRoot.children) - 1
+	}
+	synthClose := true
+	if closeIdx >= 0 && closeIdx < len(offsetRoot.children) {
+		if closeNode := scalaErrorTokenNode(offsetRoot.children[closeIdx], "}", lang); closeNode != nil && closeNode.endByte == closeByte {
+			synthClose = false
+		} else if offsetRoot.children[closeIdx] != nil && offsetRoot.children[closeIdx].Type(lang) == "}" && offsetRoot.children[closeIdx].endByte == closeByte {
+			synthClose = false
+		}
+	}
+	bodyChildren, ok := scalaTemplateBodyFragmentChildren(offsetRoot.children[openIdx:closeIdx+1], arena, lang, source, closeByte, synthClose)
+	if !ok {
+		return nil, false
+	}
+	templateBody := newParentNodeInArena(arena, templateBodySym, templateBodyNamed, bodyChildren, nil, 0)
+	children := make([]*Node, 0, 6)
+	if classIdx > 0 {
+		if modifiers := offsetRoot.Child(classIdx - 1); modifiers != nil && modifiers.Type(lang) == "modifiers" {
+			children = append(children, cloneTreeNodesIntoArena(modifiers, arena))
+		}
+	}
+	children = append(children, cloneTreeNodesIntoArena(offsetRoot.Child(classIdx), arena))
+	children = append(children, cloneTreeNodesIntoArena(nameNode, arena))
+	children = append(children, cloneTreeNodesIntoArena(paramsNode, arena))
+	if extendsIdx >= 0 {
+		if extendsClause := offsetRoot.Child(extendsIdx); extendsClause != nil && extendsClause.Type(lang) == "extends_clause" {
+			children = append(children, cloneTreeNodesIntoArena(extendsClause, arena))
+		}
+	}
+	children = append(children, templateBody)
+	if arena != nil {
+		buf := arena.allocNodeSlice(len(children))
+		copy(buf, children)
+		children = buf
+	}
+	recovered := newParentNodeInArena(arena, classSym, classNamed, children, nil, 0)
+	if recovered.endByte < classEnd && bytesAreTrivia(source[recovered.endByte:classEnd]) {
+		extendNodeEndTo(recovered, classEnd, source)
+	}
+	return recovered, true
+}
+
+func scalaRecoverTopLevelObjectNodeFromRange(source []byte, objectStart, objectEnd uint32, lang *Language, arena *nodeArena) (*Node, bool) {
+	if lang == nil || int(objectStart) >= len(source) || objectEnd <= objectStart || int(objectEnd) > len(source) {
+		return nil, false
+	}
+	parser := NewParser(lang)
+	tree, err := parser.Parse(source[objectStart:objectEnd])
+	if err != nil || tree == nil || tree.RootNode() == nil {
+		if tree != nil {
+			tree.Release()
+		}
+		return nil, false
+	}
+	defer tree.Release()
+	startPoint := advancePointByBytes(Point{}, source[:objectStart])
+	offsetRoot := tree.RootNodeWithOffset(objectStart, startPoint)
+	if offsetRoot == nil {
+		return nil, false
+	}
+	for i := 0; i < offsetRoot.ChildCount(); i++ {
+		child := offsetRoot.Child(i)
+		if child == nil || child.Type(lang) != "object_definition" || child.HasError() {
+			continue
+		}
+		recovered := cloneTreeNodesIntoArena(child, arena)
+		if recovered.endByte < objectEnd && bytesAreTrivia(source[recovered.endByte:objectEnd]) {
+			extendNodeEndTo(recovered, objectEnd, source)
+		}
+		if recovered.endByte == objectEnd {
+			return recovered, true
+		}
+	}
+	objectSym, ok := symbolByName(lang, "object_definition")
+	if !ok {
+		return nil, false
+	}
+	objectNamed := int(objectSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[objectSym].Named
+	templateBodySym, ok := symbolByName(lang, "template_body")
+	if !ok {
+		return nil, false
+	}
+	templateBodyNamed := int(templateBodySym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[templateBodySym].Named
+	objectIdx := -1
+	identifierIdx := -1
+	openIdx := -1
+	for i := 0; i < offsetRoot.ChildCount(); i++ {
+		child := offsetRoot.Child(i)
+		if child == nil {
+			continue
+		}
+		switch child.Type(lang) {
+		case "object":
+			if objectIdx < 0 {
+				objectIdx = i
+			}
+		case "identifier":
+			if objectIdx >= 0 && identifierIdx < 0 {
+				identifierIdx = i
+			}
+		case "{":
+			if identifierIdx >= 0 {
+				openIdx = i
+				i = offsetRoot.ChildCount()
+			}
+		}
+	}
+	if objectIdx < 0 || identifierIdx < 0 || openIdx < 0 {
+		return nil, false
+	}
+	closeIdx := scalaFindTemplateBodyCloseByByte(offsetRoot.children, openIdx+1, objectEnd)
+	if closeIdx < openIdx {
+		closeIdx = len(offsetRoot.children) - 1
+	}
+	synthClose := true
+	if closeIdx >= 0 && closeIdx < len(offsetRoot.children) {
+		if closeNode := scalaErrorTokenNode(offsetRoot.children[closeIdx], "}", lang); closeNode != nil && closeNode.endByte == objectEnd {
+			synthClose = false
+		} else if offsetRoot.children[closeIdx] != nil && offsetRoot.children[closeIdx].Type(lang) == "}" && offsetRoot.children[closeIdx].endByte == objectEnd {
+			synthClose = false
+		}
+	}
+	bodyChildren, ok := scalaTemplateBodyFragmentChildren(offsetRoot.children[openIdx:closeIdx+1], arena, lang, source, objectEnd, synthClose)
+	if !ok {
+		return nil, false
+	}
+	templateBody := newParentNodeInArena(arena, templateBodySym, templateBodyNamed, bodyChildren, nil, 0)
+	children := []*Node{
+		cloneTreeNodesIntoArena(offsetRoot.Child(objectIdx), arena),
+		cloneTreeNodesIntoArena(offsetRoot.Child(identifierIdx), arena),
+		templateBody,
+	}
+	if arena != nil {
+		buf := arena.allocNodeSlice(len(children))
+		copy(buf, children)
+		children = buf
+	}
+	recovered := newParentNodeInArena(arena, objectSym, objectNamed, children, nil, 0)
+	if recovered.endByte < objectEnd && bytesAreTrivia(source[recovered.endByte:objectEnd]) {
+		extendNodeEndTo(recovered, objectEnd, source)
+	}
+	return recovered, true
+}
+
+func scalaRecoverTopLevelNamedNodeFromRange(source []byte, start, end uint32, lang *Language, arena *nodeArena, want string) (*Node, bool) {
+	if lang == nil || int(start) >= len(source) || end <= start || int(end) > len(source) {
+		return nil, false
+	}
+	parser := NewParser(lang)
+	tree, err := parser.Parse(source[start:end])
+	if err != nil || tree == nil || tree.RootNode() == nil {
+		if tree != nil {
+			tree.Release()
+		}
+		return nil, false
+	}
+	defer tree.Release()
+	startPoint := advancePointByBytes(Point{}, source[:start])
+	offsetRoot := tree.RootNodeWithOffset(start, startPoint)
+	if offsetRoot == nil {
+		return nil, false
+	}
+	for i := 0; i < offsetRoot.ChildCount(); i++ {
+		child := offsetRoot.Child(i)
+		if child == nil || child.Type(lang) != want || child.HasError() {
+			continue
+		}
+		recovered := cloneTreeNodesIntoArena(child, arena)
+		if recovered.endByte < end && bytesAreTrivia(source[recovered.endByte:end]) {
+			extendNodeEndTo(recovered, end, source)
+		}
+		if recovered.endByte == end {
+			return recovered, true
+		}
+	}
+	return nil, false
+}
+
+func scalaRecoverTopLevelFunctionNodeFromRange(source []byte, fnStart, fnEnd uint32, lang *Language, arena *nodeArena) (*Node, bool) {
+	if lang == nil || int(fnStart) >= len(source) || fnEnd <= fnStart || int(fnEnd) > len(source) {
+		return nil, false
+	}
+	parser := NewParser(lang)
+	tree, err := parser.Parse(source[fnStart:fnEnd])
+	if err != nil || tree == nil || tree.RootNode() == nil {
+		if tree != nil {
+			tree.Release()
+		}
+		return nil, false
+	}
+	defer tree.Release()
+	startPoint := advancePointByBytes(Point{}, source[:fnStart])
+	offsetRoot := tree.RootNodeWithOffset(fnStart, startPoint)
+	if offsetRoot == nil {
+		return nil, false
+	}
+	for i := 0; i < offsetRoot.ChildCount(); i++ {
+		child := offsetRoot.Child(i)
+		if child == nil || child.Type(lang) != "function_definition" {
+			continue
+		}
+		recovered := cloneTreeNodesIntoArena(child, arena)
+		if recovered.endByte < fnEnd && bytesAreTrivia(source[recovered.endByte:fnEnd]) {
+			extendNodeEndTo(recovered, fnEnd, source)
+		}
+		return recovered, true
+	}
+	return nil, false
+}
+
+func normalizeScalaCompilationUnitRoot(root *Node, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "scala" || root.Type(lang) != "ERROR" {
+		return
+	}
+	sym, ok := symbolByName(lang, "compilation_unit")
+	if !ok || !rootLooksLikeScalaCompilationUnit(root, lang) {
+		return
+	}
+	root.symbol = sym
+	root.isNamed = int(sym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[sym].Named
+	root.hasError = false
+	for _, child := range root.children {
+		if child != nil && (child.IsError() || child.HasError()) {
+			root.hasError = true
+			break
+		}
+	}
+}
+
+func normalizeScalaImportPathFields(root *Node, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "scala" {
+		return
+	}
+	pathID, ok := lang.FieldByName("path")
+	if !ok || pathID == 0 {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type(lang) == "import_declaration" && len(n.children) > 0 {
+			for i, child := range n.children {
+				if child == nil || child.Type(lang) != "." {
+					continue
+				}
+				prevHasPath := i > 0 && i-1 < len(n.fieldIDs) && n.fieldIDs[i-1] == pathID
+				nextHasPath := i+1 < len(n.children) && i+1 < len(n.fieldIDs) && n.fieldIDs[i+1] == pathID
+				if !prevHasPath || !nextHasPath {
+					continue
+				}
+				ensureNodeFieldStorage(n, len(n.children))
+				n.fieldIDs[i] = pathID
+				n.fieldSources[i] = fieldSourceDirect
+			}
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func normalizeScalaDefinitionFields(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "scala" {
+		return
+	}
+	nameID, _ := lang.FieldByName("name")
+	classParamsID, _ := lang.FieldByName("class_parameters")
+	extendID, _ := lang.FieldByName("extend")
+	parametersID, _ := lang.FieldByName("parameters")
+	patternID, _ := lang.FieldByName("pattern")
+	valueID, _ := lang.FieldByName("value")
+	typeID, _ := lang.FieldByName("type")
+	returnTypeID, _ := lang.FieldByName("return_type")
+	bodyID, ok := lang.FieldByName("body")
+	if !ok {
+		return
+	}
+	conditionID, _ := lang.FieldByName("condition")
+	consequenceID, _ := lang.FieldByName("consequence")
+	alternativeID, _ := lang.FieldByName("alternative")
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		switch n.Type(lang) {
+		case "object_definition", "class_definition", "trait_definition", "enum_definition":
+			for i, child := range n.children {
+				if child == nil {
+					continue
+				}
+				var want FieldID
+				switch n.Type(lang) {
+				case "object_definition", "trait_definition":
+					switch child.Type(lang) {
+					case "identifier":
+						want = nameID
+					case "extends_clause":
+						want = extendID
+					case "template_body":
+						want = bodyID
+					}
+				case "class_definition":
+					switch child.Type(lang) {
+					case "identifier":
+						want = nameID
+					case "class_parameters":
+						want = classParamsID
+					case "extends_clause":
+						want = extendID
+					case "template_body":
+						want = bodyID
+					}
+				case "enum_definition":
+					switch child.Type(lang) {
+					case "identifier":
+						want = nameID
+					case "enum_body":
+						want = bodyID
+					}
+				}
+				if want == 0 {
+					continue
+				}
+				ensureNodeFieldStorage(n, len(n.children))
+				if n.fieldIDs[i] == 0 {
+					n.fieldIDs[i] = want
+					n.fieldSources[i] = fieldSourceDirect
+				}
+			}
+		case "function_definition":
+			for i, child := range n.children {
+				if child == nil {
+					continue
+				}
+				var want FieldID
+				switch {
+				case child.Type(lang) == "identifier":
+					want = nameID
+				case child.Type(lang) == "parameters":
+					want = parametersID
+				case i > 0 && n.children[i-1] != nil && n.children[i-1].Type(lang) == ":" && child.isNamed:
+					want = returnTypeID
+				case i > 0 && n.children[i-1] != nil && (n.children[i-1].Type(lang) == "=" || n.children[i-1].Type(lang) == "=>") && child.isNamed:
+					want = bodyID
+				}
+				if want == 0 {
+					continue
+				}
+				ensureNodeFieldStorage(n, len(n.children))
+				if n.fieldIDs[i] == 0 {
+					n.fieldIDs[i] = want
+					n.fieldSources[i] = fieldSourceDirect
+				}
+			}
+		case "val_definition", "var_definition":
+			patternAssigned := false
+			typePending := false
+			valuePending := false
+			for i, child := range n.children {
+				if child == nil {
+					continue
+				}
+				switch child.Type(lang) {
+				case ":":
+					typePending = true
+					continue
+				case "=":
+					valuePending = true
+					typePending = false
+					continue
+				case "modifiers":
+					continue
+				}
+				if !child.isNamed {
+					continue
+				}
+				var want FieldID
+				switch {
+				case valuePending:
+					want = valueID
+					valuePending = false
+				case typePending:
+					want = typeID
+					typePending = false
+				case !patternAssigned:
+					want = patternID
+					patternAssigned = true
+				}
+				if want == 0 {
+					continue
+				}
+				ensureNodeFieldStorage(n, len(n.children))
+				if n.fieldIDs[i] == 0 {
+					n.fieldIDs[i] = want
+					n.fieldSources[i] = fieldSourceDirect
+				}
+			}
+		case "if_expression":
+			conditionAssigned := false
+			consequenceAssigned := false
+			afterElse := false
+			for i, child := range n.children {
+				if child == nil {
+					continue
+				}
+				if child.Type(lang) == "else" {
+					afterElse = true
+					continue
+				}
+				if !child.isNamed {
+					continue
+				}
+				var want FieldID
+				switch {
+				case !conditionAssigned:
+					want = conditionID
+					conditionAssigned = true
+				case !afterElse && !consequenceAssigned:
+					want = consequenceID
+					consequenceAssigned = true
+				case afterElse:
+					want = alternativeID
+				}
+				if want == 0 {
+					continue
+				}
+				ensureNodeFieldStorage(n, len(n.children))
+				if n.fieldIDs[i] == 0 {
+					n.fieldIDs[i] = want
+					n.fieldSources[i] = fieldSourceDirect
+				}
+			}
+		case "case_block":
+			for i := 0; i+1 < len(n.children); i++ {
+				curr := n.children[i]
+				if curr == nil || curr.Type(lang) != "case_clause" {
+					continue
+				}
+				next := scalaNextCaseClauseBoundaryNode(n.children, i, lang)
+				if next == nil {
+					continue
+				}
+				if curr.endByte >= next.startByte {
+					continue
+				}
+				gap := source[curr.endByte:next.startByte]
+				if !bytesAreTrivia(gap) || !bytesContainLineBreak(gap) {
+					continue
+				}
+				extendNodeEndTo(curr, next.startByte, source)
+			}
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func normalizeScalaTemplateBodyFunctionAnnotations(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "scala" || len(source) == 0 {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type(lang) == "template_body" {
+			for i, child := range n.children {
+				if child == nil || child.Type(lang) != "function_definition" || len(child.children) == 0 {
+					continue
+				}
+				if child.children[0] != nil && child.children[0].Type(lang) == "annotation" {
+					continue
+				}
+				gapStart := n.startByte
+				if i > 0 && n.children[i-1] != nil {
+					gapStart = n.children[i-1].endByte
+				}
+				annotations := scalaRecoverLeadingAnnotations(source, gapStart, child.startByte, child.endByte, lang, child.ownerArena)
+				if len(annotations) == 0 {
+					continue
+				}
+				newChildren := make([]*Node, 0, len(annotations)+len(child.children))
+				newChildren = append(newChildren, annotations...)
+				newChildren = append(newChildren, child.children...)
+				if child.ownerArena != nil {
+					buf := child.ownerArena.allocNodeSlice(len(newChildren))
+					copy(buf, newChildren)
+					newChildren = buf
+				}
+				child.children = newChildren
+				if len(child.fieldIDs) > 0 {
+					fieldIDs := make([]FieldID, 0, len(child.children))
+					for range annotations {
+						fieldIDs = append(fieldIDs, 0)
+					}
+					fieldIDs = append(fieldIDs, child.fieldIDs...)
+					child.fieldIDs = fieldIDs
+				}
+				if len(child.fieldSources) > 0 {
+					fieldSources := make([]uint8, 0, len(child.children))
+					for range annotations {
+						fieldSources = append(fieldSources, fieldSourceNone)
+					}
+					fieldSources = append(fieldSources, child.fieldSources...)
+					child.fieldSources = fieldSources
+				}
+				populateParentNode(child, child.children)
+			}
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func normalizeScalaCaseClauseEnds(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "scala" || len(source) == 0 {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type(lang) == "case_block" {
+			for i := 0; i+1 < len(n.children); i++ {
+				curr := n.children[i]
+				if curr == nil || curr.Type(lang) != "case_clause" {
+					continue
+				}
+				next := scalaNextCaseClauseBoundaryNode(n.children, i, lang)
+				if next == nil {
+					continue
+				}
+				if curr.endByte >= next.startByte || int(next.startByte) > len(source) {
+					continue
+				}
+				gap := source[curr.endByte:next.startByte]
+				if !bytesAreTrivia(gap) || !bytesContainLineBreak(gap) {
+					continue
+				}
+				extendNodeEndTo(curr, next.startByte, source)
+			}
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func normalizeScalaTemplateBodyFunctionEnds(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "scala" || len(source) == 0 {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type(lang) == "template_body" {
+			for i := 0; i+1 < len(n.children); i++ {
+				curr := n.children[i]
+				next := n.children[i+1]
+				if curr == nil || next == nil || curr.Type(lang) != "function_definition" || next.IsExtra() {
+					continue
+				}
+				if len(curr.children) == 0 {
+					continue
+				}
+				last := curr.children[len(curr.children)-1]
+				if last == nil || last.Type(lang) != "indented_block" {
+					continue
+				}
+				if curr.endByte >= next.startByte || int(next.startByte) > len(source) {
+					continue
+				}
+				gap := source[curr.endByte:next.startByte]
+				if !bytesAreTrivia(gap) || !bytesContainLineBreak(gap) {
+					continue
+				}
+				extendNodeEndTo(last, next.startByte, source)
+				extendNodeEndTo(curr, next.startByte, source)
+			}
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func scalaNextCaseClauseBoundaryNode(children []*Node, start int, lang *Language) *Node {
+	for i := start + 1; i < len(children); i++ {
+		child := children[i]
+		if child == nil {
+			continue
+		}
+		switch child.Type(lang) {
+		case "_automatic_semicolon":
+			continue
+		}
+		return child
+	}
+	return nil
+}
+
+func rootLooksLikeScalaCompilationUnit(root *Node, lang *Language) bool {
+	if root == nil || lang == nil || len(root.children) == 0 {
+		return false
+	}
+	sawTopLevel := false
+	for _, child := range root.children {
+		if child == nil {
+			continue
+		}
+		switch child.Type(lang) {
+		case "comment",
+			"block_comment",
+			"package_clause",
+			"import_declaration",
+			"object_definition",
+			"class_definition",
+			"trait_definition",
+			"enum_definition",
+			"function_definition",
+			"type_definition",
+			"val_definition",
+			"var_definition",
+			"given_definition":
+			sawTopLevel = true
+		default:
+			return false
+		}
+	}
+	return sawTopLevel
+}
+
 func normalizeScalaTrailingCommentOwnership(root *Node, source []byte, lang *Language) {
 	if root == nil || len(source) == 0 || lang == nil || lang.Name != "scala" {
 		return
@@ -5357,7 +9659,7 @@ func normalizeScalaTrailingCommentSiblings(parent *Node, source []byte, lang *La
 			continue
 		}
 		prev := parent.children[i-1]
-		body := scalaIndentedCommentTarget(prev, lang)
+		body := scalaTrailingCommentTarget(prev, lang)
 		if body == nil || body.endByte != firstComment.startByte {
 			i++
 			continue
@@ -5440,15 +9742,29 @@ func isScalaCommentNode(n *Node, lang *Language) bool {
 	}
 }
 
-func scalaIndentedCommentTarget(prev *Node, lang *Language) *Node {
-	if prev == nil || lang == nil || prev.Type(lang) != "function_definition" || len(prev.children) == 0 {
+func scalaTrailingCommentTarget(prev *Node, lang *Language) *Node {
+	if prev == nil || lang == nil || len(prev.children) == 0 {
 		return nil
 	}
 	last := prev.children[len(prev.children)-1]
-	if last == nil || last.Type(lang) != "indented_block" {
+	if last == nil {
 		return nil
 	}
-	return last
+	switch prev.Type(lang) {
+	case "function_definition":
+		if last.Type(lang) == "indented_block" {
+			return last
+		}
+	case "trait_definition", "object_definition", "class_definition":
+		if last.Type(lang) == "template_body" {
+			return last
+		}
+	case "enum_definition":
+		if last.Type(lang) == "enum_body" {
+			return last
+		}
+	}
+	return nil
 }
 
 func normalizeScalaFunctionModifierFields(root *Node, lang *Language) {

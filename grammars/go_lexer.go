@@ -143,6 +143,14 @@ func NewGoTokenSourceOrEOF(src []byte, lang *gotreesitter.Language) gotreesitter
 	return ts
 }
 
+// RebuildTokenSource constructs a fresh Go token source for the given source.
+func (ts *GoTokenSource) RebuildTokenSource(src []byte, lang *gotreesitter.Language) (gotreesitter.TokenSource, error) {
+	if lang == nil {
+		lang = ts.lang
+	}
+	return NewGoTokenSource(src, lang)
+}
+
 // Reset reinitializes this token source for a new source buffer.
 func (ts *GoTokenSource) Reset(src []byte) {
 	ts.src = src
@@ -281,11 +289,15 @@ func (ts *GoTokenSource) Next() gotreesitter.Token {
 			if lit == "\n" {
 				// Auto-inserted semicolon: consume the newline byte when present
 				// and stay zero-width at EOF insertion.
+				//
+				// The Go grammar exposes an invisible source_file_token1 alias for
+				// some top-level separator positions, but using that alias for every
+				// inserted newline semicolon breaks statement-list parsing inside
+				// function bodies (for example real-corpus casgstatus-style blocks).
+				// Emit the regular semicolon token here; the parser accepts it in
+				// both top-level and statement contexts.
 				if offset < 0 || offset > len(ts.src) {
 					continue
-				}
-				if ts.autoSemicolonSymbol != 0 {
-					sym = ts.autoSemicolonSymbol
 				}
 				endOffset := offset
 				endPoint := startPoint
@@ -496,19 +508,28 @@ func (ts *GoTokenSource) splitString(offset int, lit string) gotreesitter.Token 
 		EndPoint:   ts.offsetToPoint(openEnd),
 	}
 
-	ts.splitInterpretedStringContent(offset+1, lit[1:len(lit)-1])
+	terminated := len(lit) >= 2 && lit[len(lit)-1] == '"'
+	contentEnd := len(lit)
+	if terminated {
+		contentEnd--
+	}
+	if contentEnd > 1 {
+		ts.splitInterpretedStringContent(offset+1, lit[1:contentEnd])
+	}
 
-	// Close quote
-	closeStart := offset + len(lit) - 1
-	closeEnd := offset + len(lit)
-	ts.pending = append(ts.pending, gotreesitter.Token{
-		Symbol:     ts.interpretedStringCloseQuoteSymbol,
-		Text:       "\"",
-		StartByte:  uint32(closeStart),
-		EndByte:    uint32(closeEnd),
-		StartPoint: ts.offsetToPoint(closeStart),
-		EndPoint:   ts.offsetToPoint(closeEnd),
-	})
+	if terminated {
+		// Close quote
+		closeStart := offset + len(lit) - 1
+		closeEnd := offset + len(lit)
+		ts.pending = append(ts.pending, gotreesitter.Token{
+			Symbol:     ts.interpretedStringCloseQuoteSymbol,
+			Text:       "\"",
+			StartByte:  uint32(closeStart),
+			EndByte:    uint32(closeEnd),
+			StartPoint: ts.offsetToPoint(closeStart),
+			EndPoint:   ts.offsetToPoint(closeEnd),
+		})
+	}
 
 	return openTok
 }
@@ -601,9 +622,15 @@ func (ts *GoTokenSource) splitRawString(offset int, lit string) gotreesitter.Tok
 
 	// Content
 	contentStart := offset + 1
-	contentEnd := offset + len(lit) - 1
+	terminated := len(lit) >= 2 && lit[len(lit)-1] == '`'
+	contentEnd := offset + len(lit)
+	contentEndIdx := len(lit)
+	if terminated {
+		contentEnd--
+		contentEndIdx--
+	}
 	if contentEnd > contentStart {
-		content := lit[1 : len(lit)-1]
+		content := lit[1:contentEndIdx]
 		ts.pending = append(ts.pending, gotreesitter.Token{
 			Symbol:     ts.rawStringContentSymbol,
 			Text:       content,
@@ -614,17 +641,19 @@ func (ts *GoTokenSource) splitRawString(offset int, lit string) gotreesitter.Tok
 		})
 	}
 
-	// Close backtick
-	closeStart := offset + len(lit) - 1
-	closeEnd := offset + len(lit)
-	ts.pending = append(ts.pending, gotreesitter.Token{
-		Symbol:     ts.rawStringQuoteSymbol,
-		Text:       "`",
-		StartByte:  uint32(closeStart),
-		EndByte:    uint32(closeEnd),
-		StartPoint: ts.offsetToPoint(closeStart),
-		EndPoint:   ts.offsetToPoint(closeEnd),
-	})
+	if terminated {
+		// Close backtick
+		closeStart := offset + len(lit) - 1
+		closeEnd := offset + len(lit)
+		ts.pending = append(ts.pending, gotreesitter.Token{
+			Symbol:     ts.rawStringQuoteSymbol,
+			Text:       "`",
+			StartByte:  uint32(closeStart),
+			EndByte:    uint32(closeEnd),
+			StartPoint: ts.offsetToPoint(closeStart),
+			EndPoint:   ts.offsetToPoint(closeEnd),
+		})
+	}
 
 	return openTok
 }

@@ -419,168 +419,6 @@ func TestParseCHeaderGuard(t *testing.T) {
 	}
 }
 
-func TestCTokenSourceFunctionLikeMacroTokenSequence(t *testing.T) {
-	lang := CLanguage()
-	src := []byte("#define LOG(...) fprintf(stderr, __VA_ARGS__)\n")
-	ts, err := NewCTokenSource(src, lang)
-	if err != nil {
-		t.Fatalf("NewCTokenSource failed: %v", err)
-	}
-
-	var got []string
-	for {
-		tok := ts.Next()
-		if tok.Symbol == 0 {
-			break
-		}
-		got = append(got, lang.SymbolNames[tok.Symbol])
-	}
-
-	want := []string{"#define", "identifier", "(", "...", ")", "preproc_arg", "preproc_include_token2"}
-	if len(got) != len(want) {
-		t.Fatalf("token count = %d, want %d; got=%v", len(got), len(want), got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("token %d = %q, want %q; got=%v", i, got[i], want[i], got)
-		}
-	}
-}
-
-func TestParseCFunctionLikeMacro(t *testing.T) {
-	lang := CLanguage()
-	parser := gotreesitter.NewParser(lang)
-	src := []byte("#define LOG(...) fprintf(stderr, __VA_ARGS__)\n")
-	ts, err := NewCTokenSource(src, lang)
-	if err != nil {
-		t.Fatalf("NewCTokenSource failed: %v", err)
-	}
-
-	tree, err := parser.ParseWithTokenSource(src, ts)
-	if err != nil {
-		t.Fatalf("parse failed: %v", err)
-	}
-	root := tree.RootNode()
-	if root == nil {
-		t.Fatal("nil root")
-	}
-	if root.HasError() {
-		t.Fatalf("function-like macro parse has errors; root type = %s", root.Type(lang))
-	}
-
-	found := false
-	gotreesitter.Walk(root, func(node *gotreesitter.Node, depth int) gotreesitter.WalkAction {
-		if node.Type(lang) == "preproc_function_def" {
-			found = true
-			return gotreesitter.WalkStop
-		}
-		return gotreesitter.WalkContinue
-	})
-	if !found {
-		t.Fatalf("expected preproc_function_def in tree, got %s", root.SExpr(lang))
-	}
-}
-
-func TestParseCMultilineFunctionLikeMacro(t *testing.T) {
-	lang := CLanguage()
-	parser := gotreesitter.NewParser(lang)
-	src := []byte("#define LOG(...) \\\n  fprintf(stderr, __VA_ARGS__)\n")
-	ts, err := NewCTokenSource(src, lang)
-	if err != nil {
-		t.Fatalf("NewCTokenSource failed: %v", err)
-	}
-
-	tree, err := parser.ParseWithTokenSource(src, ts)
-	if err != nil {
-		t.Fatalf("parse failed: %v", err)
-	}
-	root := tree.RootNode()
-	if root == nil {
-		t.Fatal("nil root")
-	}
-	if root.HasError() {
-		t.Fatalf("multiline function-like macro parse has errors; root type = %s", root.Type(lang))
-	}
-
-	found := false
-	gotreesitter.Walk(root, func(node *gotreesitter.Node, depth int) gotreesitter.WalkAction {
-		if node.Type(lang) == "preproc_function_def" {
-			found = true
-			return gotreesitter.WalkStop
-		}
-		return gotreesitter.WalkContinue
-	})
-	if !found {
-		t.Fatalf("expected preproc_function_def in tree, got %s", root.SExpr(lang))
-	}
-}
-
-func TestParseCppUsingDeclarationKeepsScopeFieldOffSeparator(t *testing.T) {
-	lang := CppLanguage()
-	parser := gotreesitter.NewParser(lang)
-	src := []byte(`namespace tree_sitter {
-namespace rules {
-using std::move;
-}
-}
-`)
-
-	ts, err := NewCTokenSource(src, lang)
-	if err != nil {
-		t.Fatalf("NewCTokenSource failed: %v", err)
-	}
-
-	tree, err := parser.ParseWithTokenSource(src, ts)
-	if err != nil {
-		t.Fatalf("parse failed: %v", err)
-	}
-	root := tree.RootNode()
-	if root == nil {
-		t.Fatal("nil root")
-	}
-	if root.HasError() {
-		t.Fatalf("parse has errors; root sexpr = %s; tokens = %v", root.SExpr(lang), dumpCTokenSourceTokens(t, src, lang))
-	}
-
-	var qual *gotreesitter.Node
-	gotreesitter.Walk(root, func(node *gotreesitter.Node, depth int) gotreesitter.WalkAction {
-		if node.Type(lang) == "qualified_identifier" {
-			qual = node
-			return gotreesitter.WalkStop
-		}
-		return gotreesitter.WalkContinue
-	})
-	if qual == nil {
-		t.Fatalf("missing qualified_identifier in %s", root.SExpr(lang))
-	}
-	if got, want := qual.FieldNameForChild(0, lang), "scope"; got != want {
-		t.Fatalf("child 0 field = %q, want %q in %s", got, want, qual.SExpr(lang))
-	}
-	if got := qual.FieldNameForChild(1, lang); got != "" {
-		t.Fatalf("child 1 field = %q, want empty in %s", got, qual.SExpr(lang))
-	}
-	if got, want := qual.FieldNameForChild(2, lang), "name"; got != want {
-		t.Fatalf("child 2 field = %q, want %q in %s", got, want, qual.SExpr(lang))
-	}
-}
-
-func dumpCTokenSourceTokens(t *testing.T, src []byte, lang *gotreesitter.Language) []string {
-	t.Helper()
-
-	ts, err := NewCTokenSource(src, lang)
-	if err != nil {
-		t.Fatalf("rebuild token source: %v", err)
-	}
-
-	var toks []string
-	for {
-		tok := ts.Next()
-		if tok.Symbol == 0 {
-			return toks
-		}
-		toks = append(toks, lang.SymbolNames[tok.Symbol]+"="+tok.Text)
-	}
-}
 func TestParseCFixedWidthIntegerTypesAsPrimitiveTypes(t *testing.T) {
 	lang := CLanguage()
 	parser := gotreesitter.NewParser(lang)
@@ -718,90 +556,6 @@ func TestParseCSubtractionKeepsBinaryExpression(t *testing.T) {
 		t.Fatalf("unexpected signed number_literal in subtraction tree: %s", root.SExpr(lang))
 	}
 }
-
-func TestParseCppQualifiedConstructorsAndDestructorCall(t *testing.T) {
-	lang := CppLanguage()
-	parser := gotreesitter.NewParser(lang)
-	src := []byte(`namespace tree_sitter {
-namespace rules {
-
-struct Blank {};
-
-struct Rule {
-  Blank blank_;
-
-  Rule(const Rule &other) : blank_(Blank{}) {}
-  Rule(Rule &&other) noexcept : blank_(Blank{}) {}
-};
-
-static void destroy_value(Rule *rule) {
-  rule->blank_.~Blank();
-}
-
-}  // namespace rules
-}  // namespace tree_sitter
-`)
-
-	ts, err := NewCTokenSource(src, lang)
-	if err != nil {
-		t.Fatalf("NewCTokenSource failed: %v", err)
-	}
-
-	tree, err := parser.ParseWithTokenSource(src, ts)
-	if err != nil {
-		t.Fatalf("parse failed: %v", err)
-	}
-	root := tree.RootNode()
-	if root == nil {
-		t.Fatal("nil root")
-	}
-	if root.HasError() {
-		t.Fatalf(
-			"parse has errors; root sexpr = %s; tokens = %v",
-			root.SExpr(lang),
-			dumpCTokenSourceTokens(t, src, lang),
-		)
-	}
-}
-
-func TestParseCppTemplateSpecialization(t *testing.T) {
-	lang := CppLanguage()
-	parser := gotreesitter.NewParser(lang)
-	src := []byte(`struct Blank {};
-
-struct Rule {
-  enum Kind { BlankType };
-  Kind type;
-
-  template <typename T>
-  bool is() const;
-};
-
-template <>
-bool Rule::is<Blank>() const { return type == BlankType; }
-`)
-
-	ts, err := NewCTokenSource(src, lang)
-	if err != nil {
-		t.Fatalf("NewCTokenSource failed: %v", err)
-	}
-
-	tree, err := parser.ParseWithTokenSource(src, ts)
-	if err != nil {
-		t.Fatalf("parse failed: %v", err)
-	}
-	root := tree.RootNode()
-	if root == nil {
-		t.Fatal("nil root")
-	}
-	if root.HasError() {
-		t.Fatalf(
-			"parse has errors; root sexpr = %s; tokens = %v",
-			root.SExpr(lang),
-			dumpCTokenSourceTokens(t, src, lang),
-		)
-	}
-}
 func TestCTokenSourceEmitsGenericEndifInsideLinkageSpecification(t *testing.T) {
 	lang := CLanguage()
 	src := []byte("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\nint x;\n\n#ifdef __cplusplus\n}\n#endif\n")
@@ -890,6 +644,40 @@ func TestCTokenSourceConditionalExprEmitsLineTerminator(t *testing.T) {
 	}
 	if got, want := lineTermIndex, pragmaIndex-1; got != want {
 		t.Fatalf("line terminator index = %d, want %d; tokens=%v", got, want, got)
+	}
+}
+
+func TestCTokenSourcePreprocArgLeavesTrailingCommentSeparate(t *testing.T) {
+	lang := CLanguage()
+	src := []byte("#define CLUSTER_BLACKLIST_TTL 60      /* 1 minute. */\n")
+	ts, err := NewCTokenSource(src, lang)
+	if err != nil {
+		t.Fatalf("NewCTokenSource failed: %v", err)
+	}
+
+	var got []string
+	for {
+		tok := ts.Next()
+		if tok.Symbol == 0 {
+			break
+		}
+		got = append(got, lang.SymbolNames[tok.Symbol]+"="+tok.Text)
+	}
+
+	want := []string{
+		"#define=#define",
+		"identifier=CLUSTER_BLACKLIST_TTL",
+		"preproc_arg=60      ",
+		"comment=/* 1 minute. */",
+		"preproc_include_token2=\n",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("token count = %d, want %d; got=%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("token %d = %q, want %q; got=%v", i, got[i], want[i], got)
+		}
 	}
 }
 

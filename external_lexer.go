@@ -44,6 +44,10 @@ func (l *ExternalLexer) Lookahead() rune {
 	if l.pos >= len(l.source) {
 		return 0
 	}
+	b := l.source[l.pos]
+	if b < utf8.RuneSelf {
+		return rune(b)
+	}
 	r, _ := utf8.DecodeRune(l.source[l.pos:])
 	return r
 }
@@ -55,7 +59,12 @@ func (l *ExternalLexer) Advance(skip bool) {
 		return
 	}
 
-	r, size := utf8.DecodeRune(l.source[l.pos:])
+	b := l.source[l.pos]
+	r := rune(b)
+	size := 1
+	if b >= utf8.RuneSelf {
+		r, size = utf8.DecodeRune(l.source[l.pos:])
+	}
 	l.pos += size
 	if r == '\n' {
 		l.point.Row++

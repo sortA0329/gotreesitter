@@ -106,7 +106,7 @@ func TestLeafNodeTypeOutOfRange(t *testing.T) {
 func TestLeafNodeTypeUnescapesPunctuationSymbols(t *testing.T) {
 	lang := &Language{
 		Name:        "test",
-		SymbolNames: []string{"", "\\?", "\\?.", "\\?:", "identifier"},
+		SymbolNames: []string{"", "\\?", "\\?.", "\\?:", "identifier", "defined\\?", "\\u2200", "$\\?", "\\\\"},
 	}
 
 	tests := []struct {
@@ -117,6 +117,10 @@ func TestLeafNodeTypeUnescapesPunctuationSymbols(t *testing.T) {
 		{sym: 2, want: "?."},
 		{sym: 3, want: "?:"},
 		{sym: 4, want: "identifier"},
+		{sym: 5, want: "defined?"},
+		{sym: 6, want: "\\u2200"},
+		{sym: 7, want: "$?"},
+		{sym: 8, want: "\\\\"},
 	}
 
 	for _, tc := range tests {

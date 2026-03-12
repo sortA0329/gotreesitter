@@ -234,6 +234,20 @@ func (d *dfaTokenSource) nextDFAToken() Token {
 	return tok
 }
 
+func (d *dfaTokenSource) shouldForceEOFLookahead() bool {
+	if d == nil || d.language == nil {
+		return false
+	}
+	if int(d.state) >= len(d.language.LexModes) {
+		return false
+	}
+	return d.language.LexModes[d.state].LexState == noLookaheadLexState
+}
+
+func (d *dfaTokenSource) syntheticEOFLookaheadToken() Token {
+	return d.nextTokenForLexState(noLookaheadLexState)
+}
+
 func (d *dfaTokenSource) nextTokenForLexState(lexState uint16) Token {
 	if d == nil || d.lexer == nil {
 		return Token{}
@@ -335,7 +349,7 @@ func (d *dfaTokenSource) nextGLRUnionDFAToken() (Token, bool) {
 		candVisible := int(candTok.Symbol) < len(d.language.SymbolMetadata) && d.language.SymbolMetadata[candTok.Symbol].Visible
 		splitPreference := 0
 		if candTok.StartByte == bestTok.StartByte {
-			splitPreference = d.compareDartAngleTokenPreference(candTok, bestTok)
+			splitPreference = d.compareAngleTokenPreference(candTok, bestTok)
 		}
 		better := !bestFound ||
 			candTok.StartByte < bestTok.StartByte ||
@@ -431,8 +445,13 @@ func (d *dfaTokenSource) preferSpecificTokenOnExactMatch(candTok Token, candEndP
 	return candMeta.Visible && !candMeta.Named && bestMeta.Visible && bestMeta.Named
 }
 
-func (d *dfaTokenSource) compareDartAngleTokenPreference(candTok, bestTok Token) int {
-	if d == nil || d.language == nil || d.language.Name != "dart" {
+func (d *dfaTokenSource) compareAngleTokenPreference(candTok, bestTok Token) int {
+	if d == nil || d.language == nil {
+		return 0
+	}
+	switch d.language.Name {
+	case "dart", "tsx", "typescript":
+	default:
 		return 0
 	}
 	if int(candTok.Symbol) >= len(d.language.SymbolNames) || int(bestTok.Symbol) >= len(d.language.SymbolNames) {
@@ -919,8 +938,8 @@ func (d *dfaTokenSource) captureExternalScannerState() []byte {
 	if d == nil || d.language == nil || d.language.ExternalScanner == nil {
 		return nil
 	}
-	buf := make([]byte, externalScannerSerializationBufferSize)
-	n := d.language.ExternalScanner.Serialize(d.externalPayload, buf)
+	var buf [externalScannerSerializationBufferSize]byte
+	n := d.language.ExternalScanner.Serialize(d.externalPayload, buf[:])
 	if n <= 0 {
 		return nil
 	}
@@ -1364,6 +1383,11 @@ func (d *dfaTokenSource) promoteKeyword(tok Token) Token {
 	}
 	if kwTok.EndByte != uint32(end-start) {
 		return tok
+	}
+	if d.language.Name == "rust" && int(kwTok.Symbol) < len(d.language.SymbolNames) && d.language.SymbolNames[kwTok.Symbol] == "default" {
+		if end < len(d.lexer.source) && d.lexer.source[end] == ':' {
+			return tok
+		}
 	}
 
 	// ABI 15: Check if keyword is reserved in this parse state.

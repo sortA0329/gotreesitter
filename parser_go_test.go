@@ -228,19 +228,19 @@ func TestParseGoTokenSource(t *testing.T) {
 	lang := grammars.GoLanguage()
 	src := []byte("package main\n")
 	ts := mustGoTokenSource(t, src, lang)
-	autoSemiSyms := lang.TokenSymbolsByName("source_file_token1")
-	if len(autoSemiSyms) == 0 {
-		t.Fatal("go language missing source_file_token1 symbol")
+	semiSyms := lang.TokenSymbolsByName(";")
+	if len(semiSyms) == 0 {
+		t.Fatal("go language missing semicolon token symbol")
 	}
 
 	expected := []struct {
 		sym  gotreesitter.Symbol
 		text string
 	}{
-		{5, "package"},          // anon_sym_package
-		{1, "main"},             // sym_identifier
-		{autoSemiSyms[0], "\n"}, // source_file_token1 (auto-inserted semicolon)
-		{0, ""},                 // EOF
+		{5, "package"},      // anon_sym_package
+		{1, "main"},         // sym_identifier
+		{semiSyms[0], "\n"}, // regular semicolon token for auto-inserted newline
+		{0, ""},             // EOF
 	}
 
 	for i, want := range expected {
@@ -349,6 +349,42 @@ func hello() {
 	}
 	if got := strLit.Text(tree.Source()); got != `"world"` {
 		t.Errorf("expected string literal %q, got %q", `"world"`, got)
+	}
+}
+
+func TestParseGoExplicitStatementSemicolonPreserved(t *testing.T) {
+	src := `package main
+
+func hello() int { v := 0; return v }
+`
+	tree, lang := parseGo(t, src)
+	root := tree.RootNode()
+
+	if root.HasError() {
+		t.Fatalf("root has error flag set: %s", root.SExpr(lang))
+	}
+
+	stmtList := findNamedChild(lang, root, "statement_list")
+	if stmtList == nil {
+		stmtList = findNamedChild(lang, root, "statement_list_repeat1")
+	}
+	if stmtList == nil {
+		t.Fatalf("no statement_list found: %s", root.SExpr(lang))
+	}
+
+	var sawExplicit bool
+	for i := 0; i < stmtList.ChildCount(); i++ {
+		child := stmtList.Child(i)
+		if child == nil || child.Type(lang) != ";" {
+			continue
+		}
+		sawExplicit = true
+		if got := child.Text(tree.Source()); got != ";" {
+			t.Fatalf("semicolon text = %q, want %q", got, ";")
+		}
+	}
+	if !sawExplicit {
+		t.Fatalf("statement_list missing explicit semicolon child: %s", stmtList.SExpr(lang))
 	}
 }
 

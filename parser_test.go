@@ -2058,13 +2058,13 @@ func TestNormalizeGoSourceFileRootRetagsRecoveredTopLevelChildren(t *testing.T) 
 	root := newParentNodeInArena(arena, 1, true, []*Node{pkg, fn}, nil, 0)
 	root.hasError = true
 
-	normalizeGoSourceFileRoot(root, lang)
+	normalizeGoSourceFileRoot(root, nil, &Parser{language: lang})
 
 	if got, want := root.Type(lang), "source_file"; got != want {
 		t.Fatalf("root.Type = %q, want %q", got, want)
 	}
-	if !root.HasError() {
-		t.Fatalf("root.HasError = false, want true")
+	if root.HasError() {
+		t.Fatalf("root.HasError = true, want false")
 	}
 }
 

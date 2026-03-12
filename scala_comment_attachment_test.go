@@ -258,3 +258,74 @@ func TestScalaInterpolatedStringCarriesTrailingSingleLineTail(t *testing.T) {
 		t.Fatalf("inner string end = %d, want %d", got, want)
 	}
 }
+
+func TestScalaObjectTemplateBodyRecoveredFromRootFragments(t *testing.T) {
+	src := `object PathResolver {
+  // Imports property/environment functions which suppress security exceptions.
+  import AccessControl._
+  import java.security.{AccessControlException, AccessController, PrivilegedAction, PrivilegedExceptionAction}
+}
+`
+
+	tree, lang := parseByLanguageName(t, "scala", src)
+	root := tree.RootNode()
+	if root == nil || root.HasError() {
+		t.Fatalf("unexpected scala parse error: %s", root.SExpr(lang))
+	}
+	if got := root.Type(lang); got != "compilation_unit" {
+		t.Fatalf("root type = %q, want compilation_unit", got)
+	}
+	obj := root.Child(0)
+	if obj == nil || obj.Type(lang) != "object_definition" {
+		t.Fatalf("root child = %v, want object_definition", obj)
+	}
+	template := obj.Child(2)
+	if template == nil || template.Type(lang) != "template_body" {
+		t.Fatalf("template body = %v, want template_body: %s", template, root.SExpr(lang))
+	}
+	if got := template.Child(0).Type(lang); got != "{" {
+		t.Fatalf("template child[0] = %q, want {", got)
+	}
+	if got := template.Child(template.ChildCount() - 1).Type(lang); got != "}" {
+		t.Fatalf("template last child = %q, want }", got)
+	}
+	if found := firstNode(template, func(n *ts.Node) bool { return n.Type(lang) == "import_declaration" }); found == nil {
+		t.Fatalf("template body missing import_declaration: %s", template.SExpr(lang))
+	}
+}
+
+func TestScalaTraitTemplateBodyOwnsTrailingCommentSibling(t *testing.T) {
+	src := `trait Fruit:
+//    ^definition.interface
+  val color: Color
+//    ^definition.variable
+
+object Fruit:
+  val color = Color.Yellow
+`
+
+	tree, lang := parseByLanguageName(t, "scala", src)
+	root := tree.RootNode()
+	if root == nil || root.HasError() {
+		t.Fatalf("unexpected scala parse error: %s", root.SExpr(lang))
+	}
+	traitNode := root.Child(0)
+	if traitNode == nil || traitNode.Type(lang) != "trait_definition" {
+		t.Fatalf("trait node = %v, want trait_definition", traitNode)
+	}
+	next := root.Child(1)
+	if next == nil || next.Type(lang) != "object_definition" {
+		t.Fatalf("next node = %v, want object_definition", next)
+	}
+	template := traitNode.Child(2)
+	if template == nil || template.Type(lang) != "template_body" {
+		t.Fatalf("template body = %v, want template_body", template)
+	}
+	last := template.Child(template.ChildCount() - 1)
+	if last == nil || last.Type(lang) != "comment" {
+		t.Fatalf("template last child = %v, want trailing comment", last)
+	}
+	if got, want := traitNode.EndByte(), next.StartByte(); got != want {
+		t.Fatalf("trait end = %d, want %d", got, want)
+	}
+}
