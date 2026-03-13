@@ -63,6 +63,7 @@ type glrMergeScratch struct {
 	slots     []glrMergeSlot
 	perKeyCap int
 	language  *Language
+	audit     *runtimeAudit
 }
 
 type glrMergeKey struct {
@@ -972,6 +973,9 @@ func mergeStacksWithScratch(stacks []glrStack, scratch *glrMergeScratch) []glrSt
 	}
 	if perfCountersEnabled {
 		perfRecordMergeOut(len(result))
+	}
+	if scratch.audit != nil {
+		scratch.audit.recordMerge(len(alive), len(result), slotCount)
 	}
 	scratch.result = result
 	scratch.slots = slots[:slotCount]

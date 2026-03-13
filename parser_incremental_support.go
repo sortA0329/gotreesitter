@@ -70,6 +70,20 @@ func (t *incrementalParseTiming) toProfile() IncrementalParseProfile {
 		MultiStackTokens:                   t.multiStackTokens,
 		SingleStackGSSNodes:                t.singleStackGSSNodes,
 		MultiStackGSSNodes:                 t.multiStackGSSNodes,
+		GSSNodesAllocated:                  t.gssNodesAllocated,
+		GSSNodesRetained:                   t.gssNodesRetained,
+		GSSNodesDroppedSameToken:           t.gssNodesDroppedSameToken,
+		ParentNodesAllocated:               t.parentNodesAllocated,
+		ParentNodesRetained:                t.parentNodesRetained,
+		ParentNodesDroppedSameToken:        t.parentNodesDroppedSameToken,
+		LeafNodesAllocated:                 t.leafNodesAllocated,
+		LeafNodesRetained:                  t.leafNodesRetained,
+		LeafNodesDroppedSameToken:          t.leafNodesDroppedSameToken,
+		MergeStacksIn:                      t.mergeStacksIn,
+		MergeStacksOut:                     t.mergeStacksOut,
+		MergeSlotsUsed:                     t.mergeSlotsUsed,
+		GlobalCullStacksIn:                 t.globalCullStacksIn,
+		GlobalCullStacksOut:                t.globalCullStacksOut,
 	}
 }
 

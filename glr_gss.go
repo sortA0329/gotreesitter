@@ -31,6 +31,7 @@ type gssScratch struct {
 	singleStackMode   bool
 	singleStackAllocs uint64
 	multiStackAllocs  uint64
+	audit             *runtimeAudit
 }
 
 type gssNodeSlab struct {
@@ -234,6 +235,9 @@ func (s *gssScratch) allocNode(entry stackEntry, prev *gssNode, depth int) *gssN
 		n.prev = prev
 		n.depth = depth
 		n.hash = hash
+		if s.audit != nil {
+			s.audit.recordGSSAlloc(n)
+		}
 		return n
 	}
 }
@@ -245,6 +249,7 @@ func (s *gssScratch) reset() {
 		s.multiStackAllocs = 0
 		s.skipClear = false
 		s.allocatedBytes = 0
+		s.audit = nil
 		return
 	}
 	total := 0
@@ -277,6 +282,7 @@ func (s *gssScratch) reset() {
 		s.singleStackMode = false
 		s.singleStackAllocs = 0
 		s.multiStackAllocs = 0
+		s.audit = nil
 		s.recomputeAllocatedBytes()
 		return
 	}
@@ -291,6 +297,7 @@ func (s *gssScratch) reset() {
 	s.singleStackMode = false
 	s.singleStackAllocs = 0
 	s.multiStackAllocs = 0
+	s.audit = nil
 	s.recomputeAllocatedBytes()
 }
 

@@ -124,6 +124,20 @@ type IncrementalParseProfile struct {
 	MultiStackTokens                   uint64
 	SingleStackGSSNodes                uint64
 	MultiStackGSSNodes                 uint64
+	GSSNodesAllocated                  uint64
+	GSSNodesRetained                   uint64
+	GSSNodesDroppedSameToken           uint64
+	ParentNodesAllocated               uint64
+	ParentNodesRetained                uint64
+	ParentNodesDroppedSameToken        uint64
+	LeafNodesAllocated                 uint64
+	LeafNodesRetained                  uint64
+	LeafNodesDroppedSameToken          uint64
+	MergeStacksIn                      uint64
+	MergeStacksOut                     uint64
+	MergeSlotsUsed                     uint64
+	GlobalCullStacksIn                 uint64
+	GlobalCullStacksOut                uint64
 }
 
 type incrementalParseTiming struct {
@@ -163,6 +177,20 @@ type incrementalParseTiming struct {
 	multiStackTokens                   uint64
 	singleStackGSSNodes                uint64
 	multiStackGSSNodes                 uint64
+	gssNodesAllocated                  uint64
+	gssNodesRetained                   uint64
+	gssNodesDroppedSameToken           uint64
+	parentNodesAllocated               uint64
+	parentNodesRetained                uint64
+	parentNodesDroppedSameToken        uint64
+	leafNodesAllocated                 uint64
+	leafNodesRetained                  uint64
+	leafNodesDroppedSameToken          uint64
+	mergeStacksIn                      uint64
+	mergeStacksOut                     uint64
+	mergeSlotsUsed                     uint64
+	globalCullStacksIn                 uint64
+	globalCullStacksOut                uint64
 }
 
 type parseReuseState struct {
@@ -1028,10 +1056,19 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 		scratch.gss.initialCap = p.incrementalGSSHintCapacity()
 	}
 	defer releaseParserScratch(scratch, deferParentLinks)
+	scratch.audit.beginParse()
+	scratch.merge.audit = nil
+	scratch.gss.audit = nil
 	trackChildErrors := !deferParentLinks
 
 	arena := acquireNodeArena(arenaClass)
 	arena.skipChildClear = reuse == nil && oldTree == nil
+	arena.audit = nil
+	if scratch.audit.enabled {
+		scratch.merge.audit = &scratch.audit
+		scratch.gss.audit = &scratch.audit
+		arena.audit = &scratch.audit
+	}
 	if timing != nil {
 		startUsed := arena.used
 		defer func() {
@@ -1085,6 +1122,7 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 	if len(p.included) > 0 {
 		expectedEOFByte = p.included[len(p.included)-1].EndByte
 	}
+	var stacks []glrStack
 	parseRuntime := ParseRuntime{
 		StopReason:        ParseStopNone,
 		SourceLen:         uint32(len(source)),
@@ -1111,6 +1149,7 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 		scratchStatsCaptured = true
 	}
 	finalizeTree := func(tree *Tree, stopReason ParseStopReason) *Tree {
+		scratch.audit.finishParse(stacks)
 		captureArenaStats()
 		captureScratchStats()
 		if tokenSourceEOFEarly && (stopReason == ParseStopAccepted || stopReason == ParseStopNone) {
@@ -1127,6 +1166,20 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 		parseRuntime.MultiStackTokens = multiStackTokens
 		parseRuntime.SingleStackGSSNodes = scratch.gss.singleStackAllocs
 		parseRuntime.MultiStackGSSNodes = scratch.gss.multiStackAllocs
+		parseRuntime.GSSNodesAllocated = scratch.audit.totalGSSAllocated
+		parseRuntime.GSSNodesRetained = scratch.audit.totalGSSRetained
+		parseRuntime.GSSNodesDroppedSameToken = scratch.audit.totalGSSDropped
+		parseRuntime.ParentNodesAllocated = scratch.audit.totalParentAllocated
+		parseRuntime.ParentNodesRetained = scratch.audit.totalParentRetained
+		parseRuntime.ParentNodesDroppedSameToken = scratch.audit.totalParentDropped
+		parseRuntime.LeafNodesAllocated = scratch.audit.totalLeafAllocated
+		parseRuntime.LeafNodesRetained = scratch.audit.totalLeafRetained
+		parseRuntime.LeafNodesDroppedSameToken = scratch.audit.totalLeafDropped
+		parseRuntime.MergeStacksIn = scratch.audit.mergeStacksIn
+		parseRuntime.MergeStacksOut = scratch.audit.mergeStacksOut
+		parseRuntime.MergeSlotsUsed = scratch.audit.mergeSlotsUsed
+		parseRuntime.GlobalCullStacksIn = scratch.audit.globalCullStacksIn
+		parseRuntime.GlobalCullStacksOut = scratch.audit.globalCullStacksOut
 		parseRuntime.TokensConsumed = perfTokensConsumed
 		parseRuntime.LastTokenEndByte = lastTokenEndByte
 		parseRuntime.LastTokenSymbol = lastTokenSymbol
@@ -1156,6 +1209,20 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 			timing.multiStackTokens = parseRuntime.MultiStackTokens
 			timing.singleStackGSSNodes = parseRuntime.SingleStackGSSNodes
 			timing.multiStackGSSNodes = parseRuntime.MultiStackGSSNodes
+			timing.gssNodesAllocated = parseRuntime.GSSNodesAllocated
+			timing.gssNodesRetained = parseRuntime.GSSNodesRetained
+			timing.gssNodesDroppedSameToken = parseRuntime.GSSNodesDroppedSameToken
+			timing.parentNodesAllocated = parseRuntime.ParentNodesAllocated
+			timing.parentNodesRetained = parseRuntime.ParentNodesRetained
+			timing.parentNodesDroppedSameToken = parseRuntime.ParentNodesDroppedSameToken
+			timing.leafNodesAllocated = parseRuntime.LeafNodesAllocated
+			timing.leafNodesRetained = parseRuntime.LeafNodesRetained
+			timing.leafNodesDroppedSameToken = parseRuntime.LeafNodesDroppedSameToken
+			timing.mergeStacksIn = parseRuntime.MergeStacksIn
+			timing.mergeStacksOut = parseRuntime.MergeStacksOut
+			timing.mergeSlotsUsed = parseRuntime.MergeSlotsUsed
+			timing.globalCullStacksIn = parseRuntime.GlobalCullStacksIn
+			timing.globalCullStacksOut = parseRuntime.GlobalCullStacksOut
 		}
 		if p.logger != nil {
 			p.logf(
@@ -1199,7 +1266,7 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 	}
 
 	var stacksBuf [4]glrStack
-	stacks := stacksBuf[:1]
+	stacks = stacksBuf[:1]
 	initialStackCap := 64 * 1024
 	if reuse != nil {
 		// Incremental reparses often borrow scratch slabs from an earlier full
@@ -1365,11 +1432,13 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 			if perfCountersEnabled {
 				perfRecordGlobalCapCull(len(stacks), maxStacks)
 			}
+			cullIn := len(stacks)
 			if arenaClass == arenaClassFull {
 				stacks = retainTopStacksForLanguageWithScratch(stacks, maxStacks, p.language, &scratch.stackPick, &scratch.stackKeep, &scratch.stackCull, &scratch.stateKeep)
 			} else {
 				stacks = retainTopStacksForLanguageWithScratch(stacks, maxStacks, p.language, &scratch.stackPick, &scratch.stackKeep, nil, nil)
 			}
+			scratch.audit.recordGlobalCull(cullIn, len(stacks))
 			if p.glrTrace {
 				fmt.Printf("[GLR] after cull:\n")
 				for ci := range stacks {
@@ -1454,6 +1523,7 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 
 		// --- Token acquisition and incremental reuse ---
 		if needToken {
+			scratch.audit.startToken(stacks)
 			if len(stacks) == 1 {
 				singleStackTokens++
 			} else {

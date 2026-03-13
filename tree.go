@@ -80,34 +80,48 @@ const (
 
 // ParseRuntime captures parser-loop diagnostics for a completed tree.
 type ParseRuntime struct {
-	StopReason                 ParseStopReason
-	SourceLen                  uint32
-	ExpectedEOFByte            uint32
-	RootEndByte                uint32
-	Truncated                  bool
-	TokenSourceEOFEarly        bool
-	TokensConsumed             uint64
-	LastTokenEndByte           uint32
-	LastTokenSymbol            Symbol
-	LastTokenWasEOF            bool
-	IterationLimit             int
-	StackDepthLimit            int
-	NodeLimit                  int
-	MemoryBudgetBytes          int64
-	Iterations                 int
-	NodesAllocated             int
-	ArenaBytesAllocated        int64
-	ScratchBytesAllocated      int64
-	EntryScratchBytesAllocated int64
-	GSSBytesAllocated          int64
-	PeakStackDepth             int
-	MaxStacksSeen              int
-	SingleStackIterations      int
-	MultiStackIterations       int
-	SingleStackTokens          uint64
-	MultiStackTokens           uint64
-	SingleStackGSSNodes        uint64
-	MultiStackGSSNodes         uint64
+	StopReason                  ParseStopReason
+	SourceLen                   uint32
+	ExpectedEOFByte             uint32
+	RootEndByte                 uint32
+	Truncated                   bool
+	TokenSourceEOFEarly         bool
+	TokensConsumed              uint64
+	LastTokenEndByte            uint32
+	LastTokenSymbol             Symbol
+	LastTokenWasEOF             bool
+	IterationLimit              int
+	StackDepthLimit             int
+	NodeLimit                   int
+	MemoryBudgetBytes           int64
+	Iterations                  int
+	NodesAllocated              int
+	ArenaBytesAllocated         int64
+	ScratchBytesAllocated       int64
+	EntryScratchBytesAllocated  int64
+	GSSBytesAllocated           int64
+	PeakStackDepth              int
+	MaxStacksSeen               int
+	SingleStackIterations       int
+	MultiStackIterations        int
+	SingleStackTokens           uint64
+	MultiStackTokens            uint64
+	SingleStackGSSNodes         uint64
+	MultiStackGSSNodes          uint64
+	GSSNodesAllocated           uint64
+	GSSNodesRetained            uint64
+	GSSNodesDroppedSameToken    uint64
+	ParentNodesAllocated        uint64
+	ParentNodesRetained         uint64
+	ParentNodesDroppedSameToken uint64
+	LeafNodesAllocated          uint64
+	LeafNodesRetained           uint64
+	LeafNodesDroppedSameToken   uint64
+	MergeStacksIn               uint64
+	MergeStacksOut              uint64
+	MergeSlotsUsed              uint64
+	GlobalCullStacksIn          uint64
+	GlobalCullStacksOut         uint64
 }
 
 // Summary returns a stable one-line diagnostic string for parse-runtime stats.
@@ -663,6 +677,9 @@ func newLeafNodeInArena(arena *nodeArena, sym Symbol, named bool, startByte, end
 	n.endPoint = endPoint
 	n.childIndex = -1
 	n.ownerArena = arena
+	if arena.audit != nil {
+		arena.audit.recordNodeAlloc(n, runtimeAuditNodeKindLeaf)
+	}
 	return n
 }
 
@@ -691,6 +708,9 @@ func newParentNodeInArenaWithFieldSources(arena *nodeArena, sym Symbol, named bo
 	n.productionID = productionID
 	n.childIndex = -1
 	populateParentNode(n, children)
+	if arena.audit != nil {
+		arena.audit.recordNodeAlloc(n, runtimeAuditNodeKindParent)
+	}
 	return n
 }
 
@@ -719,6 +739,9 @@ func newParentNodeInArenaNoLinksWithFieldSources(arena *nodeArena, sym Symbol, n
 	n.productionID = productionID
 	n.childIndex = -1
 	populateParentNodeNoLinks(n, children, trackChildErrors)
+	if arena.audit != nil {
+		arena.audit.recordNodeAlloc(n, runtimeAuditNodeKindParent)
+	}
 	return n
 }
 

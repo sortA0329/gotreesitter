@@ -6,6 +6,7 @@ type parserScratch struct {
 	merge       glrMergeScratch
 	entries     glrEntryScratch
 	gss         gssScratch
+	audit       runtimeAudit
 	tmpEntries  []stackEntry
 	glrStates   []StateID
 	nodeLinks   []*Node
@@ -66,6 +67,7 @@ func releaseParserScratch(s *parserScratch, skipGSSClear bool) {
 		s.merge.slots = s.merge.slots[:0]
 	}
 	s.merge.perKeyCap = 0
+	s.merge.audit = nil
 	if cap(s.tmpEntries) > 0 {
 		buf := s.tmpEntries[:cap(s.tmpEntries)]
 		clear(buf)
@@ -109,7 +111,9 @@ func releaseParserScratch(s *parserScratch, skipGSSClear bool) {
 	}
 	s.entries.reset()
 	s.gss.skipClear = skipGSSClear
+	s.gss.audit = nil
 	s.gss.reset()
+	s.audit.reset()
 	s.clearBudget()
 	parserScratchPool.Put(s)
 }

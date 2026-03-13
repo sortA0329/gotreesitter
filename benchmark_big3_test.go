@@ -53,7 +53,9 @@ func benchmarkParseFullDFA(b *testing.B, spec dfaBenchmarkSpec) {
 		gotreesitter.ResetArenaProfile()
 		gotreesitter.ResetPerfCounters()
 		gotreesitter.EnableArenaProfile(true)
+		gotreesitter.EnableRuntimeAudit(true)
 		defer gotreesitter.EnableArenaProfile(false)
+		defer gotreesitter.EnableRuntimeAudit(false)
 	}
 
 	b.ReportAllocs()
@@ -93,6 +95,14 @@ func benchmarkParseFullDFA(b *testing.B, spec dfaBenchmarkSpec) {
 			"STATS_RUNTIME single_iters=%d multi_iters=%d single_tokens=%d multi_tokens=%d gss_single=%d gss_multi=%d\n",
 			lastRuntime.SingleStackIterations, lastRuntime.MultiStackIterations, lastRuntime.SingleStackTokens, lastRuntime.MultiStackTokens, lastRuntime.SingleStackGSSNodes, lastRuntime.MultiStackGSSNodes,
 		)
+		fmt.Printf(
+			"STATS_SURVIVOR gss_alloc=%d gss_retained=%d gss_dropped=%d parent_alloc=%d parent_retained=%d parent_dropped=%d leaf_alloc=%d leaf_retained=%d leaf_dropped=%d merge_in=%d merge_out=%d merge_slots=%d cull_in=%d cull_out=%d\n",
+			lastRuntime.GSSNodesAllocated, lastRuntime.GSSNodesRetained, lastRuntime.GSSNodesDroppedSameToken,
+			lastRuntime.ParentNodesAllocated, lastRuntime.ParentNodesRetained, lastRuntime.ParentNodesDroppedSameToken,
+			lastRuntime.LeafNodesAllocated, lastRuntime.LeafNodesRetained, lastRuntime.LeafNodesDroppedSameToken,
+			lastRuntime.MergeStacksIn, lastRuntime.MergeStacksOut, lastRuntime.MergeSlotsUsed,
+			lastRuntime.GlobalCullStacksIn, lastRuntime.GlobalCullStacksOut,
+		)
 	}
 }
 
@@ -127,7 +137,9 @@ func benchmarkParseIncrementalSingleByteEditDFA(b *testing.B, spec dfaBenchmarkS
 		gotreesitter.ResetArenaProfile()
 		gotreesitter.ResetPerfCounters()
 		gotreesitter.EnableArenaProfile(true)
+		gotreesitter.EnableRuntimeAudit(true)
 		defer gotreesitter.EnableArenaProfile(false)
+		defer gotreesitter.EnableRuntimeAudit(false)
 	}
 	var editTotalNS uint64
 	var reuseTotalNS uint64
@@ -149,6 +161,20 @@ func benchmarkParseIncrementalSingleByteEditDFA(b *testing.B, spec dfaBenchmarkS
 	var multiStackTokens uint64
 	var singleStackGSSNodes uint64
 	var multiStackGSSNodes uint64
+	var gssNodesAllocated uint64
+	var gssNodesRetained uint64
+	var gssNodesDropped uint64
+	var parentNodesAllocated uint64
+	var parentNodesRetained uint64
+	var parentNodesDropped uint64
+	var leafNodesAllocated uint64
+	var leafNodesRetained uint64
+	var leafNodesDropped uint64
+	var mergeStacksIn uint64
+	var mergeStacksOut uint64
+	var mergeSlotsUsed uint64
+	var globalCullStacksIn uint64
+	var globalCullStacksOut uint64
 	reuseUnsupported := false
 	reuseUnsupportedReason := ""
 
@@ -183,6 +209,20 @@ func benchmarkParseIncrementalSingleByteEditDFA(b *testing.B, spec dfaBenchmarkS
 			multiStackTokens += prof.MultiStackTokens
 			singleStackGSSNodes += prof.SingleStackGSSNodes
 			multiStackGSSNodes += prof.MultiStackGSSNodes
+			gssNodesAllocated += prof.GSSNodesAllocated
+			gssNodesRetained += prof.GSSNodesRetained
+			gssNodesDropped += prof.GSSNodesDroppedSameToken
+			parentNodesAllocated += prof.ParentNodesAllocated
+			parentNodesRetained += prof.ParentNodesRetained
+			parentNodesDropped += prof.ParentNodesDroppedSameToken
+			leafNodesAllocated += prof.LeafNodesAllocated
+			leafNodesRetained += prof.LeafNodesRetained
+			leafNodesDropped += prof.LeafNodesDroppedSameToken
+			mergeStacksIn += prof.MergeStacksIn
+			mergeStacksOut += prof.MergeStacksOut
+			mergeSlotsUsed += prof.MergeSlotsUsed
+			globalCullStacksIn += prof.GlobalCullStacksIn
+			globalCullStacksOut += prof.GlobalCullStacksOut
 			if prof.EntryScratchPeak > entryScratchPeak {
 				entryScratchPeak = prof.EntryScratchPeak
 			}
@@ -231,6 +271,14 @@ func benchmarkParseIncrementalSingleByteEditDFA(b *testing.B, spec dfaBenchmarkS
 		fmt.Printf(
 			"STATS_RUNTIME single_iters=%d multi_iters=%d single_tokens=%d multi_tokens=%d gss_single=%d gss_multi=%d\n",
 			singleStackIterations, multiStackIterations, singleStackTokens, multiStackTokens, singleStackGSSNodes, multiStackGSSNodes,
+		)
+		fmt.Printf(
+			"STATS_SURVIVOR gss_alloc=%d gss_retained=%d gss_dropped=%d parent_alloc=%d parent_retained=%d parent_dropped=%d leaf_alloc=%d leaf_retained=%d leaf_dropped=%d merge_in=%d merge_out=%d merge_slots=%d cull_in=%d cull_out=%d\n",
+			gssNodesAllocated, gssNodesRetained, gssNodesDropped,
+			parentNodesAllocated, parentNodesRetained, parentNodesDropped,
+			leafNodesAllocated, leafNodesRetained, leafNodesDropped,
+			mergeStacksIn, mergeStacksOut, mergeSlotsUsed,
+			globalCullStacksIn, globalCullStacksOut,
 		)
 	}
 	tree.Release()

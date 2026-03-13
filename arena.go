@@ -58,6 +58,7 @@ type nodeArena struct {
 	// skipChildClear allows reset() to skip child-slab pointer clearing when
 	// a parse did not borrow any external nodes (full parse without reuse).
 	skipChildClear bool
+	audit          *runtimeAudit
 
 	nodeSlabs      []nodeSlab
 	nodeSlabCursor int
@@ -234,6 +235,7 @@ func acquireNodeArena(class arenaClass) *nodeArena {
 	}
 	a.refs.Store(1)
 	a.clearBudget()
+	a.audit = nil
 	return a
 }
 
@@ -340,6 +342,7 @@ func (a *nodeArena) reset() {
 		slab.used = 0
 	}
 	a.skipChildClear = false
+	a.audit = nil
 	if len(a.fieldSlabs) > 0 {
 		retained := 0
 		keep := 0
