@@ -22,12 +22,15 @@ type gssStack struct {
 }
 
 type gssScratch struct {
-	slabs          []gssNodeSlab
-	slabCursor     int
-	initialCap     int
-	skipClear      bool
-	usedTotal      int
-	allocatedBytes int64
+	slabs             []gssNodeSlab
+	slabCursor        int
+	initialCap        int
+	skipClear         bool
+	usedTotal         int
+	allocatedBytes    int64
+	singleStackMode   bool
+	singleStackAllocs uint64
+	multiStackAllocs  uint64
 }
 
 type gssNodeSlab struct {
@@ -221,6 +224,11 @@ func (s *gssScratch) allocNode(entry stackEntry, prev *gssNode, depth int) *gssN
 		slab.used++
 		s.usedTotal++
 		s.slabCursor = i
+		if s.singleStackMode {
+			s.singleStackAllocs++
+		} else {
+			s.multiStackAllocs++
+		}
 		n := &slab.data[idx]
 		n.entry = entry
 		n.prev = prev
@@ -232,6 +240,9 @@ func (s *gssScratch) allocNode(entry stackEntry, prev *gssNode, depth int) *gssN
 
 func (s *gssScratch) reset() {
 	if len(s.slabs) == 0 {
+		s.singleStackMode = false
+		s.singleStackAllocs = 0
+		s.multiStackAllocs = 0
 		s.skipClear = false
 		s.allocatedBytes = 0
 		return
@@ -263,6 +274,9 @@ func (s *gssScratch) reset() {
 		s.slabCursor = 0
 		s.skipClear = false
 		s.usedTotal = 0
+		s.singleStackMode = false
+		s.singleStackAllocs = 0
+		s.multiStackAllocs = 0
 		s.recomputeAllocatedBytes()
 		return
 	}
@@ -274,6 +288,9 @@ func (s *gssScratch) reset() {
 	s.slabCursor = 0
 	s.skipClear = false
 	s.usedTotal = 0
+	s.singleStackMode = false
+	s.singleStackAllocs = 0
+	s.multiStackAllocs = 0
 	s.recomputeAllocatedBytes()
 }
 

@@ -89,6 +89,10 @@ func benchmarkParseFullDFA(b *testing.B, spec dfaBenchmarkSpec) {
 			"STATS_PARSE nodes_new=%d children_ptrs=%d extras=%d errors=%d reuse_bytes=%d max_stacks=%d\n",
 			lastRuntime.NodesAllocated, p.ParentChildPointers, p.ExtraNodes, p.ErrorNodes, p.ReuseNonLeafBytes, lastRuntime.MaxStacksSeen,
 		)
+		fmt.Printf(
+			"STATS_RUNTIME single_iters=%d multi_iters=%d single_tokens=%d multi_tokens=%d gss_single=%d gss_multi=%d\n",
+			lastRuntime.SingleStackIterations, lastRuntime.MultiStackIterations, lastRuntime.SingleStackTokens, lastRuntime.MultiStackTokens, lastRuntime.SingleStackGSSNodes, lastRuntime.MultiStackGSSNodes,
+		)
 	}
 }
 
@@ -139,6 +143,12 @@ func benchmarkParseIncrementalSingleByteEditDFA(b *testing.B, spec dfaBenchmarkS
 	var recoverHits uint64
 	var entryScratchPeak uint64
 	maxStacksSeen := 0
+	singleStackIterations := 0
+	multiStackIterations := 0
+	var singleStackTokens uint64
+	var multiStackTokens uint64
+	var singleStackGSSNodes uint64
+	var multiStackGSSNodes uint64
 	reuseUnsupported := false
 	reuseUnsupportedReason := ""
 
@@ -167,6 +177,12 @@ func benchmarkParseIncrementalSingleByteEditDFA(b *testing.B, spec dfaBenchmarkS
 			recoverSymbolSkips += prof.RecoverSymbolSkips
 			recoverLookups += prof.RecoverLookups
 			recoverHits += prof.RecoverHits
+			singleStackIterations += prof.SingleStackIterations
+			multiStackIterations += prof.MultiStackIterations
+			singleStackTokens += prof.SingleStackTokens
+			multiStackTokens += prof.MultiStackTokens
+			singleStackGSSNodes += prof.SingleStackGSSNodes
+			multiStackGSSNodes += prof.MultiStackGSSNodes
 			if prof.EntryScratchPeak > entryScratchPeak {
 				entryScratchPeak = prof.EntryScratchPeak
 			}
@@ -211,6 +227,10 @@ func benchmarkParseIncrementalSingleByteEditDFA(b *testing.B, spec dfaBenchmarkS
 		fmt.Printf(
 			"STATS_PERF merge_calls=%d merge_dead_pruned=%d merge_perkey_overflow=%d merge_replacements=%d stackeq_calls=%d stackeq_true=%d stackeq_hash_miss_skips=%d stackcmp_calls=%d forks=%d first_conflict_token=%d max_stacks=%d lex_bytes=%d lex_tokens=%d reuse_nodes_visited=%d reuse_nodes_pushed=%d reuse_nodes_popped=%d reuse_candidates=%d reuse_successes=%d reuse_leaf_successes=%d reuse_nonleaf_checks=%d reuse_nonleaf_successes=%d reuse_nonleaf_bytes=%d reuse_nonleaf_nogoto=%d reuse_nonleaf_nogoto_term=%d reuse_nonleaf_nogoto_nonterm=%d reuse_nonleaf_statemiss=%d reuse_nonleaf_statezero=%d\n",
 			p.MergeCalls, p.MergeDeadPruned, p.MergePerKeyOverflow, p.MergeReplacements, p.StackEquivalentCalls, p.StackEquivalentTrue, p.StackEqHashMissSkips, p.StackCompareCalls, p.ForkCount, p.FirstConflictToken, p.MaxConcurrentStacks, p.LexBytes, p.LexTokens, p.ReuseNodesVisited, p.ReuseNodesPushed, p.ReuseNodesPopped, p.ReuseCandidatesChecked, p.ReuseSuccesses, p.ReuseLeafSuccesses, p.ReuseNonLeafChecks, p.ReuseNonLeafSuccesses, p.ReuseNonLeafBytes, p.ReuseNonLeafNoGoto, p.ReuseNonLeafNoGotoTerm, p.ReuseNonLeafNoGotoNt, p.ReuseNonLeafStateMiss, p.ReuseNonLeafStateZero,
+		)
+		fmt.Printf(
+			"STATS_RUNTIME single_iters=%d multi_iters=%d single_tokens=%d multi_tokens=%d gss_single=%d gss_multi=%d\n",
+			singleStackIterations, multiStackIterations, singleStackTokens, multiStackTokens, singleStackGSSNodes, multiStackGSSNodes,
 		)
 	}
 	tree.Release()

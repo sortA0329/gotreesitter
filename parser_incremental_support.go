@@ -64,6 +64,12 @@ func (t *incrementalParseTiming) toProfile() IncrementalParseProfile {
 		ScratchBytesAllocated:              t.scratchBytesAllocated,
 		EntryScratchBytesAllocated:         int64(t.entryScratchBytesAllocated),
 		GSSBytesAllocated:                  int64(t.gssBytesAllocated),
+		SingleStackIterations:              t.singleStackIterations,
+		MultiStackIterations:               t.multiStackIterations,
+		SingleStackTokens:                  t.singleStackTokens,
+		MultiStackTokens:                   t.multiStackTokens,
+		SingleStackGSSNodes:                t.singleStackGSSNodes,
+		MultiStackGSSNodes:                 t.multiStackGSSNodes,
 	}
 }
 

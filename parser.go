@@ -118,6 +118,12 @@ type IncrementalParseProfile struct {
 	ScratchBytesAllocated              int64
 	EntryScratchBytesAllocated         int64
 	GSSBytesAllocated                  int64
+	SingleStackIterations              int
+	MultiStackIterations               int
+	SingleStackTokens                  uint64
+	MultiStackTokens                   uint64
+	SingleStackGSSNodes                uint64
+	MultiStackGSSNodes                 uint64
 }
 
 type incrementalParseTiming struct {
@@ -151,6 +157,12 @@ type incrementalParseTiming struct {
 	scratchBytesAllocated              int64
 	entryScratchBytesAllocated         uint64
 	gssBytesAllocated                  uint64
+	singleStackIterations              int
+	multiStackIterations               int
+	singleStackTokens                  uint64
+	multiStackTokens                   uint64
+	singleStackGSSNodes                uint64
+	multiStackGSSNodes                 uint64
 }
 
 type parseReuseState struct {
@@ -1065,6 +1077,10 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 	var lastTokenSymbol Symbol
 	var lastTokenWasEOF bool
 	tokenSourceEOFEarly := false
+	singleStackIterations := 0
+	multiStackIterations := 0
+	var singleStackTokens uint64
+	var multiStackTokens uint64
 	expectedEOFByte := uint32(len(source))
 	if len(p.included) > 0 {
 		expectedEOFByte = p.included[len(p.included)-1].EndByte
@@ -1105,6 +1121,12 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 		parseRuntime.NodesAllocated = nodeCount
 		parseRuntime.PeakStackDepth = peakStackDepth
 		parseRuntime.MaxStacksSeen = maxStacksSeen
+		parseRuntime.SingleStackIterations = singleStackIterations
+		parseRuntime.MultiStackIterations = multiStackIterations
+		parseRuntime.SingleStackTokens = singleStackTokens
+		parseRuntime.MultiStackTokens = multiStackTokens
+		parseRuntime.SingleStackGSSNodes = scratch.gss.singleStackAllocs
+		parseRuntime.MultiStackGSSNodes = scratch.gss.multiStackAllocs
 		parseRuntime.TokensConsumed = perfTokensConsumed
 		parseRuntime.LastTokenEndByte = lastTokenEndByte
 		parseRuntime.LastTokenSymbol = lastTokenSymbol
@@ -1128,6 +1150,12 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 			timing.scratchBytesAllocated = parseRuntime.ScratchBytesAllocated
 			timing.entryScratchBytesAllocated = uint64(parseRuntime.EntryScratchBytesAllocated)
 			timing.gssBytesAllocated = uint64(parseRuntime.GSSBytesAllocated)
+			timing.singleStackIterations = parseRuntime.SingleStackIterations
+			timing.multiStackIterations = parseRuntime.MultiStackIterations
+			timing.singleStackTokens = parseRuntime.SingleStackTokens
+			timing.multiStackTokens = parseRuntime.MultiStackTokens
+			timing.singleStackGSSNodes = parseRuntime.SingleStackGSSNodes
+			timing.multiStackGSSNodes = parseRuntime.MultiStackGSSNodes
 		}
 		if p.logger != nil {
 			p.logf(
@@ -1357,6 +1385,12 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 		if len(stacks) > 1 {
 			p.promotePrimaryStack(stacks)
 		}
+		scratch.gss.singleStackMode = len(stacks) == 1
+		if scratch.gss.singleStackMode {
+			singleStackIterations++
+		} else {
+			multiStackIterations++
+		}
 		for i := range stacks {
 			stacks[i].cacheEntries = false
 			if stacks[i].gss.head != nil {
@@ -1420,6 +1454,11 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 
 		// --- Token acquisition and incremental reuse ---
 		if needToken {
+			if len(stacks) == 1 {
+				singleStackTokens++
+			} else {
+				multiStackTokens++
+			}
 			tok = ts.Next()
 			p.updateCurrentExternalTokenCheckpoint(ts, tok)
 			if p.logger != nil {

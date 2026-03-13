@@ -102,6 +102,12 @@ type ParseRuntime struct {
 	GSSBytesAllocated          int64
 	PeakStackDepth             int
 	MaxStacksSeen              int
+	SingleStackIterations      int
+	MultiStackIterations       int
+	SingleStackTokens          uint64
+	MultiStackTokens           uint64
+	SingleStackGSSNodes        uint64
+	MultiStackGSSNodes         uint64
 }
 
 // Summary returns a stable one-line diagnostic string for parse-runtime stats.
