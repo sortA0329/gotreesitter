@@ -456,8 +456,7 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, p *Parser) {
 	case "svelte":
 		normalizeSvelteTrailingExtraTrivia(root, source, lang)
 	case "tsx", "typescript":
-		normalizeTypeScriptPredefinedGenericCalls(root, source, lang)
-		normalizeTypeScriptEnumBodyFields(root, lang)
+		normalizeTypeScriptCompatibility(root, source, lang)
 	case "zig":
 		normalizeZigEmptyInitListFields(root, lang)
 	}
@@ -4469,53 +4468,72 @@ func insertJavaScriptStatementBlockComment(parent *Node, childIdx int, comment *
 	populateParentNode(parent, parent.children)
 }
 
-func normalizeTypeScriptPredefinedGenericCalls(root *Node, source []byte, lang *Language) {
-	if root == nil || lang == nil {
-		return
-	}
-	switch lang.Name {
-	case "tsx", "typescript":
-	default:
-		return
-	}
+type typeScriptNormalizationContext struct {
+	source []byte
+	lang   *Language
 
-	callSym, ok := lang.SymbolByName("call_expression")
-	if !ok {
-		return
-	}
-	typeArgsSym, ok := lang.SymbolByName("type_arguments")
-	if !ok {
-		return
-	}
-	argsSym, ok := lang.SymbolByName("arguments")
-	if !ok {
-		return
-	}
-	predefinedTypeSym, ok := lang.SymbolByName("predefined_type")
-	if !ok {
-		return
-	}
+	canRewriteGenericCalls bool
+	canClearEnumBodyFields bool
 
-	callNamed := int(callSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[callSym].Named
-	typeArgsNamed := int(typeArgsSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[typeArgsSym].Named
-	argsNamed := int(argsSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[argsSym].Named
-	predefinedTypeNamed := int(predefinedTypeSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[predefinedTypeSym].Named
+	callSym               Symbol
+	callNamed             bool
+	typeArgsSym           Symbol
+	typeArgsNamed         bool
+	argsSym               Symbol
+	argsNamed             bool
+	predefinedTypeSym     Symbol
+	predefinedTypeNamed   bool
+	functionFieldID       FieldID
+	typeArgsFieldID       FieldID
+	argumentsFieldID      FieldID
+	binaryExpressionSym   Symbol
+	greaterThanSym        Symbol
+	parenthesizedExprSym  Symbol
+	lessThanSym           Symbol
+	identifierSym         Symbol
+	memberExpressionSym   Symbol
+	sequenceExpressionSym Symbol
+	typeIdentifierSym     Symbol
+	hasTypeIdentifierSym  bool
+	enumBodySym           Symbol
+	enumAssignmentSym     Symbol
+}
 
-	functionFieldID, _ := lang.FieldByName("function")
-	typeArgsFieldID, _ := lang.FieldByName("type_arguments")
-	argumentsFieldID, _ := lang.FieldByName("arguments")
+func normalizeTypeScriptCompatibility(root *Node, source []byte, lang *Language) {
+	ctx, ok := newTypeScriptNormalizationContext(source, lang)
+	if !ok || root == nil {
+		return
+	}
 
 	var walk func(*Node)
 	walk = func(n *Node) {
 		if n == nil {
 			return
 		}
+		if ctx.canClearEnumBodyFields && n.symbol == ctx.enumBodySym && len(n.fieldIDs) > 0 {
+			limit := len(n.children)
+			if len(n.fieldIDs) < limit {
+				limit = len(n.fieldIDs)
+			}
+			for i := 0; i < limit; i++ {
+				child := n.children[i]
+				if child == nil || child.symbol != ctx.enumAssignmentSym {
+					continue
+				}
+				n.fieldIDs[i] = 0
+				if len(n.fieldSources) > i {
+					n.fieldSources[i] = fieldSourceNone
+				}
+			}
+		}
 		for i, child := range n.children {
-			if rewritten := rewriteTypeScriptPredefinedGenericCall(child, source, lang, callSym, callNamed, typeArgsSym, typeArgsNamed, argsSym, argsNamed, predefinedTypeSym, predefinedTypeNamed, functionFieldID, typeArgsFieldID, argumentsFieldID); rewritten != nil {
-				n.children[i] = rewritten
-				rewritten.parent = n
-				rewritten.childIndex = i
-				child = rewritten
+			if ctx.canRewriteGenericCalls {
+				if rewritten := rewriteTypeScriptPredefinedGenericCall(child, &ctx); rewritten != nil {
+					n.children[i] = rewritten
+					rewritten.parent = n
+					rewritten.childIndex = i
+					child = rewritten
+				}
 			}
 			walk(child)
 		}
@@ -4523,14 +4541,82 @@ func normalizeTypeScriptPredefinedGenericCalls(root *Node, source []byte, lang *
 	walk(root)
 }
 
-func rewriteTypeScriptPredefinedGenericCall(node *Node, source []byte, lang *Language, callSym Symbol, callNamed bool, typeArgsSym Symbol, typeArgsNamed bool, argsSym Symbol, argsNamed bool, predefinedTypeSym Symbol, predefinedTypeNamed bool, functionFieldID FieldID, typeArgsFieldID FieldID, argumentsFieldID FieldID) *Node {
-	if node == nil || lang == nil || node.Type(lang) != "binary_expression" || len(node.children) != 3 {
+func newTypeScriptNormalizationContext(source []byte, lang *Language) (typeScriptNormalizationContext, bool) {
+	ctx := typeScriptNormalizationContext{
+		source: source,
+		lang:   lang,
+	}
+	if lang == nil {
+		return ctx, false
+	}
+	switch lang.Name {
+	case "tsx", "typescript":
+	default:
+		return ctx, false
+	}
+
+	if callSym, ok := lang.SymbolByName("call_expression"); ok {
+		if typeArgsSym, ok := lang.SymbolByName("type_arguments"); ok {
+			if argsSym, ok := lang.SymbolByName("arguments"); ok {
+				if predefinedTypeSym, ok := lang.SymbolByName("predefined_type"); ok {
+					if binaryExpressionSym, ok := lang.SymbolByName("binary_expression"); ok {
+						if greaterThanSym, ok := lang.SymbolByName(">"); ok {
+							if parenthesizedExprSym, ok := lang.SymbolByName("parenthesized_expression"); ok {
+								if lessThanSym, ok := lang.SymbolByName("<"); ok {
+									if identifierSym, ok := lang.SymbolByName("identifier"); ok {
+										if memberExpressionSym, ok := lang.SymbolByName("member_expression"); ok {
+											if sequenceExpressionSym, ok := lang.SymbolByName("sequence_expression"); ok {
+												ctx.canRewriteGenericCalls = true
+												ctx.callSym = callSym
+												ctx.callNamed = int(callSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[callSym].Named
+												ctx.typeArgsSym = typeArgsSym
+												ctx.typeArgsNamed = int(typeArgsSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[typeArgsSym].Named
+												ctx.argsSym = argsSym
+												ctx.argsNamed = int(argsSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[argsSym].Named
+												ctx.predefinedTypeSym = predefinedTypeSym
+												ctx.predefinedTypeNamed = int(predefinedTypeSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[predefinedTypeSym].Named
+												ctx.binaryExpressionSym = binaryExpressionSym
+												ctx.greaterThanSym = greaterThanSym
+												ctx.parenthesizedExprSym = parenthesizedExprSym
+												ctx.lessThanSym = lessThanSym
+												ctx.identifierSym = identifierSym
+												ctx.memberExpressionSym = memberExpressionSym
+												ctx.sequenceExpressionSym = sequenceExpressionSym
+												ctx.functionFieldID, _ = lang.FieldByName("function")
+												ctx.typeArgsFieldID, _ = lang.FieldByName("type_arguments")
+												ctx.argumentsFieldID, _ = lang.FieldByName("arguments")
+												ctx.typeIdentifierSym, ctx.hasTypeIdentifierSym = lang.SymbolByName("type_identifier")
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if enumBodySym, ok := lang.SymbolByName("enum_body"); ok {
+		if enumAssignmentSym, ok := lang.SymbolByName("enum_assignment"); ok {
+			ctx.canClearEnumBodyFields = true
+			ctx.enumBodySym = enumBodySym
+			ctx.enumAssignmentSym = enumAssignmentSym
+		}
+	}
+
+	return ctx, ctx.canRewriteGenericCalls || ctx.canClearEnumBodyFields
+}
+
+func rewriteTypeScriptPredefinedGenericCall(node *Node, ctx *typeScriptNormalizationContext) *Node {
+	if node == nil || ctx == nil || ctx.lang == nil || node.symbol != ctx.binaryExpressionSym || len(node.children) != 3 {
 		return nil
 	}
 	left := node.children[0]
 	gt := node.children[1]
 	paren := node.children[2]
-	if left == nil || gt == nil || paren == nil || left.Type(lang) != "binary_expression" || gt.Type(lang) != ">" || paren.Type(lang) != "parenthesized_expression" {
+	if left == nil || gt == nil || paren == nil || left.symbol != ctx.binaryExpressionSym || gt.symbol != ctx.greaterThanSym || paren.symbol != ctx.parenthesizedExprSym {
 		return nil
 	}
 	if len(left.children) != 3 || len(paren.children) != 3 {
@@ -4539,15 +4625,15 @@ func rewriteTypeScriptPredefinedGenericCall(node *Node, source []byte, lang *Lan
 	callee := left.children[0]
 	lt := left.children[1]
 	typeArg := left.children[2]
-	if callee == nil || lt == nil || typeArg == nil || lt.Type(lang) != "<" {
+	if callee == nil || lt == nil || typeArg == nil || lt.symbol != ctx.lessThanSym {
 		return nil
 	}
-	switch callee.Type(lang) {
-	case "identifier", "member_expression":
+	switch callee.symbol {
+	case ctx.identifierSym, ctx.memberExpressionSym:
 	default:
 		return nil
 	}
-	typeArg = normalizeTypeScriptGenericCallTypeArgument(typeArg, source, lang, predefinedTypeSym, predefinedTypeNamed)
+	typeArg = normalizeTypeScriptGenericCallTypeArgument(typeArg, ctx)
 	if typeArg == nil {
 		return nil
 	}
@@ -4555,48 +4641,40 @@ func rewriteTypeScriptPredefinedGenericCall(node *Node, source []byte, lang *Lan
 	if typeArg.ownerArena != arena {
 		typeArg = cloneNodeInArena(arena, typeArg)
 	}
-	typeArgs := newParentNodeInArena(arena, typeArgsSym, typeArgsNamed, []*Node{lt, typeArg, gt}, nil, 0)
-	argsChildren := typeScriptGenericCallArgumentChildren(paren, lang)
+	typeArgs := newParentNodeInArena(arena, ctx.typeArgsSym, ctx.typeArgsNamed, []*Node{lt, typeArg, gt}, nil, 0)
+	argsChildren := typeScriptGenericCallArgumentChildren(paren, ctx.sequenceExpressionSym)
 	if arena != nil && len(argsChildren) > 0 {
 		buf := arena.allocNodeSlice(len(argsChildren))
 		copy(buf, argsChildren)
 		argsChildren = buf
 	}
-	args := newParentNodeInArena(arena, argsSym, argsNamed, argsChildren, nil, paren.productionID)
+	args := newParentNodeInArena(arena, ctx.argsSym, ctx.argsNamed, argsChildren, nil, paren.productionID)
 
 	callChildren := phpAllocChildren(arena, 3)
 	callChildren[0] = callee
 	callChildren[1] = typeArgs
 	callChildren[2] = args
-	fieldIDs := phpSyntheticFieldIDs(arena, 3, lang, map[int]string{
-		0: "function",
-		1: "type_arguments",
-		2: "arguments",
-	})
-	call := newParentNodeInArena(arena, callSym, callNamed, callChildren, fieldIDs, node.productionID)
-	call.fieldSources = defaultFieldSourcesInArena(arena, fieldIDs)
-
-	// Ensure direct field ownership even when some grammars omit field metadata.
-	if len(call.fieldIDs) == 3 {
-		if functionFieldID != 0 {
-			call.fieldIDs[0] = functionFieldID
+	var fieldIDs []FieldID
+	if ctx.functionFieldID != 0 || ctx.typeArgsFieldID != 0 || ctx.argumentsFieldID != 0 {
+		if arena != nil {
+			fieldIDs = arena.allocFieldIDSlice(3)
+		} else {
+			fieldIDs = make([]FieldID, 3)
 		}
-		if typeArgsFieldID != 0 {
-			call.fieldIDs[1] = typeArgsFieldID
-		}
-		if argumentsFieldID != 0 {
-			call.fieldIDs[2] = argumentsFieldID
-		}
-		call.fieldSources = defaultFieldSourcesInArena(arena, call.fieldIDs)
+		fieldIDs[0] = ctx.functionFieldID
+		fieldIDs[1] = ctx.typeArgsFieldID
+		fieldIDs[2] = ctx.argumentsFieldID
 	}
+	call := newParentNodeInArena(arena, ctx.callSym, ctx.callNamed, callChildren, fieldIDs, node.productionID)
+	call.fieldSources = defaultFieldSourcesInArena(arena, fieldIDs)
 	return call
 }
 
-func typeScriptGenericCallArgumentChildren(paren *Node, lang *Language) []*Node {
-	if paren == nil || lang == nil {
+func typeScriptGenericCallArgumentChildren(paren *Node, sequenceExpressionSym Symbol) []*Node {
+	if paren == nil {
 		return nil
 	}
-	if len(paren.children) != 3 || paren.children[1] == nil || paren.children[1].Type(lang) != "sequence_expression" {
+	if len(paren.children) != 3 || paren.children[1] == nil || paren.children[1].symbol != sequenceExpressionSym {
 		return append([]*Node(nil), paren.children...)
 	}
 	seq := paren.children[1]
@@ -4607,63 +4685,29 @@ func typeScriptGenericCallArgumentChildren(paren *Node, lang *Language) []*Node 
 	return out
 }
 
-func normalizeTypeScriptGenericCallTypeArgument(node *Node, source []byte, lang *Language, predefinedTypeSym Symbol, predefinedTypeNamed bool) *Node {
-	if node == nil || lang == nil {
+func normalizeTypeScriptGenericCallTypeArgument(node *Node, ctx *typeScriptNormalizationContext) *Node {
+	if node == nil || ctx == nil || ctx.lang == nil {
 		return nil
 	}
-	switch node.Type(lang) {
-	case "predefined_type", "type_identifier":
+	switch node.symbol {
+	case ctx.predefinedTypeSym:
 		return node
-	case "identifier":
-		if typeKeywordSym, ok := typeScriptPredefinedTypeSymbol(lang, node.Text(source)); ok {
-			typeKeywordNamed := int(typeKeywordSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[typeKeywordSym].Named
-			typeLeaf := newLeafNodeInArena(node.ownerArena, typeKeywordSym, typeKeywordNamed, node.startByte, node.endByte, node.startPoint, node.endPoint)
-			return newParentNodeInArena(node.ownerArena, predefinedTypeSym, predefinedTypeNamed, []*Node{typeLeaf}, nil, 0)
+	case ctx.typeIdentifierSym:
+		if ctx.hasTypeIdentifierSym {
+			return node
 		}
-		if typeIdentifierSym, ok := lang.SymbolByName("type_identifier"); ok {
-			typeIdentifierNamed := int(typeIdentifierSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[typeIdentifierSym].Named
-			return newLeafNodeInArena(node.ownerArena, typeIdentifierSym, typeIdentifierNamed, node.startByte, node.endByte, node.startPoint, node.endPoint)
+	case ctx.identifierSym:
+		if typeKeywordSym, ok := typeScriptPredefinedTypeSymbol(ctx.lang, node.Text(ctx.source)); ok {
+			typeKeywordNamed := int(typeKeywordSym) < len(ctx.lang.SymbolMetadata) && ctx.lang.SymbolMetadata[typeKeywordSym].Named
+			typeLeaf := newLeafNodeInArena(node.ownerArena, typeKeywordSym, typeKeywordNamed, node.startByte, node.endByte, node.startPoint, node.endPoint)
+			return newParentNodeInArena(node.ownerArena, ctx.predefinedTypeSym, ctx.predefinedTypeNamed, []*Node{typeLeaf}, nil, 0)
+		}
+		if ctx.hasTypeIdentifierSym {
+			typeIdentifierNamed := int(ctx.typeIdentifierSym) < len(ctx.lang.SymbolMetadata) && ctx.lang.SymbolMetadata[ctx.typeIdentifierSym].Named
+			return newLeafNodeInArena(node.ownerArena, ctx.typeIdentifierSym, typeIdentifierNamed, node.startByte, node.endByte, node.startPoint, node.endPoint)
 		}
 	}
 	return nil
-}
-
-func normalizeTypeScriptEnumBodyFields(root *Node, lang *Language) {
-	if root == nil || lang == nil {
-		return
-	}
-	switch lang.Name {
-	case "tsx", "typescript":
-	default:
-		return
-	}
-
-	var walk func(*Node)
-	walk = func(n *Node) {
-		if n == nil {
-			return
-		}
-		if n.Type(lang) == "enum_body" && len(n.fieldIDs) > 0 {
-			limit := len(n.children)
-			if len(n.fieldIDs) < limit {
-				limit = len(n.fieldIDs)
-			}
-			for i := 0; i < limit; i++ {
-				child := n.children[i]
-				if child == nil || child.Type(lang) != "enum_assignment" {
-					continue
-				}
-				n.fieldIDs[i] = 0
-				if len(n.fieldSources) > i {
-					n.fieldSources[i] = fieldSourceNone
-				}
-			}
-		}
-		for _, child := range n.children {
-			walk(child)
-		}
-	}
-	walk(root)
 }
 
 func typeScriptPredefinedTypeSymbol(lang *Language, text string) (Symbol, bool) {
