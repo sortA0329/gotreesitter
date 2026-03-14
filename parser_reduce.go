@@ -950,6 +950,40 @@ func (p *Parser) suppressReducedChildFields(children []*Node, fieldIDs []FieldID
 }
 
 func buildReduceChildrenNoAliasNoFields(entries []stackEntry, start, end int, parentSymbol Symbol, symbolMeta []SymbolMetadata, arena *nodeArena) []*Node {
+	visibleCount := 0
+	allVisible := true
+	for i := start; i < end; i++ {
+		n := entries[i].node
+		if n == nil {
+			continue
+		}
+		visible := true
+		if idx := int(n.symbol); idx < len(symbolMeta) {
+			visible = symbolMeta[n.symbol].Visible
+		}
+		if !visible {
+			allVisible = false
+			break
+		}
+		visibleCount++
+	}
+	if allVisible {
+		if visibleCount == 0 {
+			return nil
+		}
+		children := arena.allocNodeSlice(visibleCount)
+		out := 0
+		for i := start; i < end; i++ {
+			n := entries[i].node
+			if n == nil {
+				continue
+			}
+			children[out] = n
+			out++
+		}
+		return children
+	}
+
 	parentVisible := true
 	if idx := int(parentSymbol); idx < len(symbolMeta) {
 		parentVisible = symbolMeta[parentSymbol].Visible
