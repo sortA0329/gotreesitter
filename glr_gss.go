@@ -86,6 +86,37 @@ func gssEntryHash(prev uint64, entry stackEntry) uint64 {
 	return h
 }
 
+func gssNodeHash(n *gssNode) uint64 {
+	if n == nil {
+		return gssHashSeed
+	}
+	if n.hash != 0 {
+		return n.hash
+	}
+
+	var local [32]*gssNode
+	pending := local[:0]
+	for cur := n; cur != nil && cur.hash == 0; cur = cur.prev {
+		pending = append(pending, cur)
+	}
+	prevHash := gssHashSeed
+	if len(pending) < n.depth {
+		prev := pending[len(pending)-1].prev
+		if prev != nil {
+			prevHash = prev.hash
+		}
+	}
+	for i := len(pending) - 1; i >= 0; i-- {
+		h := gssEntryHash(prevHash, pending[i].entry)
+		if h == 0 {
+			h = 1
+		}
+		pending[i].hash = h
+		prevHash = h
+	}
+	return n.hash
+}
+
 func newGSSStack(initial StateID, scratch *gssScratch) gssStack {
 	return buildGSSStack([]stackEntry{{state: initial}}, scratch)
 }
@@ -183,11 +214,17 @@ func (s gssStack) materialize(dst []stackEntry) []stackEntry {
 }
 
 func (s *gssScratch) allocNode(entry stackEntry, prev *gssNode, depth int) *gssNode {
-	prevHash := gssHashSeed
-	if prev != nil {
-		prevHash = prev.hash
+	hash := uint64(0)
+	if s == nil || !s.singleStackMode {
+		prevHash := gssHashSeed
+		if prev != nil {
+			prevHash = gssNodeHash(prev)
+		}
+		hash = gssEntryHash(prevHash, entry)
+		if hash == 0 {
+			hash = 1
+		}
 	}
-	hash := gssEntryHash(prevHash, entry)
 
 	if s == nil {
 		return &gssNode{entry: entry, prev: prev, depth: depth, hash: hash}

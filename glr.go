@@ -316,7 +316,7 @@ func mergeKeyForStack(s glrStack) glrMergeKey {
 
 func stackHash(s glrStack) uint64 {
 	if s.gss.head != nil {
-		return s.gss.head.hash
+		return gssNodeHash(s.gss.head)
 	}
 	if len(s.entries) == 0 {
 		if perfCountersEnabled {
@@ -363,7 +363,7 @@ func gssStacksEqualForLanguage(lang *Language, a, b gssStack) bool {
 	if a.head.depth != b.head.depth {
 		return false
 	}
-	if a.head.hash != b.head.hash {
+	if gssNodeHash(a.head) != gssNodeHash(b.head) {
 		return false
 	}
 	for an, bn := a.head, b.head; an != nil && bn != nil; an, bn = an.prev, bn.prev {
