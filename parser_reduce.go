@@ -302,7 +302,99 @@ func reduceWindowFromGSS(s *glrStack, childCount int, buf []stackEntry) ([]stack
 	return rev, topState, true
 }
 
+func (p *Parser) tryFastVisibleReduceActionFromGSS(s *glrStack, act ParseAction, tok Token, anyReduced *bool, nodeCount *int, arena *nodeArena, entryScratch *glrEntryScratch, gssScratch *gssScratch, tmpEntries *[]stackEntry, deferParentLinks bool, trackChildErrors bool) bool {
+	if p == nil || s == nil || s.gss.head == nil || p.language == nil {
+		return false
+	}
+	childCount := int(act.ChildCount)
+	if childCount <= 1 || childCount > 8 {
+		return false
+	}
+	if len(p.reduceAliasSequence(act.ProductionID)) != 0 || p.reduceProductionHasFields(act.ProductionID) {
+		return false
+	}
+	if p.forceRawSpanAll || (int(act.Symbol) < len(p.forceRawSpanTable) && p.forceRawSpanTable[act.Symbol]) {
+		return false
+	}
+	parentVisible := true
+	if idx := int(act.Symbol); idx < len(p.language.SymbolMetadata) {
+		parentVisible = p.language.SymbolMetadata[act.Symbol].Visible
+	}
+	if !parentVisible {
+		return false
+	}
+
+	var childBuf [8]*Node
+	symbolMeta := p.language.SymbolMetadata
+	n := s.gss.head
+	for i := childCount - 1; i >= 0; i-- {
+		if n == nil {
+			return false
+		}
+		child := n.entry.node
+		if child == nil || child.isExtra {
+			return false
+		}
+		visible := true
+		if idx := int(child.symbol); idx < len(symbolMeta) {
+			visible = symbolMeta[child.symbol].Visible
+		}
+		if !visible {
+			return false
+		}
+		childBuf[i] = child
+		n = n.prev
+	}
+	if n == nil {
+		return false
+	}
+	topState := n.entry.state
+	targetDepth := s.depth() - childCount
+	if targetDepth < 0 {
+		return false
+	}
+
+	children := arena.allocNodeSlice(childCount)
+	copy(children, childBuf[:childCount])
+	named := p.isNamedSymbol(act.Symbol)
+	var parent *Node
+	if deferParentLinks {
+		parent = newParentNodeInArenaNoLinksWithFieldSources(arena, act.Symbol, named, children, nil, nil, act.ProductionID, trackChildErrors)
+	} else {
+		parent = newParentNodeInArenaWithFieldSources(arena, act.Symbol, named, children, nil, nil, act.ProductionID)
+	}
+	*nodeCount++
+
+	gotoState := p.lookupGoto(topState, act.Symbol)
+	targetState := topState
+	if gotoState != 0 {
+		targetState = gotoState
+	}
+	if tok.NoLookahead && targetState == topState {
+		parent.isExtra = true
+	}
+	parent.preGotoState = topState
+	parent.parseState = targetState
+	if !s.truncate(targetDepth) {
+		s.dead = true
+		if tmpEntries != nil {
+			*tmpEntries = (*tmpEntries)[:0]
+		}
+		return true
+	}
+	p.pushStackNode(s, targetState, parent, entryScratch, gssScratch)
+	s.score += int(act.DynamicPrecedence)
+	*anyReduced = true
+	if tmpEntries != nil {
+		*tmpEntries = (*tmpEntries)[:0]
+	}
+	return true
+}
+
 func (p *Parser) applyReduceActionFromGSS(s *glrStack, act ParseAction, tok Token, anyReduced *bool, nodeCount *int, arena *nodeArena, entryScratch *glrEntryScratch, gssScratch *gssScratch, tmpEntries *[]stackEntry, tmp []stackEntry, deferParentLinks bool, trackChildErrors bool) {
+	if p.tryFastVisibleReduceActionFromGSS(s, act, tok, anyReduced, nodeCount, arena, entryScratch, gssScratch, tmpEntries, deferParentLinks, trackChildErrors) {
+		return
+	}
 	childCount := int(act.ChildCount)
 	windowEntries, topState, ok := reduceWindowFromGSS(s, childCount, tmp)
 	if !ok {
