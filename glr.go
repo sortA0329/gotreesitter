@@ -37,6 +37,9 @@ type glrStack struct {
 	// mayRecover is true when the stack is known to contain at least one
 	// state that can perform ParseActionRecover for some symbol.
 	mayRecover bool
+	// branchOrder preserves original GLR fork order for exact-tie selection.
+	// Lower values correspond to earlier parse-table actions.
+	branchOrder uint64
 }
 
 const (
@@ -173,6 +176,7 @@ func (s *glrStack) clone() glrStack {
 			cacheEntries: s.cacheEntries,
 			byteOffset:   s.byteOffset,
 			score:        s.score,
+			branchOrder:  s.branchOrder,
 		}
 	}
 	s.ensureGSS(nil)
@@ -181,6 +185,7 @@ func (s *glrStack) clone() glrStack {
 		cacheEntries: s.cacheEntries,
 		byteOffset:   s.byteOffset,
 		score:        s.score,
+		branchOrder:  s.branchOrder,
 	}
 }
 
@@ -191,6 +196,7 @@ func (s *glrStack) cloneWithScratch(scratch *gssScratch) glrStack {
 		cacheEntries: false,
 		byteOffset:   s.byteOffset,
 		score:        s.score,
+		branchOrder:  s.branchOrder,
 	}
 }
 
@@ -730,6 +736,12 @@ func stackComparePtr(a, b *glrStack) int {
 		}
 		return -1
 	}
+	if a.branchOrder != b.branchOrder {
+		if a.branchOrder < b.branchOrder {
+			return 1
+		}
+		return -1
+	}
 	return 0
 }
 
@@ -774,6 +786,12 @@ func stackCompareMerge(a, b *glrStack) int {
 	}
 	if a.byteOffset != b.byteOffset {
 		if a.byteOffset > b.byteOffset {
+			return 1
+		}
+		return -1
+	}
+	if a.branchOrder != b.branchOrder {
+		if a.branchOrder < b.branchOrder {
 			return 1
 		}
 		return -1
