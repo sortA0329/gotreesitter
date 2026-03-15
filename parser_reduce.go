@@ -830,10 +830,15 @@ type hiddenFieldSpan struct {
 }
 
 type reduceBuildScratch struct {
-	nodes        []*Node
-	fieldIDs     []FieldID
-	fieldSources []uint8
-	trackFields  bool
+	nodes         []*Node
+	fieldIDs      []FieldID
+	fieldSources  []uint8
+	trackFields   bool
+	repeatStamp   []uint32
+	repeatCount   []uint16
+	repeatSource  []uint8
+	repeatTouched []FieldID
+	repeatEpoch   uint32
 }
 
 func (s *reduceBuildScratch) reset() {
@@ -847,6 +852,7 @@ func (s *reduceBuildScratch) reset() {
 	s.fieldIDs = s.fieldIDs[:0]
 	s.fieldSources = s.fieldSources[:0]
 	s.trackFields = false
+	s.repeatTouched = s.repeatTouched[:0]
 }
 
 func (s *reduceBuildScratch) appendNode(n *Node) {
@@ -875,6 +881,67 @@ func (s *reduceBuildScratch) ensureFieldStorage() {
 		clear(s.fieldSources)
 	}
 	s.trackFields = true
+}
+
+func (s *reduceBuildScratch) nextRepeatEpoch() uint32 {
+	if s == nil {
+		return 0
+	}
+	s.repeatEpoch++
+	if s.repeatEpoch == 0 {
+		clear(s.repeatStamp)
+		s.repeatEpoch = 1
+	}
+	return s.repeatEpoch
+}
+
+func (s *reduceBuildScratch) ensureRepeatFieldCapacity(fid FieldID) {
+	if s == nil {
+		return
+	}
+	need := int(fid) + 1
+	if need <= len(s.repeatStamp) {
+		return
+	}
+	grow := cap(s.repeatStamp)
+	if grow < need {
+		grow = need
+	}
+	if grow < 32 {
+		grow = 32
+	}
+	for grow < need {
+		grow *= 2
+	}
+
+	stamp := make([]uint32, need, grow)
+	copy(stamp, s.repeatStamp)
+	s.repeatStamp = stamp
+
+	count := make([]uint16, need, grow)
+	copy(count, s.repeatCount)
+	s.repeatCount = count
+
+	source := make([]uint8, need, grow)
+	copy(source, s.repeatSource)
+	s.repeatSource = source
+}
+
+func (s *reduceBuildScratch) recordRepeatedField(epoch uint32, fid FieldID, source uint8) {
+	if s == nil || fid == 0 || epoch == 0 {
+		return
+	}
+	s.ensureRepeatFieldCapacity(fid)
+	idx := int(fid)
+	if s.repeatStamp[idx] != epoch {
+		s.repeatStamp[idx] = epoch
+		s.repeatCount[idx] = 1
+		s.repeatSource[idx] = source
+		s.repeatTouched = append(s.repeatTouched, fid)
+		return
+	}
+	s.repeatCount[idx]++
+	s.repeatSource[idx] = source
 }
 
 func appendFlattenedHiddenChildrenToScratch(scratch *reduceBuildScratch, n *Node, symbolMeta []SymbolMetadata) {
@@ -908,7 +975,8 @@ func appendFlattenedHiddenChildrenWithFieldScratch(scratch *reduceBuildScratch, 
 	}
 
 	nodeStart := len(scratch.nodes)
-	var repeated map[FieldID]hiddenFieldSpan
+	repeatEpoch := scratch.nextRepeatEpoch()
+	touchedStart := len(scratch.repeatTouched)
 	for i, child := range n.children {
 		spanStart := len(scratch.nodes)
 		appendFlattenedHiddenChildrenWithFieldScratch(scratch, child, symbolMeta)
@@ -923,22 +991,18 @@ func appendFlattenedHiddenChildrenWithFieldScratch(scratch *reduceBuildScratch, 
 		}
 		applyFieldToFlattenedSpan(scratch.nodes, scratch.fieldIDs, scratch.fieldSources, spanStart, spanEnd, n.fieldIDs[i], source, false)
 		if source == fieldSourceDirect {
-			if repeated == nil {
-				repeated = make(map[FieldID]hiddenFieldSpan)
-			}
-			span := repeated[n.fieldIDs[i]]
-			span.count++
-			span.source = source
-			repeated[n.fieldIDs[i]] = span
+			scratch.recordRepeatedField(repeatEpoch, n.fieldIDs[i], source)
 		}
 	}
 	if scratch.trackFields {
-		for fid, span := range repeated {
-			if span.count < 2 {
+		for _, fid := range scratch.repeatTouched[touchedStart:] {
+			idx := int(fid)
+			if idx < 0 || idx >= len(scratch.repeatCount) || scratch.repeatCount[idx] < 2 {
 				continue
 			}
-			applyFieldToFlattenedSpan(scratch.nodes, scratch.fieldIDs, scratch.fieldSources, nodeStart, len(scratch.nodes), fid, span.source, false)
+			applyFieldToFlattenedSpan(scratch.nodes, scratch.fieldIDs, scratch.fieldSources, nodeStart, len(scratch.nodes), fid, scratch.repeatSource[idx], false)
 		}
+		scratch.repeatTouched = scratch.repeatTouched[:touchedStart]
 		normalizeMixedSourceFieldSpan(scratch.fieldIDs, scratch.fieldSources, nodeStart, len(scratch.nodes))
 	}
 }

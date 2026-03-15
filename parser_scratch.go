@@ -115,7 +115,12 @@ func releaseParserScratch(s *parserScratch, skipGSSClear bool) {
 		s.reduce.nodes = nil
 		s.reduce.fieldIDs = nil
 		s.reduce.fieldSources = nil
+		s.reduce.repeatStamp = nil
+		s.reduce.repeatCount = nil
+		s.reduce.repeatSource = nil
+		s.reduce.repeatTouched = nil
 		s.reduce.trackFields = false
+		s.reduce.repeatEpoch = 0
 	} else {
 		s.reduce.reset()
 	}
