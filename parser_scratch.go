@@ -14,6 +14,7 @@ type parserScratch struct {
 	stackKeep   []bool
 	stackCull   []stackCullKey
 	stateKeep   []StateID
+	reduce      reduceBuildScratch
 	budgetBytes int64
 }
 
@@ -108,6 +109,15 @@ func releaseParserScratch(s *parserScratch, skipGSSClear bool) {
 		s.stateKeep = nil
 	} else if len(s.stateKeep) > 0 {
 		s.stateKeep = s.stateKeep[:0]
+	}
+	const maxRetainedReduceBuildScratch = 256 * 1024
+	if cap(s.reduce.nodes) > maxRetainedReduceBuildScratch {
+		s.reduce.nodes = nil
+		s.reduce.fieldIDs = nil
+		s.reduce.fieldSources = nil
+		s.reduce.trackFields = false
+	} else {
+		s.reduce.reset()
 	}
 	s.entries.reset()
 	s.gss.skipClear = skipGSSClear

@@ -48,6 +48,7 @@ type Parser struct {
 	reduceHasFields                     []bool
 	fieldInheritedScratch               []bool
 	fieldConflictedScratch              []bool
+	reduceScratch                       *reduceBuildScratch
 	currentExternalTokenCheckpoint      externalScannerCheckpoint
 	currentExternalTokenCheckpointStart uint32
 	currentExternalTokenCheckpointEnd   uint32
@@ -1056,6 +1057,10 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 		scratch.gss.initialCap = p.incrementalGSSHintCapacity()
 	}
 	defer releaseParserScratch(scratch, deferParentLinks)
+	p.reduceScratch = &scratch.reduce
+	defer func() {
+		p.reduceScratch = nil
+	}()
 	scratch.audit.beginParse()
 	scratch.merge.audit = nil
 	scratch.gss.audit = nil
