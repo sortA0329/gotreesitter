@@ -328,32 +328,6 @@ func (d *dfaTokenSource) nextTokenForLexState(lexState uint16) Token {
 	return d.lexer.Next(lexState)
 }
 
-func (d *dfaTokenSource) shouldForceEOFLookahead() bool {
-	if d == nil || d.language == nil {
-		return false
-	}
-	if int(d.state) >= len(d.language.LexModes) {
-		return false
-	}
-	return d.language.LexModes[d.state].LexState == noLookaheadLexState
-}
-
-func (d *dfaTokenSource) syntheticEOFLookaheadToken() Token {
-	return d.nextTokenForLexState(noLookaheadLexState)
-}
-
-func (d *dfaTokenSource) nextTokenForLexState(lexState uint16) Token {
-	if d == nil || d.lexer == nil {
-		return Token{}
-	}
-	if lexState == ^uint16(0) {
-		tok := d.eofTokenAtLexerPos()
-		tok.NoLookahead = true
-		return tok
-	}
-	return d.lexer.Next(lexState)
-}
-
 // nextGLRUnionDFAToken tries each unique GLR stack state's lex mode and
 // picks the DFA token that has valid parse actions in the most stacks.
 // This prevents the primary stack's lex mode from producing a token that's

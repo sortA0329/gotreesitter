@@ -140,7 +140,7 @@ func (l *Lexer) scan(startState uint16, startPos int, startRow, startCol uint32)
 
 		if scanPos >= len(l.source) {
 			if st.EOF >= 0 && eofHops <= len(l.states) {
-				curState = st.EOF
+				curState = int32(st.EOF)
 				eofHops++
 				continue
 			}
@@ -154,7 +154,7 @@ func (l *Lexer) scan(startState uint16, startPos int, startRow, startCol uint32)
 		for i := range st.Transitions {
 			tr := &st.Transitions[i]
 			if r >= tr.Lo && r <= tr.Hi {
-				nextState = tr.NextState
+				nextState = int32(tr.NextState)
 				skipTransition = tr.Skip
 				break
 			}
@@ -162,7 +162,7 @@ func (l *Lexer) scan(startState uint16, startPos int, startRow, startCol uint32)
 		// Default transitions are treated as non-skipping.
 		skipTransition = skipTransition && nextState >= 0
 		if nextState < 0 && st.Default >= 0 {
-			nextState = st.Default
+			nextState = int32(st.Default)
 			skipTransition = false
 		}
 		if nextState < 0 {

@@ -53,9 +53,7 @@ func benchmarkParseFullDFA(b *testing.B, spec dfaBenchmarkSpec) {
 		gotreesitter.ResetArenaProfile()
 		gotreesitter.ResetPerfCounters()
 		gotreesitter.EnableArenaProfile(true)
-		gotreesitter.EnableRuntimeAudit(true)
 		defer gotreesitter.EnableArenaProfile(false)
-		defer gotreesitter.EnableRuntimeAudit(false)
 	}
 
 	b.ReportAllocs()
@@ -91,18 +89,6 @@ func benchmarkParseFullDFA(b *testing.B, spec dfaBenchmarkSpec) {
 			"STATS_PARSE nodes_new=%d children_ptrs=%d extras=%d errors=%d reuse_bytes=%d max_stacks=%d\n",
 			lastRuntime.NodesAllocated, p.ParentChildPointers, p.ExtraNodes, p.ErrorNodes, p.ReuseNonLeafBytes, lastRuntime.MaxStacksSeen,
 		)
-		fmt.Printf(
-			"STATS_RUNTIME single_iters=%d multi_iters=%d single_tokens=%d multi_tokens=%d gss_single=%d gss_multi=%d\n",
-			lastRuntime.SingleStackIterations, lastRuntime.MultiStackIterations, lastRuntime.SingleStackTokens, lastRuntime.MultiStackTokens, lastRuntime.SingleStackGSSNodes, lastRuntime.MultiStackGSSNodes,
-		)
-		fmt.Printf(
-			"STATS_SURVIVOR gss_alloc=%d gss_retained=%d gss_dropped=%d parent_alloc=%d parent_retained=%d parent_dropped=%d leaf_alloc=%d leaf_retained=%d leaf_dropped=%d merge_in=%d merge_out=%d merge_slots=%d cull_in=%d cull_out=%d\n",
-			lastRuntime.GSSNodesAllocated, lastRuntime.GSSNodesRetained, lastRuntime.GSSNodesDroppedSameToken,
-			lastRuntime.ParentNodesAllocated, lastRuntime.ParentNodesRetained, lastRuntime.ParentNodesDroppedSameToken,
-			lastRuntime.LeafNodesAllocated, lastRuntime.LeafNodesRetained, lastRuntime.LeafNodesDroppedSameToken,
-			lastRuntime.MergeStacksIn, lastRuntime.MergeStacksOut, lastRuntime.MergeSlotsUsed,
-			lastRuntime.GlobalCullStacksIn, lastRuntime.GlobalCullStacksOut,
-		)
 	}
 }
 
@@ -137,9 +123,7 @@ func benchmarkParseIncrementalSingleByteEditDFA(b *testing.B, spec dfaBenchmarkS
 		gotreesitter.ResetArenaProfile()
 		gotreesitter.ResetPerfCounters()
 		gotreesitter.EnableArenaProfile(true)
-		gotreesitter.EnableRuntimeAudit(true)
 		defer gotreesitter.EnableArenaProfile(false)
-		defer gotreesitter.EnableRuntimeAudit(false)
 	}
 	var editTotalNS uint64
 	var reuseTotalNS uint64
@@ -155,43 +139,22 @@ func benchmarkParseIncrementalSingleByteEditDFA(b *testing.B, spec dfaBenchmarkS
 	var recoverHits uint64
 	var entryScratchPeak uint64
 	maxStacksSeen := 0
-	singleStackIterations := 0
-	multiStackIterations := 0
-	var singleStackTokens uint64
-	var multiStackTokens uint64
-	var singleStackGSSNodes uint64
-	var multiStackGSSNodes uint64
-	var gssNodesAllocated uint64
-	var gssNodesRetained uint64
-	var gssNodesDropped uint64
-	var parentNodesAllocated uint64
-	var parentNodesRetained uint64
-	var parentNodesDropped uint64
-	var leafNodesAllocated uint64
-	var leafNodesRetained uint64
-	var leafNodesDropped uint64
-	var mergeStacksIn uint64
-	var mergeStacksOut uint64
-	var mergeSlotsUsed uint64
-	var globalCullStacksIn uint64
-	var globalCullStacksOut uint64
 	reuseUnsupported := false
 	reuseUnsupportedReason := ""
 
 	b.ReportAllocs()
 	b.SetBytes(int64(len(src)))
 	b.ResetTimer()
-	scratch := make([]byte, len(src))
 
 	for i := 0; i < b.N; i++ {
-		next := prepareEditedBenchmarkSource(src, scratch, site.offset)
+		toggleDigitAt(src, site.offset)
 		editStart := time.Now()
 		tree.Edit(edit)
 		old := tree
 		if statsEnabled {
 			editTotalNS += uint64(time.Since(editStart).Nanoseconds())
 			var prof gotreesitter.IncrementalParseProfile
-			tree, prof, err = parser.ParseIncrementalProfiled(next, tree)
+			tree, prof, err = parser.ParseIncrementalProfiled(src, tree)
 			reuseTotalNS += uint64(prof.ReuseCursorNanos)
 			parseTotalNS += uint64(prof.ReparseNanos)
 			reusedSubtrees += prof.ReusedSubtrees
@@ -203,26 +166,6 @@ func benchmarkParseIncrementalSingleByteEditDFA(b *testing.B, spec dfaBenchmarkS
 			recoverSymbolSkips += prof.RecoverSymbolSkips
 			recoverLookups += prof.RecoverLookups
 			recoverHits += prof.RecoverHits
-			singleStackIterations += prof.SingleStackIterations
-			multiStackIterations += prof.MultiStackIterations
-			singleStackTokens += prof.SingleStackTokens
-			multiStackTokens += prof.MultiStackTokens
-			singleStackGSSNodes += prof.SingleStackGSSNodes
-			multiStackGSSNodes += prof.MultiStackGSSNodes
-			gssNodesAllocated += prof.GSSNodesAllocated
-			gssNodesRetained += prof.GSSNodesRetained
-			gssNodesDropped += prof.GSSNodesDroppedSameToken
-			parentNodesAllocated += prof.ParentNodesAllocated
-			parentNodesRetained += prof.ParentNodesRetained
-			parentNodesDropped += prof.ParentNodesDroppedSameToken
-			leafNodesAllocated += prof.LeafNodesAllocated
-			leafNodesRetained += prof.LeafNodesRetained
-			leafNodesDropped += prof.LeafNodesDroppedSameToken
-			mergeStacksIn += prof.MergeStacksIn
-			mergeStacksOut += prof.MergeStacksOut
-			mergeSlotsUsed += prof.MergeSlotsUsed
-			globalCullStacksIn += prof.GlobalCullStacksIn
-			globalCullStacksOut += prof.GlobalCullStacksOut
 			if prof.EntryScratchPeak > entryScratchPeak {
 				entryScratchPeak = prof.EntryScratchPeak
 			}
@@ -236,7 +179,7 @@ func benchmarkParseIncrementalSingleByteEditDFA(b *testing.B, spec dfaBenchmarkS
 				}
 			}
 		} else {
-			tree, err = parser.ParseIncremental(next, tree)
+			tree, err = parser.ParseIncremental(src, tree)
 		}
 		if err != nil {
 			b.Fatalf("incremental parse error: %v", err)
@@ -247,7 +190,6 @@ func benchmarkParseIncrementalSingleByteEditDFA(b *testing.B, spec dfaBenchmarkS
 		if old != tree {
 			old.Release()
 		}
-		src, scratch = next, src
 	}
 	if statsEnabled {
 		a := gotreesitter.ArenaProfileSnapshot()
@@ -267,18 +209,6 @@ func benchmarkParseIncrementalSingleByteEditDFA(b *testing.B, spec dfaBenchmarkS
 		fmt.Printf(
 			"STATS_PERF merge_calls=%d merge_dead_pruned=%d merge_perkey_overflow=%d merge_replacements=%d stackeq_calls=%d stackeq_true=%d stackeq_hash_miss_skips=%d stackcmp_calls=%d forks=%d first_conflict_token=%d max_stacks=%d lex_bytes=%d lex_tokens=%d reuse_nodes_visited=%d reuse_nodes_pushed=%d reuse_nodes_popped=%d reuse_candidates=%d reuse_successes=%d reuse_leaf_successes=%d reuse_nonleaf_checks=%d reuse_nonleaf_successes=%d reuse_nonleaf_bytes=%d reuse_nonleaf_nogoto=%d reuse_nonleaf_nogoto_term=%d reuse_nonleaf_nogoto_nonterm=%d reuse_nonleaf_statemiss=%d reuse_nonleaf_statezero=%d\n",
 			p.MergeCalls, p.MergeDeadPruned, p.MergePerKeyOverflow, p.MergeReplacements, p.StackEquivalentCalls, p.StackEquivalentTrue, p.StackEqHashMissSkips, p.StackCompareCalls, p.ForkCount, p.FirstConflictToken, p.MaxConcurrentStacks, p.LexBytes, p.LexTokens, p.ReuseNodesVisited, p.ReuseNodesPushed, p.ReuseNodesPopped, p.ReuseCandidatesChecked, p.ReuseSuccesses, p.ReuseLeafSuccesses, p.ReuseNonLeafChecks, p.ReuseNonLeafSuccesses, p.ReuseNonLeafBytes, p.ReuseNonLeafNoGoto, p.ReuseNonLeafNoGotoTerm, p.ReuseNonLeafNoGotoNt, p.ReuseNonLeafStateMiss, p.ReuseNonLeafStateZero,
-		)
-		fmt.Printf(
-			"STATS_RUNTIME single_iters=%d multi_iters=%d single_tokens=%d multi_tokens=%d gss_single=%d gss_multi=%d\n",
-			singleStackIterations, multiStackIterations, singleStackTokens, multiStackTokens, singleStackGSSNodes, multiStackGSSNodes,
-		)
-		fmt.Printf(
-			"STATS_SURVIVOR gss_alloc=%d gss_retained=%d gss_dropped=%d parent_alloc=%d parent_retained=%d parent_dropped=%d leaf_alloc=%d leaf_retained=%d leaf_dropped=%d merge_in=%d merge_out=%d merge_slots=%d cull_in=%d cull_out=%d\n",
-			gssNodesAllocated, gssNodesRetained, gssNodesDropped,
-			parentNodesAllocated, parentNodesRetained, parentNodesDropped,
-			leafNodesAllocated, leafNodesRetained, leafNodesDropped,
-			mergeStacksIn, mergeStacksOut, mergeSlotsUsed,
-			globalCullStacksIn, globalCullStacksOut,
 		)
 	}
 	if statsEnabled {

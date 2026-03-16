@@ -69,18 +69,16 @@ func benchmarkCTreeSitterParseIncrementalSingleByteEdit(b *testing.B, spec cTree
 	b.ReportAllocs()
 	b.SetBytes(int64(len(src)))
 	b.ResetTimer()
-	scratch := make([]byte, len(src))
 
 	for i := 0; i < b.N; i++ {
-		next := prepareEditedBenchmarkSource(src, scratch, site.offset)
+		toggleDigitAt(src, site.offset)
 		tree.Edit(edit)
-		newTree := parser.Parse(tree, next)
+		newTree := parser.Parse(tree, src)
 		if newTree == nil || newTree.RootNode() == nil {
 			b.Fatal("incremental parse returned nil root")
 		}
 		tree.Close()
 		tree = newTree
-		src, scratch = next, src
 	}
 }
 

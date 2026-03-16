@@ -417,8 +417,9 @@ func generateWithReport(g *Grammar, opts reportBuildOptions) (*GenerateReport, e
 		sr.GLRBefore = glrBefore
 		sr.GLRAfter = glrAfter
 
-		if glrAfter >= glrBefore {
-			// Global rollback: splitting didn't reduce GLR conflicts.
+		if glrAfter >= glrBefore && len(diagsAfter) >= len(diags) {
+			// Global rollback: splitting did not reduce GLR conflicts or the
+			// total number of raw conflict sites.
 			// Rebuild the original resolved tables instead of retaining a
 			// whole-table snapshot on the success path.
 			tables, err = buildLRTables(ng)
@@ -431,7 +432,8 @@ func generateWithReport(g *Grammar, opts reportBuildOptions) (*GenerateReport, e
 			sr.StatesSplit = 0
 			sr.NewStatesAdded = 0
 			sr.ConflictsAfter = sr.ConflictsBefore
-			sr.Error = fmt.Errorf("rollback: GLR conflicts %d → %d (not reduced)", glrBefore, glrAfter)
+			sr.Error = fmt.Errorf("rollback: conflicts %d → %d, GLR conflicts %d → %d (not reduced)",
+				len(diags), len(diagsAfter), glrBefore, glrAfter)
 		} else {
 			report.Conflicts = diagsAfter
 			// Re-run oracle on new conflicts.

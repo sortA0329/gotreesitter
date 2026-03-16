@@ -95,7 +95,7 @@ var grammargenCGOGrammars = []grammargenCGOGrammar{
 	{name: "hcl", jsonPath: "/tmp/grammar_parity/hcl/src/grammar.json", blobFunc: grammars.HclLanguage, genTimeout: 60 * time.Second},
 	{name: "nix", jsonPath: "/tmp/grammar_parity/nix/src/grammar.json", blobFunc: grammars.NixLanguage},
 	{name: "sql", jsonPath: "/tmp/grammar_parity/sql/src/grammar.json", blobFunc: grammars.SqlLanguage, genTimeout: 90 * time.Second},
-	{name: "make", jsonPath: "/tmp/grammar_parity/make/src/grammar.json", blobFunc: grammars.MakeLanguage},
+	{name: "make", jsonPath: "/tmp/grammar_parity/make/src/grammar.json", blobFunc: grammars.MakeLanguage, genTimeout: 60 * time.Second},
 	{name: "scala", jsPath: "/tmp/grammar_parity/scala/grammar.js", blobFunc: grammars.ScalaLanguage, genTimeout: 45 * time.Second},
 	{name: "gomod", jsonPath: "/tmp/grammar_parity/gomod/src/grammar.json", blobFunc: grammars.GomodLanguage},
 	{name: "go", jsonPath: "/tmp/grammar_parity/go/src/grammar.json", blobFunc: grammars.GoLanguage, genTimeout: 45 * time.Second},

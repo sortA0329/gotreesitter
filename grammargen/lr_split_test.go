@@ -2,6 +2,46 @@ package grammargen
 
 import "testing"
 
+func TestSplitKernelLookaheadsForTransitionUsesRetainedFollowSet(t *testing.T) {
+	follow := newBitset(8)
+	follow.add(3)
+	ctx := &lrContext{
+		tokenCount: 2,
+		lalrFollowByTransition: map[[2]int]bitset{
+			{7, 4}: follow,
+		},
+	}
+
+	got := ctx.splitKernelLookaheadsForTransition(7, 4, newBitset(8))
+	if !got.contains(3) || got.count() != 1 {
+		t.Fatalf("splitKernelLookaheadsForTransition() = %v, want retained follow lookahead 3", got.words)
+	}
+
+	got.add(5)
+	stored := ctx.lalrFollowByTransition[[2]int{7, 4}]
+	if stored.contains(5) {
+		t.Fatal("splitKernelLookaheadsForTransition() should clone retained follow sets")
+	}
+}
+
+func TestSplitKernelLookaheadsForTransitionKeepsInheritedLookaheads(t *testing.T) {
+	inherited := newBitset(8)
+	inherited.add(1)
+	follow := newBitset(8)
+	follow.add(3)
+	ctx := &lrContext{
+		tokenCount: 2,
+		lalrFollowByTransition: map[[2]int]bitset{
+			{7, 4}: follow,
+		},
+	}
+
+	got := ctx.splitKernelLookaheadsForTransition(7, 4, inherited)
+	if !got.contains(1) || got.count() != 1 {
+		t.Fatalf("splitKernelLookaheadsForTransition() = %v, want inherited lookahead 1", got.words)
+	}
+}
+
 func TestLocalLR1Rebuild(t *testing.T) {
 	// Create a grammar known to have LALR merge pathology.
 	// Two rules that share a common prefix but diverge:

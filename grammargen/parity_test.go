@@ -1635,7 +1635,6 @@ func init() {
 		expectParity   int
 	}
 
-
 	batch4 := []grammarSpec{
 		// Popular languages
 		{name: "java", blobFunc: grammars.JavaLanguage, timeout: 90 * time.Second, expectNoErrors: 1, expectParity: 1},
@@ -1871,6 +1870,8 @@ func init() {
 
 // generateWithTimeout runs GenerateLanguage with a deadline. Returns nil, err
 // if the generation exceeds the timeout (e.g., LR table construction hangs).
+// On timeout, a background goroutine drains the result to prevent leaked
+// goroutines from holding large LR/DFA tables in memory.
 func generateWithTimeout(gram *Grammar, timeout time.Duration) (*gotreesitter.Language, error) {
 	type result struct {
 		lang *gotreesitter.Language
@@ -1925,6 +1926,13 @@ func TestMultiGrammarImportPipeline(t *testing.T) {
 			}
 			importOK++
 			t.Logf("import: %d rules, %d extras, %d externals", len(gram.Rules), len(gram.Extras), len(gram.Externals))
+
+			// Enable binary repeat mode for validated grammars.
+			switch g.name {
+			case "go_lang", "graphql", "json", "regex", "toml", "scheme",
+				"csv", "git_rebase", "pem", "eds", "forth", "sql":
+				gram.BinaryRepeatMode = true
+			}
 
 			// Stage 2: Generate (with timeout to avoid LR table hangs)
 			timeout := g.genTimeout

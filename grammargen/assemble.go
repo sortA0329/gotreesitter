@@ -151,10 +151,15 @@ func buildParseTables(
 	actionGroupMap := make(map[string]int) // serialized action → index
 
 	serializeActions := func(acts []lrAction) string {
-		buf := make([]byte, 0, len(acts)*9)
+		buf := make([]byte, 0, len(acts)*7)
 		for _, a := range acts {
 			buf = append(buf, byte(a.kind))
 			if a.isExtra {
+				buf = append(buf, 1)
+			} else {
+				buf = append(buf, 0)
+			}
+			if a.repeat {
 				buf = append(buf, 1)
 			} else {
 				buf = append(buf, 0)
@@ -183,6 +188,7 @@ func buildParseTables(
 			case lrShift:
 				pa.Type = gotreesitter.ParseActionShift
 				pa.State = gotreesitter.StateID(a.state)
+				pa.Repetition = a.repeat
 				if a.isExtra {
 					if a.state == 0 {
 						pa.Extra = true

@@ -1,6 +1,39 @@
 package grammargen
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
+
+func (ctx *lrContext) splitKernelLookaheadsForTransition(predState, transSym int, inherited bitset) bitset {
+	if !inherited.empty() {
+		return inherited.clone()
+	}
+	if ctx == nil || transSym < ctx.tokenCount || len(ctx.lalrFollowByTransition) == 0 {
+		return inherited.clone()
+	}
+	if follow, ok := ctx.lalrFollowByTransition[[2]int{predState, transSym}]; ok && !follow.empty() {
+		return follow.clone()
+	}
+	return inherited.clone()
+}
+
+func splitActionSignature(actions []lrAction) string {
+	if len(actions) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, act := range actions {
+		if i > 0 {
+			b.WriteByte('|')
+		}
+		fmt.Fprintf(&b, "%d/%d/%d/%d/%d/%t/%t/", act.kind, act.state, act.prodIdx, act.prec, act.assoc, act.isExtra, act.repeat)
+		for _, lhs := range act.lhsSyms {
+			fmt.Fprintf(&b, "%d,", lhs)
+		}
+	}
+	return b.String()
+}
 
 // localLR1Rebuild splits nominated LALR states into canonical LR(1) states
 // by rebuilding a bounded neighborhood around each split candidate.
@@ -71,9 +104,11 @@ func localLR1Rebuild(
 		// For each predecessor, extract the kernel items that would form
 		// this state from that predecessor's perspective alone.
 		type predPartition struct {
-			pred    predInfo
-			kernel  []coreEntry
-			actions map[int][]lrAction // lookahead → actions
+			pred             predInfo
+			kernel           []coreEntry
+			actions          map[int][]lrAction // lookahead → actions
+			resolvedConflict []lrAction
+			conflictSig      string
 		}
 
 		var partitions []predPartition
@@ -90,10 +125,11 @@ func localLR1Rebuild(
 				prod := &ng.Productions[ce.prodIdx]
 				if ce.dot < len(prod.RHS) && prod.RHS[ce.dot] == pred.transSym {
 					// Advance dot past the transition symbol.
+					lookaheads := ctx.splitKernelLookaheadsForTransition(pred.predState, pred.transSym, ce.lookaheads)
 					kernel = append(kernel, coreEntry{
 						prodIdx:    ce.prodIdx,
 						dot:        ce.dot + 1,
-						lookaheads: ce.lookaheads.clone(),
+						lookaheads: lookaheads,
 					})
 				}
 			}
@@ -157,25 +193,28 @@ func localLR1Rebuild(
 			continue
 		}
 
-		// Check if splitting would resolve the conflict.
-		// ALL partitions must have strictly fewer actions on the conflict symbol
-		// than the original. If any partition still has the same (or more), splitting
-		// just moves the conflict around without resolving it.
 		conflictSym := cand.lookaheadSym
-		origConflictCount := len(tables.ActionTable[stateIdx][conflictSym])
-		if origConflictCount <= 1 {
-			continue // no actual conflict to resolve
-		}
-
-		allHelp := true
-		for _, p := range partitions {
-			if len(p.actions[conflictSym]) >= origConflictCount {
-				allHelp = false
+		origSig := splitActionSignature(tables.ActionTable[stateIdx][conflictSym])
+		distinctResolved := make(map[string]struct{})
+		allMatchOrig := true
+		canHelp := true
+		for i := range partitions {
+			resolved, err := resolveActionConflict(conflictSym, partitions[i].actions[conflictSym], ng)
+			if err != nil {
+				canHelp = false
 				break
 			}
+			partitions[i].resolvedConflict = resolved
+			partitions[i].conflictSig = splitActionSignature(resolved)
+			distinctResolved[partitions[i].conflictSig] = struct{}{}
+			if partitions[i].conflictSig != origSig {
+				allMatchOrig = false
+			}
 		}
-
-		if !allHelp {
+		if !canHelp {
+			continue
+		}
+		if len(distinctResolved) < 2 || allMatchOrig {
 			continue
 		}
 

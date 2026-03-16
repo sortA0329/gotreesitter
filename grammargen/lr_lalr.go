@@ -84,11 +84,16 @@ func (ctx *lrContext) buildLR0() {
 			}
 
 			closedSet := ctx.lr0Closure(kernel)
+			closedSet.annotationArgTag = ctx.annotationArgTagForTransition(stateIdx, &closedSet)
+			closedSet.annotationArgTag |= ctx.templateContextTagForTransition(stateIdx, sym, &closedSet)
+			closedSet.annotationArgTag |= ctx.repeatWrapperSourceTagForTransition(stateIdx, sym, &closedSet)
+			closedSet.annotationArgTag |= ctx.operatorLiteralMergeTag(&closedSet)
 
 			// Find existing state with same core, or create new.
 			targetIdx := -1
 			for entry := coreMap[closedSet.coreHash]; entry != nil; entry = entry.next {
-				if sameCoresUsingIndexed(&ctx.itemSets[entry.stateIdx], &closedSet) {
+				if sameAnnotationArgTag(&ctx.itemSets[entry.stateIdx], &closedSet) &&
+					sameCoresUsingIndexed(&ctx.itemSets[entry.stateIdx], &closedSet) {
 					targetIdx = entry.stateIdx
 					ctx.recordMergedState(targetIdx, mergeOrigin{
 						kernelHash:  closedSet.coreHash,
@@ -405,6 +410,10 @@ func (ctx *lrContext) computeLALRLookaheads() {
 	// Step 6: Compute Follow sets = Digraph(Read, INCLUDES).
 	// Follow(p, A) = Read(p, A) ∪ ∪{ Follow(p', B) | (p,A) includes (p',B) }
 	followSets := digraph(numTrans, readSets, includes)
+	ctx.lalrFollowByTransition = make(map[[2]int]bitset, numTrans)
+	for i, nt := range ntTrans {
+		ctx.lalrFollowByTransition[[2]int{nt.state, nt.nonterm}] = followSets[i].clone()
+	}
 
 	// Step 7: Compute LA (lookahead) sets for reduce items via LOOKBACK.
 	// LA(q, A → ω) = ∪{ Follow(p, A) | (q, A → ω) lookback (p, A) }

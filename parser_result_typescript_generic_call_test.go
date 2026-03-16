@@ -177,53 +177,6 @@ func TestTSXEnumAssignmentsDoNotInheritNameFieldFromEnumBody(t *testing.T) {
 	}
 }
 
-func TestTSXFusedNormalizationPreservesGenericCallsAndEnumFields(t *testing.T) {
-	const src = "export enum MaterialsInputType {\n  ELEMENTS = 'elements',\n}\nconst [inputValue, setInputValue] = useState<string>(values[0].toString())\n"
-	tree, lang := parseByLanguageName(t, "tsx", src)
-	root := tree.RootNode()
-	if root.HasError() {
-		t.Fatalf("unexpected tsx parse error: %s", root.SExpr(lang))
-	}
-
-	call := firstNode(root, func(n *gotreesitter.Node) bool {
-		return n.Type(lang) == "call_expression" && n.Text([]byte(src)) == "useState<string>(values[0].toString())"
-	})
-	if call == nil {
-		t.Fatalf("tsx generic call missing call_expression: %s", root.SExpr(lang))
-	}
-	if typeArgs := firstNode(call, func(n *gotreesitter.Node) bool {
-		return n.Type(lang) == "type_arguments"
-	}); typeArgs == nil {
-		t.Fatalf("tsx generic call missing type_arguments: %s", call.SExpr(lang))
-	}
-
-	enumBody := firstNode(root, func(n *gotreesitter.Node) bool {
-		return n.Type(lang) == "enum_body"
-	})
-	if enumBody == nil {
-		t.Fatalf("missing enum_body: %s", root.SExpr(lang))
-	}
-	assignment := firstNode(enumBody, func(n *gotreesitter.Node) bool {
-		return n.Type(lang) == "enum_assignment"
-	})
-	if assignment == nil {
-		t.Fatalf("missing enum_assignment: %s", enumBody.SExpr(lang))
-	}
-	foundIdx := -1
-	for i := 0; i < enumBody.ChildCount(); i++ {
-		if enumBody.Child(i) == assignment {
-			foundIdx = i
-			break
-		}
-	}
-	if foundIdx < 0 {
-		t.Fatalf("enum_assignment not found as direct enum_body child: %s", enumBody.SExpr(lang))
-	}
-	if got := enumBody.FieldNameForChild(foundIdx, lang); got != "" {
-		t.Fatalf("enum_body.FieldNameForChild(%d) = %q, want empty", foundIdx, got)
-	}
-}
-
 func firstNode(root *gotreesitter.Node, pred func(*gotreesitter.Node) bool) *gotreesitter.Node {
 	if root == nil {
 		return nil

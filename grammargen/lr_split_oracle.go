@@ -7,6 +7,7 @@ type splitCandidate struct {
 	mergeCount   int
 	conflictKind ConflictKind
 	lookaheadSym int
+	resolution   string
 }
 
 // splitOracle analyzes conflict diagnostics and merge provenance to identify
@@ -33,8 +34,16 @@ func (o *splitOracle) candidates() []splitCandidate {
 	seen := make(map[int]bool)
 
 	for _, c := range o.conflicts {
-		// Only unresolved conflicts (GLR entries) are candidates.
-		if c.Resolution != "GLR (multiple actions kept)" {
+		if len(c.Actions) <= 1 {
+			continue
+		}
+		reason := ""
+		switch c.Resolution {
+		case "GLR (multiple actions kept)":
+			reason = "unresolved GLR conflict in merged LALR state"
+		case "shift wins (default yacc behavior)":
+			reason = "default shift resolution in merged LALR state"
+		default:
 			continue
 		}
 
@@ -58,10 +67,11 @@ func (o *splitOracle) candidates() []splitCandidate {
 
 		result = append(result, splitCandidate{
 			stateIdx:     c.State,
-			reason:       "unresolved GLR conflict in merged LALR state",
+			reason:       reason,
 			mergeCount:   mc,
 			conflictKind: c.Kind,
 			lookaheadSym: c.LookaheadSym,
+			resolution:   c.Resolution,
 		})
 	}
 

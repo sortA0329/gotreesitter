@@ -10,7 +10,7 @@ func TestSplitOracleNoConflicts(t *testing.T) {
 	}
 }
 
-func TestSplitOracleIgnoresResolvedConflicts(t *testing.T) {
+func TestSplitOracleReportsMergedDefaultShiftConflicts(t *testing.T) {
 	prov := newMergeProvenance()
 	prov.recordFresh(0)
 	prov.recordMerge(0, mergeOrigin{kernelHash: 0x1111})
@@ -20,14 +20,46 @@ func TestSplitOracleIgnoresResolvedConflicts(t *testing.T) {
 			Kind:         ShiftReduce,
 			State:        0,
 			LookaheadSym: 5,
-			Resolution:   "shift wins (default yacc behavior)",
+			Actions: []lrAction{
+				{kind: lrShift, state: 1},
+				{kind: lrReduce, prodIdx: 2},
+			},
+			Resolution: "shift wins (default yacc behavior)",
+		},
+	}
+
+	oracle := newSplitOracle(diags, prov)
+	candidates := oracle.candidates()
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(candidates))
+	}
+	if candidates[0].resolution != "shift wins (default yacc behavior)" {
+		t.Fatalf("unexpected resolution %q", candidates[0].resolution)
+	}
+}
+
+func TestSplitOracleIgnoresResolvedNonDefaultConflicts(t *testing.T) {
+	prov := newMergeProvenance()
+	prov.recordFresh(0)
+	prov.recordMerge(0, mergeOrigin{kernelHash: 0x1111})
+
+	diags := []ConflictDiag{
+		{
+			Kind:         ShiftReduce,
+			State:        0,
+			LookaheadSym: 5,
+			Actions: []lrAction{
+				{kind: lrShift, state: 1},
+				{kind: lrReduce, prodIdx: 2},
+			},
+			Resolution: "shift wins (right-associative)",
 		},
 	}
 
 	oracle := newSplitOracle(diags, prov)
 	candidates := oracle.candidates()
 	if len(candidates) != 0 {
-		t.Errorf("resolved conflicts should not produce candidates, got %d", len(candidates))
+		t.Errorf("non-default resolved conflicts should not produce candidates, got %d", len(candidates))
 	}
 }
 
@@ -40,7 +72,11 @@ func TestSplitOracleIgnoresUnmergedGLR(t *testing.T) {
 			Kind:         ShiftReduce,
 			State:        5,
 			LookaheadSym: 10,
-			Resolution:   "GLR (multiple actions kept)",
+			Actions: []lrAction{
+				{kind: lrShift, state: 1},
+				{kind: lrReduce, prodIdx: 2},
+			},
+			Resolution: "GLR (multiple actions kept)",
 		},
 	}
 
@@ -62,7 +98,11 @@ func TestSplitOracleReportsMergedGLR(t *testing.T) {
 			Kind:         ShiftReduce,
 			State:        5,
 			LookaheadSym: 10,
-			Resolution:   "GLR (multiple actions kept)",
+			Actions: []lrAction{
+				{kind: lrShift, state: 1},
+				{kind: lrReduce, prodIdx: 2},
+			},
+			Resolution: "GLR (multiple actions kept)",
 		},
 	}
 
@@ -87,8 +127,16 @@ func TestSplitOracleDeduplicatesByState(t *testing.T) {
 
 	// Two GLR conflicts on same state but different symbols.
 	diags := []ConflictDiag{
-		{Kind: ShiftReduce, State: 5, LookaheadSym: 10, Resolution: "GLR (multiple actions kept)"},
-		{Kind: ReduceReduce, State: 5, LookaheadSym: 11, Resolution: "GLR (multiple actions kept)"},
+		{
+			Kind: ShiftReduce, State: 5, LookaheadSym: 10,
+			Actions:    []lrAction{{kind: lrShift, state: 1}, {kind: lrReduce, prodIdx: 2}},
+			Resolution: "GLR (multiple actions kept)",
+		},
+		{
+			Kind: ReduceReduce, State: 5, LookaheadSym: 11,
+			Actions:    []lrAction{{kind: lrReduce, prodIdx: 3}, {kind: lrReduce, prodIdx: 4}},
+			Resolution: "GLR (multiple actions kept)",
+		},
 	}
 
 	oracle := newSplitOracle(diags, prov)
@@ -107,8 +155,16 @@ func TestSplitOracleMultipleStates(t *testing.T) {
 	prov.recordMerge(7, mergeOrigin{kernelHash: 0xBBBB})
 
 	diags := []ConflictDiag{
-		{Kind: ShiftReduce, State: 3, LookaheadSym: 1, Resolution: "GLR (multiple actions kept)"},
-		{Kind: ReduceReduce, State: 7, LookaheadSym: 2, Resolution: "GLR (multiple actions kept)"},
+		{
+			Kind: ShiftReduce, State: 3, LookaheadSym: 1,
+			Actions:    []lrAction{{kind: lrShift, state: 1}, {kind: lrReduce, prodIdx: 2}},
+			Resolution: "GLR (multiple actions kept)",
+		},
+		{
+			Kind: ReduceReduce, State: 7, LookaheadSym: 2,
+			Actions:    []lrAction{{kind: lrReduce, prodIdx: 3}, {kind: lrReduce, prodIdx: 4}},
+			Resolution: "GLR (multiple actions kept)",
+		},
 	}
 
 	oracle := newSplitOracle(diags, prov)
@@ -121,7 +177,11 @@ func TestSplitOracleMultipleStates(t *testing.T) {
 
 func TestSplitOracleNilProvenance(t *testing.T) {
 	diags := []ConflictDiag{
-		{Kind: ShiftReduce, State: 5, LookaheadSym: 10, Resolution: "GLR (multiple actions kept)"},
+		{
+			Kind: ShiftReduce, State: 5, LookaheadSym: 10,
+			Actions:    []lrAction{{kind: lrShift, state: 1}, {kind: lrReduce, prodIdx: 2}},
+			Resolution: "GLR (multiple actions kept)",
+		},
 	}
 
 	oracle := newSplitOracle(diags, nil)

@@ -27,14 +27,10 @@ const (
 type ParserLogger func(kind ParserLogType, message string)
 
 func normalizeReturnedTree(root *Node, source []byte, lang *Language) {
-	normalizeReturnedTreeWithRanges(root, source, lang, nil)
-}
-
-func normalizeReturnedTreeWithRanges(root *Node, source []byte, lang *Language, incrementalRanges []Range) {
 	if root == nil || lang == nil {
 		return
 	}
-	normalizeGoCompatibilityInRanges(root, source, lang, incrementalRanges)
+	normalizeGoCompatibility(root, source, lang)
 	normalizeScalaTemplateBodyObjectFragments(root, source, lang)
 	normalizeScalaRecoveredObjectTemplateBodies(root, source, lang)
 	normalizeScalaDefinitionFields(root, source, lang)
@@ -59,14 +55,7 @@ func normalizeReturnedIncrementalTree(tree, oldTree *Tree, source []byte, lang *
 	if !shouldNormalizeIncrementalReturnedTree(tree, oldTree) {
 		return
 	}
-	var incrementalRanges []Range
-	if oldTree != nil {
-		incrementalRanges = oldTree.ChangedRanges()
-		if len(incrementalRanges) == 0 {
-			incrementalRanges = nil
-		}
-	}
-	normalizeReturnedTreeWithRanges(rootOrNil(tree), source, lang, incrementalRanges)
+	normalizeReturnedTree(rootOrNil(tree), source, lang)
 }
 
 func (p *Parser) dfaReparseFactory() normalizationTokenSourceFactory {

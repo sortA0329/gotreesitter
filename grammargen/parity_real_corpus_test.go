@@ -202,6 +202,16 @@ func TestMultiGrammarImportRealCorpusParity(t *testing.T) {
 			if getenvBool("GTS_GRAMMARGEN_LR_SPLIT") {
 				gram.EnableLRSplitting = true
 			}
+			// Enable binary repeat mode for grammars that benefit from
+			// tree-sitter's upstream repeat lowering. Large grammars (>150
+			// rules) are excluded to avoid state table OOM during generation.
+			// Enable binary repeat mode for validated grammars that benefit
+			// from tree-sitter's upstream repeat lowering shape.
+			switch g.name {
+			case "go_lang", "graphql", "json", "regex", "toml", "scheme",
+				"csv", "git_rebase", "pem", "eds", "forth", "sql":
+				gram.BinaryRepeatMode = true
+			}
 
 			timeout := g.genTimeout
 			if timeout == 0 {
@@ -384,6 +394,12 @@ func TestMultiGrammarImportRealCorpusParity(t *testing.T) {
 				sort.Strings(parts)
 				divSummary = " divs=[" + strings.Join(parts, ",") + "]"
 			}
+			// Release parse trees from this grammar's sample loop.
+			genParser = nil
+			refParser = nil
+			genLang = nil
+			refLang = nil
+
 			t.Logf("real-corpus[%s]: no-error %d/%d, sexpr parity %d/%d, deep parity %d/%d%s (requireParity=%v, seen=%d/%d)",
 				profile,
 				metrics.NoError, metrics.Eligible,
@@ -392,6 +408,8 @@ func TestMultiGrammarImportRealCorpusParity(t *testing.T) {
 				divSummary,
 				requireParity, seen, len(candidates))
 		})
+		// Force GC between grammars to release large LR/DFA tables.
+		runtime.GC()
 	}
 
 	if testedGrammars == 0 {

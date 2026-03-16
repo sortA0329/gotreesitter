@@ -21,8 +21,6 @@ type ExternalLexer struct {
 	// It is only used to preserve an explicit MarkEnd position when later
 	// Advance(true) calls move startPos past that mark.
 	advancedContent bool
-	skippedAny      bool
-	skippedNewline  bool
 
 	resultSymbol Symbol
 	hasResult    bool
@@ -84,10 +82,6 @@ func (l *ExternalLexer) Advance(skip bool) {
 	}
 
 	if skip {
-		l.skippedAny = true
-		if r == '\n' || r == '\r' {
-			l.skippedNewline = true
-		}
 		l.startPos = l.pos
 		l.startPoint = l.point
 		// Note: endPos/endPoint are NOT updated here.  In C tree-sitter,

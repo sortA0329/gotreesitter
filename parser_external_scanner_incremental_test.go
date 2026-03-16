@@ -26,12 +26,12 @@ func TestExternalScannerIncrementalReusePolicy(t *testing.T) {
 			wantSubtreeMin: 1,
 		},
 		{
-			name:           "python",
-			lang:           grammars.PythonLanguage,
-			source:         makePythonBenchmarkSource,
-			marker:         "v = ",
-			wantReuse:      true,
-			wantSubtreeMin: 1,
+			name:       "python",
+			lang:       grammars.PythonLanguage,
+			source:     makePythonBenchmarkSource,
+			marker:     "v = ",
+			wantReuse:  false,
+			wantReason: "external_scanner_unsupported",
 		},
 	}
 
