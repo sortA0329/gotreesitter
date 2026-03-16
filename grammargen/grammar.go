@@ -7,23 +7,23 @@ package grammargen
 type RuleKind int
 
 const (
-	RuleString     RuleKind = iota // literal string: "{"
-	RulePattern                    // regex pattern: /[0-9]+/
-	RuleSymbol                     // symbol reference: $.object
-	RuleSeq                        // sequence: seq(a, b, c)
-	RuleChoice                     // alternation: choice(a, b)
-	RuleRepeat                     // zero-or-more: repeat(a)
-	RuleRepeat1                    // one-or-more: repeat1(a)
-	RuleOptional                   // optional: optional(a)
-	RuleToken                      // token boundary: token(a)
-	RuleImmToken                   // immediate token: token.immediate(a)
-	RuleField                      // field annotation: field("name", a)
-	RulePrec                       // precedence: prec(n, a)
-	RulePrecLeft                   // left-associative: prec.left(n, a)
-	RulePrecRight                  // right-associative: prec.right(n, a)
-	RulePrecDynamic                // dynamic precedence: prec.dynamic(n, a)
-	RuleBlank                      // epsilon / empty
-	RuleAlias                      // alias: alias(a, "name")
+	RuleString      RuleKind = iota // literal string: "{"
+	RulePattern                     // regex pattern: /[0-9]+/
+	RuleSymbol                      // symbol reference: $.object
+	RuleSeq                         // sequence: seq(a, b, c)
+	RuleChoice                      // alternation: choice(a, b)
+	RuleRepeat                      // zero-or-more: repeat(a)
+	RuleRepeat1                     // one-or-more: repeat1(a)
+	RuleOptional                    // optional: optional(a)
+	RuleToken                       // token boundary: token(a)
+	RuleImmToken                    // immediate token: token.immediate(a)
+	RuleField                       // field annotation: field("name", a)
+	RulePrec                        // precedence: prec(n, a)
+	RulePrecLeft                    // left-associative: prec.left(n, a)
+	RulePrecRight                   // right-associative: prec.right(n, a)
+	RulePrecDynamic                 // dynamic precedence: prec.dynamic(n, a)
+	RuleBlank                       // epsilon / empty
+	RuleAlias                       // alias: alias(a, "name")
 )
 
 // Rule is a node in the grammar rule tree.
@@ -37,25 +37,26 @@ type Rule struct {
 
 // TestCase is an embedded grammar test case.
 type TestCase struct {
-	Name       string // test name
-	Input      string // input to parse
-	Expected   string // expected S-expression (empty = just check no errors)
-	ExpectError bool  // if true, expect ERROR nodes in the tree
+	Name        string // test name
+	Input       string // input to parse
+	Expected    string // expected S-expression (empty = just check no errors)
+	ExpectError bool   // if true, expect ERROR nodes in the tree
 }
 
 // Grammar is the top-level grammar definition.
 type Grammar struct {
-	Name      string
-	Rules     map[string]*Rule
-	RuleOrder []string // order rules were defined (first = start rule)
-	Extras    []*Rule
-	Conflicts [][]string
-	Externals []*Rule
-	Inline    []string
-	Word      string
-	Supertypes []string
+	Name              string
+	Rules             map[string]*Rule
+	RuleOrder         []string // order rules were defined (first = start rule)
+	Extras            []*Rule
+	Conflicts         [][]string
+	Externals         []*Rule
+	Inline            []string
+	Word              string
+	Supertypes        []string
 	Tests             []TestCase // embedded test cases
 	EnableLRSplitting bool       // opt-in: attempt LR(1) state splitting for merge pathology
+	BinaryRepeatMode  bool       // use tree-sitter's binary repeat helper shape (aux→seq(aux,aux)|inner)
 }
 
 // NewGrammar creates a new grammar with the given name.

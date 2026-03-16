@@ -17,6 +17,9 @@ func ImportGrammarJSON(data []byte) (*Grammar, error) {
 	}
 
 	g := NewGrammar(raw.Name)
+	// BinaryRepeatMode can be set by the caller after import for grammars
+	// that benefit from tree-sitter's binary repeat helper shape. Not
+	// enabled by default because large grammars can OOM during generation.
 
 	// Build named precedence → numeric value mapping from the precedences array.
 	// Each level is an ordered list from highest to lowest precedence.
@@ -86,7 +89,7 @@ func ImportGrammarJSON(data []byte) (*Grammar, error) {
 func buildNamedPrecMap(rawLevels []json.RawMessage) map[string]int {
 	// First pass: collect all STRING entries across all levels in order.
 	type precEntry struct {
-		name     string
+		name      string
 		globalIdx int
 	}
 	var all []precEntry
@@ -116,16 +119,16 @@ func buildNamedPrecMap(rawLevels []json.RawMessage) map[string]int {
 
 // jsonGrammar is the top-level structure of a grammar.json file.
 type jsonGrammar struct {
-	Name        string                       `json:"name"`
-	Rules       map[string]json.RawMessage   `json:"rules"`
-	Extras      []json.RawMessage            `json:"extras"`
-	Conflicts   [][]string                   `json:"conflicts"`
-	Externals   []json.RawMessage            `json:"externals"`
-	Inline      []string                     `json:"inline"`
-	Supertypes  []string                     `json:"supertypes"`
-	Word        string                       `json:"word"`
-	Precedences []json.RawMessage            `json:"precedences"`
-	ruleOrder   []string                     // populated during UnmarshalJSON
+	Name        string                     `json:"name"`
+	Rules       map[string]json.RawMessage `json:"rules"`
+	Extras      []json.RawMessage          `json:"extras"`
+	Conflicts   [][]string                 `json:"conflicts"`
+	Externals   []json.RawMessage          `json:"externals"`
+	Inline      []string                   `json:"inline"`
+	Supertypes  []string                   `json:"supertypes"`
+	Word        string                     `json:"word"`
+	Precedences []json.RawMessage          `json:"precedences"`
+	ruleOrder   []string                   // populated during UnmarshalJSON
 }
 
 // jsonPrecEntry is an entry in the precedences array.

@@ -98,12 +98,13 @@ type NormalizedGrammar struct {
 
 // symbolTable is used during normalization.
 type symbolTable struct {
-	byName        map[string]int // terminal name → symbol ID
-	nontermByName map[string]int // nonterminal name → symbol ID
-	symbols       []SymbolInfo
-	nextID        int
-	fieldMap      map[string]int
-	fields        []string
+	byName           map[string]int // terminal name → symbol ID
+	nontermByName    map[string]int // nonterminal name → symbol ID
+	symbols          []SymbolInfo
+	nextID           int
+	fieldMap         map[string]int
+	fields           []string
+	binaryRepeatMode bool // use tree-sitter binary repeat helper shape
 }
 
 func newSymbolTable() *symbolTable {
@@ -222,6 +223,7 @@ func Normalize(g *Grammar) (*NormalizedGrammar, error) {
 	}
 
 	st := newSymbolTable()
+	st.binaryRepeatMode = g.BinaryRepeatMode
 	ng := &NormalizedGrammar{}
 
 	// Phase 1: Collect all string literals and register terminal symbols.
@@ -358,7 +360,7 @@ func Normalize(g *Grammar) (*NormalizedGrammar, error) {
 		// When a hidden rule's entire body is repeat1, tree-sitter converts
 		// the rule itself into the repetition binary tree instead of
 		// introducing another auxiliary rule.
-		rule = expandTopLevelRepeat(cloneRule(rule), name)
+		rule = expandTopLevelRepeat(cloneRule(rule), name, st.binaryRepeatMode)
 		prevAuxCount := len(auxRules)
 		processed := prepareRule(rule, name, st, auxRules, &auxCounter)
 		processedRules[name] = processed
@@ -1234,18 +1236,24 @@ func prepareRule(r *Rule, parentName string, st *symbolTable, auxRules map[strin
 	// Handle the current node.
 	switch r.Kind {
 	case RuleRepeat:
-		// Tree-sitter keeps the 0- and 1-item cases in the parent production
-		// and uses a hidden helper only for 2+ items. The helper therefore
-		// reduces with child-count 2 only, matching the C toolchain.
 		preparedInner := prepareRule(cloneRule(r.Children[0]), parentName, st, auxRules, counter)
-		auxName := ensureRepeatAux(parentName, preparedInner, st, auxRules, counter)
+		if st.binaryRepeatMode {
+			// Tree-sitter's binary repeat helper: aux → choice(seq(aux, aux), inner).
+			// Produces correct SHIFT_REPEAT / reduce conflicts in the LR tables.
+			auxName := ensureRepeatAuxBinary(parentName, preparedInner, st, auxRules, counter)
+			return Choice(Sym(auxName), Blank())
+		}
+		// Default: keep 0- and 1-item cases in parent, 2+ in helper.
+		auxName := ensureRepeatAuxLinear(parentName, preparedInner, st, auxRules, counter)
 		return Choice(Blank(), cloneRule(preparedInner), Sym(auxName))
 
 	case RuleRepeat1:
-		// One-or-more mirrors tree-sitter's lowering: keep the 1-item case in
-		// the parent and reserve the helper for 2+ items only.
 		preparedInner := prepareRule(cloneRule(r.Children[0]), parentName, st, auxRules, counter)
-		auxName := ensureRepeatAux(parentName, preparedInner, st, auxRules, counter)
+		if st.binaryRepeatMode {
+			auxName := ensureRepeatAuxBinary(parentName, preparedInner, st, auxRules, counter)
+			return Sym(auxName)
+		}
+		auxName := ensureRepeatAuxLinear(parentName, preparedInner, st, auxRules, counter)
 		return Choice(cloneRule(preparedInner), Sym(auxName))
 
 	case RuleOptional:
@@ -1262,7 +1270,7 @@ func prepareRule(r *Rule, parentName string, st *symbolTable, auxRules map[strin
 	return r
 }
 
-func ensureRepeatAux(parentName string, inner *Rule, st *symbolTable, auxRules map[string]*Rule, counter *int) string {
+func ensureRepeatAuxLinear(parentName string, inner *Rule, st *symbolTable, auxRules map[string]*Rule, counter *int) string {
 	*counter++
 	auxName := fmt.Sprintf("%s_repeat%d", parentName, *counter)
 	if _, exists := st.lookupNonterm(auxName); !exists {
@@ -1277,15 +1285,29 @@ func ensureRepeatAux(parentName string, inner *Rule, st *symbolTable, auxRules m
 	return auxName
 }
 
+func ensureRepeatAuxBinary(parentName string, inner *Rule, st *symbolTable, auxRules map[string]*Rule, counter *int) string {
+	*counter++
+	auxName := fmt.Sprintf("%s_repeat%d", parentName, *counter)
+	if _, exists := st.lookupNonterm(auxName); !exists {
+		st.addSymbol(auxName, SymbolInfo{
+			Name: auxName, Visible: false, Named: false, Kind: SymbolNonterminal,
+		})
+		auxRules[auxName] = Choice(
+			Seq(Sym(auxName), Sym(auxName)),
+			cloneRule(inner),
+		)
+	}
+	return auxName
+}
+
 // expandTopLevelRepeat expands repeat1 at the top level of a hidden rule into
-// the same split that tree-sitter uses: the direct 1-item case stays on the
-// rule itself, and the recursive branch handles only 2+ items.
+// the same binary-tree shape tree-sitter uses for repetition auxiliaries.
 //
 // Only applies when the ENTIRE rule body is a repeat1 (possibly wrapped in
 // precedence). Zero-or-more is handled as choice(repeat1, blank), matching
 // tree-sitter's grammar.json lowering. Nested repeats inside seq/choice are handled
 // normally by prepareRule (which creates aux rules).
-func expandTopLevelRepeat(r *Rule, ruleName string) *Rule {
+func expandTopLevelRepeat(r *Rule, ruleName string, binaryMode bool) *Rule {
 	if r == nil {
 		return r
 	}
@@ -1311,11 +1333,19 @@ func expandTopLevelRepeat(r *Rule, ruleName string) *Rule {
 		return r
 	}
 	x := inner.Children[0]
-	expanded := Choice(
-		cloneRule(x),
-		Seq(cloneRule(x), cloneRule(x)),
-		Seq(Sym(ruleName), cloneRule(x)),
-	)
+	var expanded *Rule
+	if binaryMode {
+		expanded = Choice(
+			Seq(Sym(ruleName), Sym(ruleName)),
+			cloneRule(x),
+		)
+	} else {
+		expanded = Choice(
+			cloneRule(x),
+			Seq(cloneRule(x), cloneRule(x)),
+			Seq(Sym(ruleName), cloneRule(x)),
+		)
+	}
 
 	// Re-wrap with precedence if there were any wrappers.
 	for i := len(precWrappers) - 1; i >= 0; i-- {
@@ -1500,7 +1530,7 @@ func extractTerminals(g *Grammar, st *symbolTable, stringLits []string, namedTok
 		patterns = append(patterns, TerminalPattern{
 			SymbolID: id,
 			Rule:     Str(s),
-			Priority: 0, // prec=0: greedy decides among equal-priority tokens
+			Priority: 0,
 		})
 	}
 
@@ -2449,10 +2479,15 @@ func isRepeatSelfRef(r *Rule, name string) bool {
 	if r.Kind != RuleSeq || len(r.Children) != 2 {
 		return false
 	}
-	if !isDirectSelfRef(r.Children[0], name) {
-		return false
+	// Linear shape: seq(self, non-self)
+	if isDirectSelfRef(r.Children[0], name) && !ruleReferencesSym(r.Children[1], name) {
+		return true
 	}
-	return !ruleReferencesSym(r.Children[1], name)
+	// Binary shape: seq(self, self)
+	if isDirectSelfRef(r.Children[0], name) && isDirectSelfRef(r.Children[1], name) {
+		return true
+	}
+	return false
 }
 
 func isDirectSelfRef(r *Rule, name string) bool {
