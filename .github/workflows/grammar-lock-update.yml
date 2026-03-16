@@ -35,7 +35,7 @@ jobs:
 
           go run ./cmd/grammar_updater \
             -lock grammars/languages.lock \
-            -allow-list grammars/update_tier1_top50.txt \
+            -allow-list grammars/update_tier1_core100.txt \
             -max-updates "${MAX_UPDATES}" \
             -workers 8 \
             -write \
@@ -76,7 +76,7 @@ jobs:
 
             ## What changed
             - Updated `grammars/languages.lock` refs using `cmd/grammar_updater`
-            - Scope limited by `grammars/update_tier1_top50.txt`
+            - Scope limited by `grammars/update_tier1_core100.txt`
             - Batched with `max_updates` limit
 
             ## Artifacts

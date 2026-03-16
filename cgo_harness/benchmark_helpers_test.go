@@ -58,8 +58,7 @@ type benchmarkEditSite struct {
 	end    gotreesitter.Point
 }
 
-func makeGoBenchmarkEditSites(src []byte) []benchmarkEditSite {
-	const marker = "v := "
+func makeBenchmarkEditSites(src []byte, marker string) []benchmarkEditSite {
 	needle := []byte(marker)
 	sites := make([]benchmarkEditSite, 0, 64)
 	from := 0
@@ -82,6 +81,28 @@ func makeGoBenchmarkEditSites(src []byte) []benchmarkEditSite {
 	return sites
 }
 
+func makeGoBenchmarkEditSites(src []byte) []benchmarkEditSite {
+	return makeBenchmarkEditSites(src, "v := ")
+}
+
+func makeTypeScriptBenchmarkSource(funcCount int) []byte {
+	var sb strings.Builder
+	sb.Grow(funcCount * len("export function f0(): number { const v = 0; return v }\n"))
+	for i := 0; i < funcCount; i++ {
+		fmt.Fprintf(&sb, "export function f%d(): number { const v = %d; return v }\n", i, i)
+	}
+	return []byte(sb.String())
+}
+
+func makePythonBenchmarkSource(funcCount int) []byte {
+	var sb strings.Builder
+	sb.Grow(funcCount * len("def f0():\n    v = 0\n    return v\n\n"))
+	for i := 0; i < funcCount; i++ {
+		fmt.Fprintf(&sb, "def f%d():\n    v = %d\n    return v\n\n", i, i)
+	}
+	return []byte(sb.String())
+}
+
 func toggleDigitAt(src []byte, offset int) {
 	if offset < 0 || offset >= len(src) {
 		return
@@ -91,4 +112,13 @@ func toggleDigitAt(src []byte, offset int) {
 		return
 	}
 	src[offset] = '0'
+}
+
+func prepareEditedBenchmarkSource(cur, scratch []byte, offset int) []byte {
+	if len(scratch) != len(cur) {
+		scratch = make([]byte, len(cur))
+	}
+	copy(scratch, cur)
+	toggleDigitAt(scratch, offset)
+	return scratch
 }

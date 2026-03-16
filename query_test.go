@@ -86,6 +86,22 @@ func queryTestLanguage() *Language {
 	}
 }
 
+func queryTestLanguageWithSupertypes() *Language {
+	lang := queryTestLanguage()
+	lang.SymbolNames = append(lang.SymbolNames, "declaration")
+	lang.SymbolMetadata = append(lang.SymbolMetadata, SymbolMetadata{
+		Name:      "declaration",
+		Visible:   true,
+		Named:     true,
+		Supertype: true,
+	})
+	lang.SupertypeSymbols = []Symbol{16}
+	lang.SupertypeMapSlices = make([][2]uint16, 17)
+	lang.SupertypeMapSlices[16] = [2]uint16{0, 1}
+	lang.SupertypeMapEntries = []Symbol{5}
+	return lang
+}
+
 // Helper to make leaf nodes quickly.
 func leaf(sym Symbol, named bool, start, end uint32) *Node {
 	return NewLeafNode(sym, named, start, end,
@@ -140,6 +156,9 @@ func TestParseWildcard(t *testing.T) {
 	step := q.patterns[0].steps[0]
 	if step.symbol != 0 {
 		t.Fatalf("symbol: got %d, want 0 for wildcard", step.symbol)
+	}
+	if !step.isNamed {
+		t.Fatalf("isNamed: got false, want true for parenthesized named wildcard")
 	}
 	if step.captureID < 0 {
 		t.Fatal("captureID: expected >= 0")
@@ -714,6 +733,31 @@ func TestParseAlternationComplexBranchPreserved(t *testing.T) {
 	}
 }
 
+func TestParseAlternationFieldShorthandPreserved(t *testing.T) {
+	lang := queryTestLanguage()
+	q, err := NewQuery(`(function_declaration [name: (_) @x body: (_) @x])`, lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if q.PatternCount() != 1 {
+		t.Fatalf("PatternCount: got %d, want 1", q.PatternCount())
+	}
+	steps := q.patterns[0].steps
+	if len(steps) != 2 {
+		t.Fatalf("steps: got %d, want 2", len(steps))
+	}
+	step := steps[1]
+	if len(step.alternatives) != 2 {
+		t.Fatalf("alternatives: got %d, want 2", len(step.alternatives))
+	}
+	if step.alternatives[0].field == 0 {
+		t.Fatal("first alternation branch lost field constraint")
+	}
+	if step.alternatives[1].field == 0 {
+		t.Fatal("second alternation branch lost field constraint")
+	}
+}
+
 func TestParseErrorPseudoNodeAllowed(t *testing.T) {
 	lang := queryTestLanguage()
 	if _, err := NewQuery(`(ERROR) @error`, lang); err != nil {
@@ -952,6 +996,88 @@ func TestCaptureDeduplicated(t *testing.T) {
 	}
 }
 
+func TestQueryMetadataAccessors(t *testing.T) {
+	lang := queryTestLanguage()
+	src := `(identifier) @id
+(#eq? @id "main")
+`
+	q, err := NewQuery(src, lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	if got, want := q.CaptureCount(), uint32(1); got != want {
+		t.Fatalf("CaptureCount: got %d want %d", got, want)
+	}
+	if name, ok := q.CaptureNameForID(0); !ok || name != "id" {
+		t.Fatalf("CaptureNameForID(0): got (%q,%v), want (%q,true)", name, ok, "id")
+	}
+	if _, ok := q.CaptureNameForID(99); ok {
+		t.Fatal("CaptureNameForID(99): ok=true, want false")
+	}
+
+	if got, want := q.StringCount(), uint32(1); got != want {
+		t.Fatalf("StringCount: got %d want %d", got, want)
+	}
+	if s, ok := q.StringValueForID(0); !ok || s != "main" {
+		t.Fatalf("StringValueForID(0): got (%q,%v), want (%q,true)", s, ok, "main")
+	}
+	if _, ok := q.StringValueForID(99); ok {
+		t.Fatal("StringValueForID(99): ok=true, want false")
+	}
+
+	start, ok := q.StartByteForPattern(0)
+	if !ok {
+		t.Fatal("StartByteForPattern(0): ok=false")
+	}
+	end, ok := q.EndByteForPattern(0)
+	if !ok {
+		t.Fatal("EndByteForPattern(0): ok=false")
+	}
+	if end <= start {
+		t.Fatalf("pattern byte range invalid: start=%d end=%d", start, end)
+	}
+	preds, ok := q.PredicatesForPattern(0)
+	if !ok {
+		t.Fatal("PredicatesForPattern(0): ok=false")
+	}
+	if len(preds) != 1 {
+		t.Fatalf("PredicatesForPattern len: got %d want 1", len(preds))
+	}
+}
+
+func TestQueryPatternMetadata(t *testing.T) {
+	lang := queryTestLanguage()
+
+	q, err := NewQuery(`(identifier) @id`, lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if !q.IsPatternRooted(0) {
+		t.Fatal("IsPatternRooted(0) = false, want true")
+	}
+	if q.IsPatternNonLocal(0) {
+		t.Fatal("IsPatternNonLocal(0) = true, want false")
+	}
+	if !q.StepIsDefinite(0, 0) {
+		t.Fatal("StepIsDefinite(0,0) = false, want true")
+	}
+	if !q.IsPatternGuaranteedAtStep(0, 0) {
+		t.Fatal("IsPatternGuaranteedAtStep(0,0) = false, want true")
+	}
+
+	wild, err := NewQuery(`(_) @any`, lang)
+	if err != nil {
+		t.Fatalf("wildcard parse error: %v", err)
+	}
+	if wild.StepIsDefinite(0, 0) {
+		t.Fatal("wildcard StepIsDefinite(0,0) = true, want false")
+	}
+	if wild.IsPatternGuaranteedAtStep(0, 0) {
+		t.Fatal("wildcard IsPatternGuaranteedAtStep(0,0) = true, want false")
+	}
+}
+
 // --------------------------------------------------------------------------
 // Matching engine tests
 // --------------------------------------------------------------------------
@@ -1016,6 +1142,66 @@ func TestMatchSimpleNodeType(t *testing.T) {
 	}
 	if m.Captures[0].Node.Text(tree.Source()) != "main" {
 		t.Errorf("Capture text: got %q, want %q", m.Captures[0].Node.Text(tree.Source()), "main")
+	}
+}
+
+func TestMatchAlternationFieldShorthandRespectsField(t *testing.T) {
+	lang := queryTestLanguage()
+	tree := buildSimpleTree(lang)
+
+	q, err := NewQuery(`(function_declaration [name: (_) @x body: (_) @x])`, lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	matches := q.Execute(tree)
+	if len(matches) != 1 {
+		t.Fatalf("matches: got %d, want 1", len(matches))
+	}
+	if len(matches[0].Captures) != 2 {
+		t.Fatalf("captures: got %d, want 2", len(matches[0].Captures))
+	}
+
+	got := map[string]bool{}
+	for _, c := range matches[0].Captures {
+		got[c.Node.Text(tree.Source())] = true
+	}
+
+	if !got["main"] {
+		t.Fatalf("missing name capture 'main'; captures=%v", matches[0].Captures)
+	}
+	if !got["42"] {
+		t.Fatalf("missing body capture '42'; captures=%v", matches[0].Captures)
+	}
+}
+
+func TestMatchRootAlternationFieldShorthandRespectsParentField(t *testing.T) {
+	lang := queryTestLanguage()
+	tree := buildSimpleTree(lang)
+
+	q, err := NewQuery(`[name: (_) body: (_)] @x`, lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	matches := q.Execute(tree)
+	if len(matches) != 2 {
+		t.Fatalf("matches: got %d, want 2", len(matches))
+	}
+
+	got := map[string]bool{}
+	for _, m := range matches {
+		if len(m.Captures) != 1 {
+			t.Fatalf("captures per match: got %d, want 1", len(m.Captures))
+		}
+		got[m.Captures[0].Node.Text(tree.Source())] = true
+	}
+
+	if !got["main"] {
+		t.Fatalf("missing field capture 'main'; matches=%v", matches)
+	}
+	if !got["42"] {
+		t.Fatalf("missing field capture '42'; matches=%v", matches)
 	}
 }
 
@@ -1231,6 +1417,21 @@ func TestMatchPredicateHasAncestor(t *testing.T) {
 	tree := buildSimpleTree(lang)
 
 	q, err := NewQuery(`(identifier) @name (#has-ancestor? @name function_declaration)`, lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	matches := q.Execute(tree)
+	if len(matches) != 1 {
+		t.Fatalf("matches: got %d, want 1", len(matches))
+	}
+}
+
+func TestMatchPredicateHasAncestorViaSupertype(t *testing.T) {
+	lang := queryTestLanguageWithSupertypes()
+	tree := buildSimpleTree(lang)
+
+	q, err := NewQuery(`(identifier) @name (#has-ancestor? @name declaration)`, lang)
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
@@ -1592,6 +1793,27 @@ func TestMatchNoMatchField(t *testing.T) {
 	}
 }
 
+func TestMatchFieldScansAllSiblingsWithSameFieldName(t *testing.T) {
+	lang := queryTestLanguage()
+	tree := buildRepeatedFieldTree(lang)
+
+	q, err := NewQuery(`(program name: (identifier) @name)`, lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	matches := q.Execute(tree)
+	if len(matches) != 1 {
+		t.Fatalf("matches: got %d, want 1", len(matches))
+	}
+	if len(matches[0].Captures) != 1 {
+		t.Fatalf("captures: got %d, want 1", len(matches[0].Captures))
+	}
+	if got := matches[0].Captures[0].Node.Text(tree.Source()); got != "a" {
+		t.Fatalf("capture text: got %q, want %q", got, "a")
+	}
+}
+
 func TestMatchWildcard(t *testing.T) {
 	lang := queryTestLanguage()
 	tree := buildSimpleTree(lang)
@@ -1617,6 +1839,85 @@ func TestMatchWildcard(t *testing.T) {
 	}
 	if !foundProgram {
 		t.Fatal("expected a match for program node using wildcard")
+	}
+}
+
+func TestMatchAnchorAfterAnonymousSibling(t *testing.T) {
+	lang := queryTestLanguage()
+	tree := buildSimpleTree(lang)
+
+	q, err := NewQuery(`(function_declaration "func" . (identifier) @name)`, lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	matches := q.Execute(tree)
+	if len(matches) != 1 || len(matches[0].Captures) != 1 {
+		t.Fatalf("captures: got %d matches / %d captures, want 1/1", len(matches), func() int {
+			if len(matches) == 0 {
+				return 0
+			}
+			return len(matches[0].Captures)
+		}())
+	}
+	if got, want := matches[0].Captures[0].Node.Text(tree.Source()), "main"; got != want {
+		t.Fatalf("anchor-after-anonymous capture = %q, want %q", got, want)
+	}
+}
+
+func TestMatchNamedWildcardSkipsAnonymousNodes(t *testing.T) {
+	lang := queryTestLanguage()
+	tree := buildSimpleTree(lang)
+
+	q, err := NewQuery(`(function_declaration (_) @child)`, lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	matches := q.Execute(tree)
+	if len(matches) != 1 || len(matches[0].Captures) == 0 {
+		t.Fatalf("captures: got %d matches / %d captures, want 1/non-zero", len(matches), func() int {
+			if len(matches) == 0 {
+				return 0
+			}
+			return len(matches[0].Captures)
+		}())
+	}
+	foundMain := false
+	for _, c := range matches[0].Captures {
+		if got := c.Node.Text(tree.Source()); got == "func" {
+			t.Fatalf("named wildcard matched anonymous token %q", got)
+		}
+		if c.Node.Text(tree.Source()) == "main" {
+			foundMain = true
+		}
+	}
+	if !foundMain {
+		t.Fatalf("named wildcard captures missing %q", "main")
+	}
+}
+
+func TestParseBareWildcardChildRemainsUnnamed(t *testing.T) {
+	lang := queryTestLanguage()
+
+	q, err := NewQuery(`(function_declaration _ @child)`, lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	if got := len(q.patterns); got != 1 {
+		t.Fatalf("patterns: got %d, want 1", got)
+	}
+	steps := q.patterns[0].steps
+	if got := len(steps); got != 2 {
+		t.Fatalf("steps: got %d, want 2", got)
+	}
+	child := steps[1]
+	if child.symbol != 0 {
+		t.Fatalf("child symbol: got %d, want 0", child.symbol)
+	}
+	if child.isNamed {
+		t.Fatalf("child isNamed: got true, want false for bare wildcard")
 	}
 }
 
@@ -2103,6 +2404,100 @@ func TestQueryCursorSetPointRange(t *testing.T) {
 	}
 }
 
+func TestQueryCursorSetMatchLimit(t *testing.T) {
+	lang := queryTestLanguage()
+	tree := buildSimpleTree(lang)
+
+	q, err := NewQuery(`[(identifier) (number)] @x`, lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	cursor := q.Exec(tree.RootNode(), tree.Language(), tree.Source())
+	cursor.SetMatchLimit(1)
+
+	if _, ok := cursor.NextMatch(); !ok {
+		t.Fatal("expected first match")
+	}
+	if _, ok := cursor.NextMatch(); ok {
+		t.Fatal("expected second call to stop at match limit")
+	}
+	if !cursor.DidExceedMatchLimit() {
+		t.Fatal("expected DidExceedMatchLimit() to be true")
+	}
+}
+
+func TestQueryCursorSetMaxStartDepth(t *testing.T) {
+	lang := queryTestLanguage()
+	tree := buildSimpleTree(lang)
+
+	q, err := NewQuery(`(identifier) @id`, lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	// identifier is below depth 1 in buildSimpleTree, so depth 1 should yield none.
+	cursor := q.Exec(tree.RootNode(), tree.Language(), tree.Source())
+	cursor.SetMaxStartDepth(1)
+	if _, ok := cursor.NextMatch(); ok {
+		t.Fatal("expected no matches at max start depth 1")
+	}
+
+	cursor = q.Exec(tree.RootNode(), tree.Language(), tree.Source())
+	cursor.SetMaxStartDepth(2)
+	match, ok := cursor.NextMatch()
+	if !ok {
+		t.Fatal("expected match at max start depth 2")
+	}
+	if got, want := match.Captures[0].Node.Text(tree.Source()), "main"; got != want {
+		t.Fatalf("capture text: got %q want %q", got, want)
+	}
+}
+
+func TestQueryDisableCapture(t *testing.T) {
+	lang := queryTestLanguage()
+	tree := buildSimpleTree(lang)
+
+	q, err := NewQuery(`(function_declaration name: (identifier) @id body: (block (number) @num))`, lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	q.DisableCapture("num")
+
+	matches := q.Execute(tree)
+	if len(matches) != 1 {
+		t.Fatalf("matches: got %d want 1", len(matches))
+	}
+	if len(matches[0].Captures) != 1 {
+		t.Fatalf("captures: got %d want 1", len(matches[0].Captures))
+	}
+	if got, want := matches[0].Captures[0].Name, "id"; got != want {
+		t.Fatalf("capture name: got %q want %q", got, want)
+	}
+}
+
+func TestQueryDisablePattern(t *testing.T) {
+	lang := queryTestLanguage()
+	tree := buildSimpleTree(lang)
+
+	q, err := NewQuery("(identifier) @x\n(number) @x", lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	q.DisablePattern(0)
+
+	matches := q.Execute(tree)
+	if len(matches) != 1 {
+		t.Fatalf("matches: got %d want 1", len(matches))
+	}
+	if len(matches[0].Captures) != 1 {
+		t.Fatalf("captures: got %d want 1", len(matches[0].Captures))
+	}
+	if got, want := matches[0].Captures[0].Node.Text(tree.Source()), "42"; got != want {
+		t.Fatalf("capture text: got %q want %q", got, want)
+	}
+}
+
 func TestMatchDeeplyNested(t *testing.T) {
 	lang := queryTestLanguage()
 
@@ -2256,12 +2651,26 @@ func buildFieldedTree(lang *Language) *Tree {
 	return NewTree(program, source, lang)
 }
 
+// buildRepeatedFieldTree creates a parent with two children using the same
+// field ID, where only the second child is an identifier.
+func buildRepeatedFieldTree(lang *Language) *Tree {
+	source := []byte("1 a")
+	num := leaf(Symbol(2), true, 0, 1)
+	id := leaf(Symbol(1), true, 2, 3)
+	program := parent(Symbol(7), true,
+		[]*Node{num, id},
+		[]FieldID{1, 1}) // both children are fieldID 1 = "name"
+	return NewTree(program, source, lang)
+}
+
 // ---------------------------------------------------------------------------
 // Quantified query predicates: #any-eq?, #any-not-eq?, #any-match?, #any-not-match?
 // ---------------------------------------------------------------------------
 
 // buildMultiIdentTree creates a tree with three identifier children under a block:
-//   program > block > [ identifier("foo"), identifier("bar"), identifier("baz") ]
+//
+//	program > block > [ identifier("foo"), identifier("bar"), identifier("baz") ]
+//
 // source: "foo bar baz"
 func buildMultiIdentTree(lang *Language) *Tree {
 	source := []byte("foo bar baz")
@@ -2411,9 +2820,9 @@ func TestAnyEqMatchesPredicates(t *testing.T) {
 
 func TestAnyEqCaptureVsCapture(t *testing.T) {
 	source := []byte("foo bar baz bar")
-	n1 := leaf(Symbol(1), true, 0, 3)   // "foo"
-	n2 := leaf(Symbol(1), true, 4, 7)   // "bar"
-	n3 := leaf(Symbol(1), true, 8, 11)  // "baz"
+	n1 := leaf(Symbol(1), true, 0, 3)     // "foo"
+	n2 := leaf(Symbol(1), true, 4, 7)     // "bar"
+	n3 := leaf(Symbol(1), true, 8, 11)    // "baz"
 	nRef := leaf(Symbol(1), true, 12, 15) // "bar"
 
 	captures := []QueryCapture{
@@ -2445,8 +2854,8 @@ func TestAnyEqCaptureVsCapture(t *testing.T) {
 
 func TestAnyNotEqMatchesPredicates(t *testing.T) {
 	source := []byte("bar bar bar")
-	n1 := leaf(Symbol(1), true, 0, 3) // "bar"
-	n2 := leaf(Symbol(1), true, 4, 7) // "bar"
+	n1 := leaf(Symbol(1), true, 0, 3)  // "bar"
+	n2 := leaf(Symbol(1), true, 4, 7)  // "bar"
 	n3 := leaf(Symbol(1), true, 8, 11) // "bar"
 
 	captures := []QueryCapture{
@@ -2679,10 +3088,10 @@ func TestSelectAdjacentBothDirections(t *testing.T) {
 	// Test adjacency in both directions:
 	// anchor at [5,8), item at [3,5) → item.end==5 == anchor.start==5 → adjacent
 	// anchor at [5,8), item at [8,11) → item.start==8 == anchor.end==8 → adjacent
-	itemBefore := leaf(Symbol(1), true, 3, 5)  // "ab"
-	anchor := leaf(Symbol(1), true, 5, 8)       // "anc" (conceptually)
-	itemAfter := leaf(Symbol(1), true, 8, 11)   // "hor" (conceptually)
-	itemFar := leaf(Symbol(1), true, 12, 14)    // far away
+	itemBefore := leaf(Symbol(1), true, 3, 5) // "ab"
+	anchor := leaf(Symbol(1), true, 5, 8)     // "anc" (conceptually)
+	itemAfter := leaf(Symbol(1), true, 8, 11) // "hor" (conceptually)
+	itemFar := leaf(Symbol(1), true, 12, 14)  // far away
 
 	captures := []QueryCapture{
 		{Name: "items", Node: itemBefore},
@@ -2989,5 +3398,122 @@ func TestSelectAdjacentDoesNotFilterMatch(t *testing.T) {
 
 	if !q.matchesPredicates(preds, captures, nil, source) {
 		t.Fatal("#select-adjacent! should not cause match rejection")
+	}
+}
+
+// --------------------------------------------------------------------------
+// Multi-sibling grouping pattern tests
+// --------------------------------------------------------------------------
+
+func TestGroupingSingleElementUnchanged(t *testing.T) {
+	lang := queryTestLanguage()
+	q, err := NewQuery(`((identifier) @name)`, lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if q.PatternCount() != 1 {
+		t.Fatalf("PatternCount: got %d, want 1", q.PatternCount())
+	}
+	steps := q.patterns[0].steps
+	// Single-element group should NOT insert wildcard root.
+	if len(steps) != 1 {
+		t.Fatalf("steps: got %d, want 1 (no wildcard root for single element)", len(steps))
+	}
+	if steps[0].symbol != Symbol(1) {
+		t.Fatalf("symbol: got %d, want 1 (identifier)", steps[0].symbol)
+	}
+	if steps[0].depth != 0 {
+		t.Fatalf("depth: got %d, want 0", steps[0].depth)
+	}
+}
+
+func TestGroupingMultiSiblingInsertsWildcard(t *testing.T) {
+	lang := queryTestLanguage()
+	// Two siblings in a group — should insert wildcard root.
+	q, err := NewQuery(`((identifier) (number))`, lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if q.PatternCount() != 1 {
+		t.Fatalf("PatternCount: got %d, want 1", q.PatternCount())
+	}
+	steps := q.patterns[0].steps
+	if len(steps) != 3 {
+		t.Fatalf("steps: got %d, want 3 (wildcard + identifier + number)", len(steps))
+	}
+	// Step 0: wildcard root at depth 0.
+	if steps[0].symbol != 0 || steps[0].isNamed {
+		t.Fatalf("step 0: got symbol=%d isNamed=%v, want wildcard (0, false)", steps[0].symbol, steps[0].isNamed)
+	}
+	if steps[0].depth != 0 {
+		t.Fatalf("step 0 depth: got %d, want 0", steps[0].depth)
+	}
+	// Step 1: identifier at depth 1.
+	if steps[1].symbol != Symbol(1) {
+		t.Fatalf("step 1 symbol: got %d, want 1 (identifier)", steps[1].symbol)
+	}
+	if steps[1].depth != 1 {
+		t.Fatalf("step 1 depth: got %d, want 1", steps[1].depth)
+	}
+	// Step 2: number at depth 1.
+	if steps[2].symbol != Symbol(2) {
+		t.Fatalf("step 2 symbol: got %d, want 2 (number)", steps[2].symbol)
+	}
+	if steps[2].depth != 1 {
+		t.Fatalf("step 2 depth: got %d, want 1", steps[2].depth)
+	}
+}
+
+func TestGroupingMultiSiblingWithCaptures(t *testing.T) {
+	lang := queryTestLanguage()
+	q, err := NewQuery(`((identifier) @id (number) @num)`, lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	steps := q.patterns[0].steps
+	if len(steps) != 3 {
+		t.Fatalf("steps: got %d, want 3", len(steps))
+	}
+	// Verify wildcard root.
+	if steps[0].symbol != 0 {
+		t.Fatalf("step 0 symbol: got %d, want 0 (wildcard)", steps[0].symbol)
+	}
+	// Verify captures.
+	if steps[1].captureID < 0 {
+		t.Fatal("step 1: expected capture on identifier")
+	}
+	if steps[2].captureID < 0 {
+		t.Fatal("step 2: expected capture on number")
+	}
+}
+
+func TestGroupingTripleParens(t *testing.T) {
+	lang := queryTestLanguage()
+	// Triple parens like git_rebase uses: (((a) @cap (b) @cap2) (#set! ...))
+	q, err := NewQuery(`(((identifier) @id (number) @num) (#set! "priority" 100))`, lang)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if q.PatternCount() != 1 {
+		t.Fatalf("PatternCount: got %d, want 1", q.PatternCount())
+	}
+	steps := q.patterns[0].steps
+	if len(steps) != 3 {
+		t.Fatalf("steps: got %d, want 3", len(steps))
+	}
+	// Wildcard root at depth 0.
+	if steps[0].symbol != 0 {
+		t.Fatalf("step 0 symbol: got %d, want 0 (wildcard)", steps[0].symbol)
+	}
+	if steps[0].depth != 0 {
+		t.Fatalf("step 0 depth: got %d, want 0", steps[0].depth)
+	}
+	// Captures present.
+	if steps[1].captureID < 0 || steps[2].captureID < 0 {
+		t.Fatal("expected captures on both children")
+	}
+	// Predicate present.
+	if len(q.patterns[0].predicates) != 1 {
+		t.Fatalf("predicates: got %d, want 1", len(q.patterns[0].predicates))
 	}
 }

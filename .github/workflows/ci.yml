@@ -2,11 +2,28 @@ name: ci
 
 on:
   push:
+    branches: [main, fix/top50-parity-burndown]
+    paths-ignore:
+      - '*.md'
+      - 'LICENSE'
+      - 'docs/**'
+      - '.github/*.md'
   pull_request:
+    paths-ignore:
+      - '*.md'
+      - 'LICENSE'
+      - 'docs/**'
+      - '.github/*.md'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -34,8 +51,9 @@ jobs:
           name: parity-log
           path: parity.log
 
-  parity-cgo:
+  freshness:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -43,16 +61,107 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: CGo Parity Gate (Lock-Backed Set + Issue Repros + GLR Canary)
+      - name: Check linguist_gen.go freshness
+        run: |
+          set -euo pipefail
+          # Regenerate using the vendored languages.yml to keep the check
+          # deterministic (not affected by upstream linguist changes).
+          go run ./cmd/gen_linguist \
+            -manifest grammars/languages.manifest \
+            -languages-yml grammars/languages.yml \
+            -out grammars/linguist_gen.go
+          if ! git diff --exit-code grammars/linguist_gen.go; then
+            echo "::error::grammars/linguist_gen.go is stale. Regenerate:"
+            echo "::error::  go run ./cmd/gen_linguist -manifest grammars/languages.manifest -languages-yml grammars/languages.yml"
+            exit 1
+          fi
+
+      - name: Check grammar blob coverage matches lock
+        run: |
+          set -euo pipefail
+
+          # Extract grammar names from lock (skip comments and blanks).
+          lock_names=$(grep -v '^#' grammars/languages.lock | grep -v '^$' | awk '{print $1}' | sort)
+          lock_count=$(echo "$lock_names" | wc -l)
+
+          # Extract grammar names from .bin files.
+          blob_names=$(ls grammars/grammar_blobs/*.bin 2>/dev/null | xargs -I{} basename {} .bin | sort)
+          blob_count=$(echo "$blob_names" | wc -l)
+
+          # Extract grammar names from embedded_grammars_gen.go (blob references).
+          gen_names=$(grep -oP 'loadEmbeddedLanguage\("\K[^"]+(?=\.bin"\))' grammars/embedded_grammars_gen.go | sort)
+          gen_count=$(echo "$gen_names" | wc -l)
+
+          echo "lock: $lock_count | blobs: $blob_count | gen functions: $gen_count"
+
+          # Three-way consistency: lock ↔ blobs ↔ gen functions.
+          missing_blobs=$(comm -23 <(echo "$lock_names") <(echo "$blob_names"))
+          if [ -n "$missing_blobs" ]; then
+            echo "::error::Grammar blobs missing for lock entries: $missing_blobs"
+            echo "Run: go run ./cmd/ts2go -manifest grammars/languages.lock -outdir ./grammars -package grammars"
+            exit 1
+          fi
+
+          orphan_blobs=$(comm -13 <(echo "$lock_names") <(echo "$blob_names"))
+          if [ -n "$orphan_blobs" ]; then
+            echo "::warning::Orphan blobs not in lock file: $orphan_blobs"
+          fi
+
+          missing_gen=$(comm -23 <(echo "$lock_names") <(echo "$gen_names"))
+          if [ -n "$missing_gen" ]; then
+            echo "::error::embedded_grammars_gen.go missing functions for: $missing_gen"
+            echo "Run: go run ./cmd/ts2go -manifest grammars/languages.lock -outdir ./grammars -package grammars"
+            exit 1
+          fi
+
+          if [ "$blob_count" -ne "$lock_count" ] || [ "$gen_count" -ne "$lock_count" ]; then
+            echo "::error::Count mismatch — lock: $lock_count, blobs: $blob_count, gen: $gen_count"
+            exit 1
+          fi
+
+  parity-cgo:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: CGo Structural Parity Gate (Fresh + No Errors + Issue3)
         run: |
           cd cgo_harness
           go test . -tags treesitter_c_parity \
-            -run '^TestParityFreshParse$|^TestParityHasNoErrors$|^TestParityIssue3Repros$|^TestParityGLRCanaryGo$' \
+            -run '^TestParityFreshParse$|^TestParityHasNoErrors$|^TestParityIssue3Repros$' \
+            -count=1 -v
+
+      - name: CGo Structural Parity Gate (Incremental + GLR)
+        run: |
+          cd cgo_harness
+          go test . -tags treesitter_c_parity \
+            -run '^TestParityIncrementalParse$|^TestParityGLRCanaryGo$|^TestParityGLRCanarySet$|^TestParityGLRCapPressureTopLanguages$|^TestParityGateCoverageRatchet$' \
+            -count=1 -v
+
+      - name: CGo Structural Parity Gate (Corpus)
+        run: |
+          cd cgo_harness
+          go test . -tags treesitter_c_parity \
+            -run '^TestParityCorpusFreshParse$' \
+            -count=1 -v
+
+      - name: CGo Highlight + YAML Parity Gate
+        run: |
+          cd cgo_harness
+          go test . -tags treesitter_c_parity \
+            -run '^TestParityHighlight$|^TestParityHighlightAllGrammars$|^TestParityYAMLCorpus$|^TestParityYAMLCorpusSummural$|^TestParityYAMLCorpusSummary$' \
             -count=1 -v
 
   perf-regression:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -65,7 +174,8 @@ jobs:
       - name: Benchmark Base vs Head
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PERF_CORRECTNESS_BASE_SHA: 7a29f591d7fcc54b3d0639b3e38a1bacd8fcb386
+          PERF_LEGACY_BASE_SHA: 7a29f591d7fcc54b3d0639b3e38a1bacd8fcb386
+          PERF_BENCH_CONTRACT_BASE_SHA: 4dc6480f7f26809877d3a4937e582f975794891a
         run: |
           set -euo pipefail
 
@@ -75,17 +185,22 @@ jobs:
           mkdir -p "${OUT_DIR}"
 
           GATE_BASE_SHA="${BASE_SHA}"
-          if git fetch --no-tags origin "${PERF_CORRECTNESS_BASE_SHA}" >/dev/null 2>&1; then
-            if ! git merge-base --is-ancestor "${PERF_CORRECTNESS_BASE_SHA}" "${BASE_SHA}"; then
-              GATE_BASE_SHA="${PERF_CORRECTNESS_BASE_SHA}"
+          if git fetch --no-tags origin "${PERF_BENCH_CONTRACT_BASE_SHA}" >/dev/null 2>&1; then
+            if ! git merge-base --is-ancestor "${PERF_BENCH_CONTRACT_BASE_SHA}" "${BASE_SHA}"; then
+              GATE_BASE_SHA="${PERF_BENCH_CONTRACT_BASE_SHA}"
+            fi
+          fi
+          if [ "${GATE_BASE_SHA}" = "${BASE_SHA}" ] && git fetch --no-tags origin "${PERF_LEGACY_BASE_SHA}" >/dev/null 2>&1; then
+            if ! git merge-base --is-ancestor "${PERF_LEGACY_BASE_SHA}" "${BASE_SHA}"; then
+              GATE_BASE_SHA="${PERF_LEGACY_BASE_SHA}"
             fi
           fi
           echo "perf gate base: ${GATE_BASE_SHA} (pr base: ${BASE_SHA})"
 
-          # Legacy perf-correctness baseline can truncate full-parse benchmarks at
-          # default node budget. Keep base/head benchmark settings aligned.
+          # The legacy base needs a higher node budget for comparable full-parse
+          # results. The benchmark-contract floor already uses current settings.
           BENCH_NODE_SCALE=""
-          if [ "${GATE_BASE_SHA}" = "${PERF_CORRECTNESS_BASE_SHA}" ]; then
+          if [ "${GATE_BASE_SHA}" = "${PERF_LEGACY_BASE_SHA}" ]; then
             BENCH_NODE_SCALE="3"
             echo "perf gate: using GOT_PARSE_NODE_LIMIT_SCALE=${BENCH_NODE_SCALE} for benchmark comparability"
           fi
@@ -144,6 +259,8 @@ jobs:
               > "${OUT_DIR}/head_rss_bench.txt" 2> "${OUT_DIR}/head_rss_time.txt"
           fi
 
+          # benchgate applies a minimum +1 alloc/op floor for low-allocation
+          # benches, so we can keep strict ratio thresholds.
           go run ./cmd/benchgate \
             -base "${OUT_DIR}/base.txt" \
             -head "${OUT_DIR}/head.txt" \

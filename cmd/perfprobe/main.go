@@ -93,10 +93,11 @@ func main() {
 	maxStacksSeen := 0
 	var entryScratchPeak uint64
 	state := uint32(seed)
+	scratch := make([]byte, len(src))
 	for i := 0; i < edits; i++ {
 		state = state*1664525 + 1013904223
 		site := sites[int(state%uint32(len(sites)))]
-		toggleDigitAt(src, site.offset)
+		next := prepareEditedBenchmarkSource(src, scratch, site.offset)
 
 		edit := gotreesitter.InputEdit{
 			StartByte:   uint32(site.offset),
@@ -112,7 +113,7 @@ func main() {
 		editTotalNs += editNs
 
 		old := tree
-		tree, prof, err := parser.ParseIncrementalProfiled(src, tree)
+		tree, prof, err := parser.ParseIncrementalProfiled(next, tree)
 		if err != nil {
 			fatalf("incremental parse failed at edit %d: %v", i, err)
 		}
@@ -131,6 +132,7 @@ func main() {
 		if old != tree {
 			old.Release()
 		}
+		src, scratch = next, src
 	}
 	measuredTotalNs := editTotalNs + reuseTotalNs + parseTotalNs
 
@@ -244,6 +246,15 @@ func toggleDigitAt(src []byte, offset int) {
 		return
 	}
 	src[offset] = '0'
+}
+
+func prepareEditedBenchmarkSource(cur, scratch []byte, offset int) []byte {
+	if len(scratch) != len(cur) {
+		scratch = make([]byte, len(cur))
+	}
+	copy(scratch, cur)
+	toggleDigitAt(scratch, offset)
+	return scratch
 }
 
 func meanInt64(xs []int64) float64 {

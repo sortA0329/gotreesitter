@@ -1,8 +1,11 @@
 package gotreesitter
 
+import "unsafe"
+
 const (
-	defaultGSSNodeSlabCap = 4 * 1024
-	maxRetainedGSSNodes   = 256 * 1024
+	defaultGSSNodeSlabCap   = 4 * 1024
+	fullParseGSSNodeSlabCap = 32 * 1024
+	maxRetainedGSSNodes     = 256 * 1024
 )
 
 type gssNode struct {
@@ -19,9 +22,16 @@ type gssStack struct {
 }
 
 type gssScratch struct {
-	slabs      []gssNodeSlab
-	slabCursor int
-	skipClear  bool
+	slabs             []gssNodeSlab
+	slabCursor        int
+	initialCap        int
+	skipClear         bool
+	usedTotal         int
+	allocatedBytes    int64
+	singleStackMode   bool
+	singleStackAllocs uint64
+	multiStackAllocs  uint64
+	audit             *runtimeAudit
 }
 
 type gssNodeSlab struct {
@@ -74,6 +84,37 @@ func gssEntryHash(prev uint64, entry stackEntry) uint64 {
 	h ^= flags
 	h *= gssHashPrime
 	return h
+}
+
+func gssNodeHash(n *gssNode) uint64 {
+	if n == nil {
+		return gssHashSeed
+	}
+	if n.hash != 0 {
+		return n.hash
+	}
+
+	var local [32]*gssNode
+	pending := local[:0]
+	for cur := n; cur != nil && cur.hash == 0; cur = cur.prev {
+		pending = append(pending, cur)
+	}
+	prevHash := gssHashSeed
+	if len(pending) < n.depth {
+		prev := pending[len(pending)-1].prev
+		if prev != nil {
+			prevHash = prev.hash
+		}
+	}
+	for i := len(pending) - 1; i >= 0; i-- {
+		h := gssEntryHash(prevHash, pending[i].entry)
+		if h == 0 {
+			h = 1
+		}
+		pending[i].hash = h
+		prevHash = h
+	}
+	return n.hash
 }
 
 func newGSSStack(initial StateID, scratch *gssScratch) gssStack {
@@ -173,17 +214,28 @@ func (s gssStack) materialize(dst []stackEntry) []stackEntry {
 }
 
 func (s *gssScratch) allocNode(entry stackEntry, prev *gssNode, depth int) *gssNode {
-	prevHash := gssHashSeed
-	if prev != nil {
-		prevHash = prev.hash
+	hash := uint64(0)
+	if s == nil || !s.singleStackMode {
+		prevHash := gssHashSeed
+		if prev != nil {
+			prevHash = gssNodeHash(prev)
+		}
+		hash = gssEntryHash(prevHash, entry)
+		if hash == 0 {
+			hash = 1
+		}
 	}
-	hash := gssEntryHash(prevHash, entry)
 
 	if s == nil {
 		return &gssNode{entry: entry, prev: prev, depth: depth, hash: hash}
 	}
 	if len(s.slabs) == 0 {
-		s.slabs = append(s.slabs, gssNodeSlab{data: make([]gssNode, defaultGSSNodeSlabCap)})
+		capacity := defaultGSSNodeSlabCap
+		if s.initialCap > capacity {
+			capacity = s.initialCap
+		}
+		s.slabs = append(s.slabs, gssNodeSlab{data: make([]gssNode, capacity)})
+		s.allocatedBytes += gssNodeBytesForCap(capacity)
 		s.slabCursor = 0
 	}
 	if s.slabCursor < 0 || s.slabCursor >= len(s.slabs) {
@@ -200,6 +252,7 @@ func (s *gssScratch) allocNode(entry stackEntry, prev *gssNode, depth int) *gssN
 				capacity = defaultGSSNodeSlabCap
 			}
 			s.slabs = append(s.slabs, gssNodeSlab{data: make([]gssNode, capacity)})
+			s.allocatedBytes += gssNodeBytesForCap(capacity)
 		}
 		slab := &s.slabs[i]
 		if slab.used >= len(slab.data) {
@@ -207,19 +260,33 @@ func (s *gssScratch) allocNode(entry stackEntry, prev *gssNode, depth int) *gssN
 		}
 		idx := slab.used
 		slab.used++
+		s.usedTotal++
 		s.slabCursor = i
+		if s.singleStackMode {
+			s.singleStackAllocs++
+		} else {
+			s.multiStackAllocs++
+		}
 		n := &slab.data[idx]
 		n.entry = entry
 		n.prev = prev
 		n.depth = depth
 		n.hash = hash
+		if s.audit != nil {
+			s.audit.recordGSSAlloc(n)
+		}
 		return n
 	}
 }
 
 func (s *gssScratch) reset() {
 	if len(s.slabs) == 0 {
+		s.singleStackMode = false
+		s.singleStackAllocs = 0
+		s.multiStackAllocs = 0
 		s.skipClear = false
+		s.allocatedBytes = 0
+		s.audit = nil
 		return
 	}
 	total := 0
@@ -248,6 +315,12 @@ func (s *gssScratch) reset() {
 		}
 		s.slabCursor = 0
 		s.skipClear = false
+		s.usedTotal = 0
+		s.singleStackMode = false
+		s.singleStackAllocs = 0
+		s.multiStackAllocs = 0
+		s.audit = nil
+		s.recomputeAllocatedBytes()
 		return
 	}
 	for i := range s.slabs {
@@ -257,6 +330,12 @@ func (s *gssScratch) reset() {
 	}
 	s.slabCursor = 0
 	s.skipClear = false
+	s.usedTotal = 0
+	s.singleStackMode = false
+	s.singleStackAllocs = 0
+	s.multiStackAllocs = 0
+	s.audit = nil
+	s.recomputeAllocatedBytes()
 }
 
 func (s *glrStack) toGSS(scratch *gssScratch) gssStack {
@@ -264,4 +343,22 @@ func (s *glrStack) toGSS(scratch *gssScratch) gssStack {
 		return s.gss.clone()
 	}
 	return buildGSSStack(s.entries, scratch)
+}
+
+func gssNodeBytesForCap(n int) int64 {
+	if n <= 0 {
+		return 0
+	}
+	return int64(n) * int64(unsafe.Sizeof(gssNode{}))
+}
+
+func (s *gssScratch) recomputeAllocatedBytes() {
+	if s == nil {
+		return
+	}
+	var total int64
+	for i := range s.slabs {
+		total += gssNodeBytesForCap(len(s.slabs[i].data))
+	}
+	s.allocatedBytes = total
 }

@@ -4,12 +4,12 @@ package grammars
 
 func init() {
 	Register(LangEntry{
-		Name:           "move",
-		Extensions:     []string{".move"},
-		Language:       MoveLanguage,
-		HighlightQuery: moveHighlightQuery,
+		Name:               "move",
+		Extensions:         []string{".move"},
+		Language:           MoveLanguage,
+		HighlightQuery:     moveHighlightQuery,
 		TokenSourceFactory: defaultTokenSourceFactory("move"),
 	})
 }
 
-const moveHighlightQuery = ""
+const moveHighlightQuery = "\"module\" @keyword\n(hex_address) @number\n(identifier) @type\n"

@@ -2,6 +2,19 @@ package gotreesitter
 
 import "testing"
 
+func TestParserLanguage(t *testing.T) {
+	lang := buildArithmeticLanguage()
+	parser := NewParser(lang)
+	if got := parser.Language(); got != lang {
+		t.Fatalf("Language(): got %p want %p", got, lang)
+	}
+
+	var nilParser *Parser
+	if got := nilParser.Language(); got != nil {
+		t.Fatalf("nil parser Language(): got %v want nil", got)
+	}
+}
+
 func TestParseWithProfilingFullParseSignalsUnavailable(t *testing.T) {
 	lang := buildArithmeticLanguage()
 	parser := NewParser(lang)

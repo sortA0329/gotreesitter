@@ -133,22 +133,57 @@ func init() {
 		"yaml":            YamlExternalScanner{},
 	}
 
+	// External lex states tables extracted from ts_external_scanner_states
+	// in each grammar's parser.c. These provide precise external token
+	// validity per parser state, matching C tree-sitter behavior.
+	externalLexStates := map[string][][]bool{
+		// Bash: generated from tree-sitter-bash ts_external_scanner_states.
+		"bash": bashExternalLexStates,
+		// SCSS: 6 external lex states, 4 external tokens
+		// [0]=_descendant_operator [1]=_pseudo_class_selector_colon
+		// [2]=__error_recovery [3]=_concat
+		"scss": {
+			{false, false, false, false}, // state 0: no external tokens
+			{true, true, true, true},     // state 1: all tokens
+			{false, true, false, false},  // state 2: colon only
+			{true, true, false, true},    // state 3: desc_op, colon, concat
+			{true, true, false, false},   // state 4: desc_op, colon
+			{false, false, false, true},  // state 5: concat only
+		},
+		// YAML: generated from tree-sitter-yaml ts_external_scanner_states.
+		"yaml": yamlExternalLexStates,
+	}
+
 	// Register scanners in the embedded loader's registry so that direct
 	// calls like JavascriptLanguage() (which bypass the registry) also
 	// get external scanners attached.
 	for name, s := range attachments {
 		RegisterExternalScanner(name, s)
 	}
+	for name, els := range externalLexStates {
+		RegisterExternalLexStates(name, els)
+	}
 
 	for i := range registry {
-		if scanner, ok := attachments[registry[i].Name]; ok {
-			orig := registry[i].Language
-			s := scanner // capture for closure
-			registry[i].Language = func() *gotreesitter.Language {
-				lang := orig()
+		scanner, hasScanner := attachments[registry[i].Name]
+		els, hasELS := externalLexStates[registry[i].Name]
+		if !hasScanner && !hasELS {
+			continue
+		}
+		orig := registry[i].Language
+		s := scanner // capture for closure
+		e := els
+		hs := hasScanner
+		he := hasELS
+		registry[i].Language = func() *gotreesitter.Language {
+			lang := orig()
+			if hs {
 				lang.ExternalScanner = s
-				return lang
 			}
+			if he {
+				lang.ExternalLexStates = e
+			}
+			return lang
 		}
 	}
 }

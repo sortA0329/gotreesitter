@@ -58,6 +58,7 @@ type GoTokenSource struct {
 	interpretedStringContentSymbol    gotreesitter.Symbol
 	rawStringQuoteSymbol              gotreesitter.Symbol
 	rawStringContentSymbol            gotreesitter.Symbol
+	escapeSequenceSymbol              gotreesitter.Symbol
 
 	// Incremental position tracking for offsetToPoint.
 	// Instead of scanning from byte 0 every call (O(n²) over a file),
@@ -84,6 +85,7 @@ type goLexerTables struct {
 	interpretedStringContentSymbol    gotreesitter.Symbol
 	rawStringQuoteSymbol              gotreesitter.Symbol
 	rawStringContentSymbol            gotreesitter.Symbol
+	escapeSequenceSymbol              gotreesitter.Symbol
 	keywordNewSymbol                  gotreesitter.Symbol
 	keywordMakeSymbol                 gotreesitter.Symbol
 	keywordNilSymbol                  gotreesitter.Symbol
@@ -141,6 +143,14 @@ func NewGoTokenSourceOrEOF(src []byte, lang *gotreesitter.Language) gotreesitter
 	return ts
 }
 
+// RebuildTokenSource constructs a fresh Go token source for the given source.
+func (ts *GoTokenSource) RebuildTokenSource(src []byte, lang *gotreesitter.Language) (gotreesitter.TokenSource, error) {
+	if lang == nil {
+		lang = ts.lang
+	}
+	return NewGoTokenSource(src, lang)
+}
+
 // Reset reinitializes this token source for a new source buffer.
 func (ts *GoTokenSource) Reset(src []byte) {
 	ts.src = src
@@ -150,6 +160,12 @@ func (ts *GoTokenSource) Reset(src []byte) {
 	ts.lastRow = 0
 	ts.lastCol = 0
 	ts.initScanner(0)
+}
+
+// SupportsIncrementalReuse reports that GoTokenSource preserves stable token
+// boundaries across edits and supports deterministic SkipToByte* behavior.
+func (ts *GoTokenSource) SupportsIncrementalReuse() bool {
+	return true
 }
 
 func (ts *GoTokenSource) initScanner(base int) {
@@ -273,11 +289,15 @@ func (ts *GoTokenSource) Next() gotreesitter.Token {
 			if lit == "\n" {
 				// Auto-inserted semicolon: consume the newline byte when present
 				// and stay zero-width at EOF insertion.
+				//
+				// The Go grammar exposes an invisible source_file_token1 alias for
+				// some top-level separator positions, but using that alias for every
+				// inserted newline semicolon breaks statement-list parsing inside
+				// function bodies (for example real-corpus casgstatus-style blocks).
+				// Emit the regular semicolon token here; the parser accepts it in
+				// both top-level and statement contexts.
 				if offset < 0 || offset > len(ts.src) {
 					continue
-				}
-				if ts.autoSemicolonSymbol != 0 {
-					sym = ts.autoSemicolonSymbol
 				}
 				endOffset := offset
 				endPoint := startPoint
@@ -488,34 +508,103 @@ func (ts *GoTokenSource) splitString(offset int, lit string) gotreesitter.Token 
 		EndPoint:   ts.offsetToPoint(openEnd),
 	}
 
-	// Content (between quotes, may be empty)
-	contentStart := offset + 1
-	contentEnd := offset + len(lit) - 1
-	if contentEnd > contentStart {
-		content := lit[1 : len(lit)-1]
+	terminated := len(lit) >= 2 && lit[len(lit)-1] == '"'
+	contentEnd := len(lit)
+	if terminated {
+		contentEnd--
+	}
+	if contentEnd > 1 {
+		ts.splitInterpretedStringContent(offset+1, lit[1:contentEnd])
+	}
+
+	if terminated {
+		// Close quote
+		closeStart := offset + len(lit) - 1
+		closeEnd := offset + len(lit)
 		ts.pending = append(ts.pending, gotreesitter.Token{
-			Symbol:     ts.interpretedStringContentSymbol,
-			Text:       content,
-			StartByte:  uint32(contentStart),
-			EndByte:    uint32(contentEnd),
-			StartPoint: ts.offsetToPoint(contentStart),
-			EndPoint:   ts.offsetToPoint(contentEnd),
+			Symbol:     ts.interpretedStringCloseQuoteSymbol,
+			Text:       "\"",
+			StartByte:  uint32(closeStart),
+			EndByte:    uint32(closeEnd),
+			StartPoint: ts.offsetToPoint(closeStart),
+			EndPoint:   ts.offsetToPoint(closeEnd),
 		})
 	}
 
-	// Close quote
-	closeStart := offset + len(lit) - 1
-	closeEnd := offset + len(lit)
-	ts.pending = append(ts.pending, gotreesitter.Token{
-		Symbol:     ts.interpretedStringCloseQuoteSymbol,
-		Text:       "\"",
-		StartByte:  uint32(closeStart),
-		EndByte:    uint32(closeEnd),
-		StartPoint: ts.offsetToPoint(closeStart),
-		EndPoint:   ts.offsetToPoint(closeEnd),
-	})
-
 	return openTok
+}
+
+func (ts *GoTokenSource) splitInterpretedStringContent(contentOffset int, content string) {
+	if len(content) == 0 {
+		return
+	}
+	segmentStart := 0
+	flushContent := func(end int) {
+		if end <= segmentStart {
+			return
+		}
+		startByte := contentOffset + segmentStart
+		endByte := contentOffset + end
+		ts.pending = append(ts.pending, gotreesitter.Token{
+			Symbol:     ts.interpretedStringContentSymbol,
+			Text:       content[segmentStart:end],
+			StartByte:  uint32(startByte),
+			EndByte:    uint32(endByte),
+			StartPoint: ts.offsetToPoint(startByte),
+			EndPoint:   ts.offsetToPoint(endByte),
+		})
+	}
+
+	for i := 0; i < len(content); {
+		if content[i] != '\\' {
+			i++
+			continue
+		}
+		flushContent(i)
+		escLen := goStringEscapeLen(content[i:])
+		startByte := contentOffset + i
+		endByte := startByte + escLen
+		ts.pending = append(ts.pending, gotreesitter.Token{
+			Symbol:     ts.escapeSequenceSymbol,
+			Text:       content[i : i+escLen],
+			StartByte:  uint32(startByte),
+			EndByte:    uint32(endByte),
+			StartPoint: ts.offsetToPoint(startByte),
+			EndPoint:   ts.offsetToPoint(endByte),
+		})
+		i += escLen
+		segmentStart = i
+	}
+	flushContent(len(content))
+}
+
+func goStringEscapeLen(s string) int {
+	if len(s) < 2 || s[0] != '\\' {
+		return 1
+	}
+	switch s[1] {
+	case 'a', 'b', 'f', 'n', 'r', 't', 'v', '\\', '\'', '"':
+		return 2
+	case 'x':
+		if len(s) >= 4 {
+			return 4
+		}
+	case 'u':
+		if len(s) >= 6 {
+			return 6
+		}
+	case 'U':
+		if len(s) >= 10 {
+			return 10
+		}
+	default:
+		if s[1] >= '0' && s[1] <= '7' {
+			if len(s) >= 4 {
+				return 4
+			}
+		}
+	}
+	return 2
 }
 
 // splitRawString handles raw string literals (`content`).
@@ -533,9 +622,15 @@ func (ts *GoTokenSource) splitRawString(offset int, lit string) gotreesitter.Tok
 
 	// Content
 	contentStart := offset + 1
-	contentEnd := offset + len(lit) - 1
+	terminated := len(lit) >= 2 && lit[len(lit)-1] == '`'
+	contentEnd := offset + len(lit)
+	contentEndIdx := len(lit)
+	if terminated {
+		contentEnd--
+		contentEndIdx--
+	}
 	if contentEnd > contentStart {
-		content := lit[1 : len(lit)-1]
+		content := lit[1:contentEndIdx]
 		ts.pending = append(ts.pending, gotreesitter.Token{
 			Symbol:     ts.rawStringContentSymbol,
 			Text:       content,
@@ -546,17 +641,19 @@ func (ts *GoTokenSource) splitRawString(offset int, lit string) gotreesitter.Tok
 		})
 	}
 
-	// Close backtick
-	closeStart := offset + len(lit) - 1
-	closeEnd := offset + len(lit)
-	ts.pending = append(ts.pending, gotreesitter.Token{
-		Symbol:     ts.rawStringQuoteSymbol,
-		Text:       "`",
-		StartByte:  uint32(closeStart),
-		EndByte:    uint32(closeEnd),
-		StartPoint: ts.offsetToPoint(closeStart),
-		EndPoint:   ts.offsetToPoint(closeEnd),
-	})
+	if terminated {
+		// Close backtick
+		closeStart := offset + len(lit) - 1
+		closeEnd := offset + len(lit)
+		ts.pending = append(ts.pending, gotreesitter.Token{
+			Symbol:     ts.rawStringQuoteSymbol,
+			Text:       "`",
+			StartByte:  uint32(closeStart),
+			EndByte:    uint32(closeEnd),
+			StartPoint: ts.offsetToPoint(closeStart),
+			EndPoint:   ts.offsetToPoint(closeEnd),
+		})
+	}
 
 	return openTok
 }
@@ -605,7 +702,7 @@ func (ts *GoTokenSource) offsetToPoint(offset int) gotreesitter.Point {
 			row++
 			col = 0
 		} else {
-			col++
+			col += uint32(size)
 		}
 		i += size
 	}
@@ -685,6 +782,7 @@ func (ts *GoTokenSource) buildMaps() error {
 	ts.interpretedStringOpenQuoteSymbol = tokenSymAt("\"", 0)
 	ts.interpretedStringCloseQuoteSymbol = tokenSymAt("\"", 1)
 	ts.interpretedStringContentSymbol = tokenSym("interpreted_string_literal_content")
+	ts.escapeSequenceSymbol = tokenSym("escape_sequence")
 
 	symbolMap := map[token.Token]gotreesitter.Symbol{
 		token.SEMICOLON:      tokenSym(";"),
@@ -799,6 +897,7 @@ func (ts *GoTokenSource) buildMaps() error {
 		interpretedStringContentSymbol:    ts.interpretedStringContentSymbol,
 		rawStringQuoteSymbol:              ts.rawStringQuoteSymbol,
 		rawStringContentSymbol:            ts.rawStringContentSymbol,
+		escapeSequenceSymbol:              ts.escapeSequenceSymbol,
 		keywordNewSymbol:                  ts.keywordNewSymbol,
 		keywordMakeSymbol:                 ts.keywordMakeSymbol,
 		keywordNilSymbol:                  ts.keywordNilSymbol,
@@ -832,6 +931,7 @@ func (ts *GoTokenSource) applyLexerTables(tables *goLexerTables) {
 	ts.interpretedStringContentSymbol = tables.interpretedStringContentSymbol
 	ts.rawStringQuoteSymbol = tables.rawStringQuoteSymbol
 	ts.rawStringContentSymbol = tables.rawStringContentSymbol
+	ts.escapeSequenceSymbol = tables.escapeSequenceSymbol
 	ts.keywordNewSymbol = tables.keywordNewSymbol
 	ts.keywordMakeSymbol = tables.keywordMakeSymbol
 	ts.keywordNilSymbol = tables.keywordNilSymbol

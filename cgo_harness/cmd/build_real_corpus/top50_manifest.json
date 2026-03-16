@@ -1,0 +1,138 @@
+{
+  "name": "top50",
+  "languages": [
+    "bash",
+    "c",
+    "cpp",
+    "c_sharp",
+    "cmake",
+    "css",
+    "dart",
+    "elixir",
+    "elm",
+    "erlang",
+    "go",
+    "gomod",
+    "graphql",
+    "haskell",
+    "hcl",
+    "html",
+    "ini",
+    "java",
+    "javascript",
+    "json",
+    "json5",
+    "julia",
+    "kotlin",
+    "lua",
+    "make",
+    "markdown",
+    "nix",
+    "objc",
+    "ocaml",
+    "perl",
+    "php",
+    "powershell",
+    "python",
+    "r",
+    "ruby",
+    "rust",
+    "scala",
+    "scss",
+    "sql",
+    "svelte",
+    "swift",
+    "toml",
+    "tsx",
+    "typescript",
+    "xml",
+    "yaml",
+    "zig",
+    "awk",
+    "clojure",
+    "d"
+  ],
+  "sources": [
+    {
+      "language": "clojure",
+      "repo_url": "https://github.com/metabase/metabase",
+      "commit": "5cd8e165fa88b34e82d2e5cafee478715b4e53a5",
+      "subdir": "src"
+    },
+    {
+      "language": "d",
+      "repo_url": "https://github.com/dlang/phobos",
+      "commit": "708ffe784dec2dd0c77e997a28abd4f8b2bb1e2d"
+    },
+    {
+      "language": "gomod",
+      "repo_url": "https://github.com/kubernetes/client-go",
+      "commit": "32a3ac47cf42f96666b0a7360c433b059eb52c65"
+    },
+    {
+      "language": "graphql",
+      "repo_url": "https://github.com/hasura/graphql-engine",
+      "commit": "d769f172d6ba43ecb0254c6be84bb40498608b3d"
+    },
+    {
+      "language": "haskell",
+      "repo_url": "https://github.com/hasura/graphql-engine",
+      "commit": "d769f172d6ba43ecb0254c6be84bb40498608b3d"
+    },
+    {
+      "language": "julia",
+      "repo_url": "https://github.com/JuliaLang/julia",
+      "commit": "a176dec25429b497e304120acaff491639edab1b"
+    },
+    {
+      "language": "objc",
+      "repo_url": "https://github.com/AFNetworking/AFNetworking",
+      "commit": "d9f589cc2c1fe9d55eb5eea00558010afea7a41e"
+    },
+    {
+      "language": "ocaml",
+      "repo_url": "https://github.com/ocaml/ocaml",
+      "commit": "7c51f06c0a5d8ef56dfdb483bc0e900045ef7d79"
+    },
+    {
+      "language": "powershell",
+      "repo_url": "https://github.com/PowerShell/PowerShell",
+      "commit": "e170b7210a375b2ed75f3d2e5e41772858b97679"
+    },
+    {
+      "language": "ruby",
+      "repo_url": "https://github.com/rails/rails",
+      "commit": "0209a70c57ebef4fb1e271444ec7e62794932db3"
+    },
+    {
+      "language": "swift",
+      "repo_url": "https://github.com/apple/swift-collections",
+      "commit": "6ff1e8e636c033bb959bc5a38c6ea5559c7671e6"
+    },
+    {
+      "language": "svelte",
+      "repo_url": "https://github.com/themesberg/flowbite-svelte",
+      "commit": "df3404b81aefbd91cb178dd68e4844a4e4e31066"
+    },
+    {
+      "language": "svelte",
+      "repo_url": "https://github.com/sveltejs/svelte.dev",
+      "commit": "daf518f7ee1f8f6f2b0e347c2500e53f17946b1b"
+    },
+    {
+      "language": "tsx",
+      "repo_url": "https://github.com/materialsproject/mp-react-components",
+      "commit": "093258b178c2d6f60d58aef3b77e6ac6a6059c2c"
+    },
+    {
+      "language": "awk",
+      "repo_url": "https://github.com/openwrt/openwrt",
+      "commit": "5f983981dbcca3971e2d7b4cdebb0860d688bbfc"
+    },
+    {
+      "language": "awk",
+      "repo_url": "https://github.com/onetrueawk/awk",
+      "commit": "61a7c75e225e3035390be32d635545e40d8c5faf"
+    }
+  ]
+}

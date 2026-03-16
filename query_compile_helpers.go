@@ -74,7 +74,9 @@ func (p *queryParser) readString() (string, error) {
 		}
 		if ch == '"' {
 			p.pos++ // consume closing '"'
-			return sb.String(), nil
+			out := sb.String()
+			p.ensureString(out)
+			return out, nil
 		}
 		sb.WriteByte(ch)
 		p.pos++
@@ -205,6 +207,18 @@ func (p *queryParser) ensureCapture(name string) int {
 	return idx
 }
 
+// ensureString returns the index for a string literal, adding it if new.
+func (p *queryParser) ensureString(value string) int {
+	for i, s := range p.q.strings {
+		if s == value {
+			return i
+		}
+	}
+	idx := len(p.q.strings)
+	p.q.strings = append(p.q.strings, value)
+	return idx
+}
+
 func (p *queryParser) addCaptureToStep(step *QueryStep, captureID int) {
 	if step.captureID < 0 {
 		step.captureID = captureID
@@ -217,6 +231,29 @@ func (p *queryParser) addCaptureToAlternative(alt *alternativeSymbol, captureID 
 		alt.captureID = captureID
 	}
 	alt.captureIDs = append(alt.captureIDs, captureID)
+}
+
+// peekNextIsPatternElement checks whether the next non-whitespace token
+// starts a new pattern element (child or sibling pattern), as opposed to
+// a capture (@), predicate (#), close paren, or negation (!).
+func (p *queryParser) peekNextIsPatternElement() bool {
+	saved := p.pos
+	defer func() { p.pos = saved }()
+	p.skipWhitespaceAndComments()
+	if p.pos >= len(p.input) {
+		return false
+	}
+	ch := p.input[p.pos]
+	switch {
+	case ch == '(':
+		return p.pos+1 < len(p.input) && p.input[p.pos+1] != '#'
+	case ch == '[', ch == '"', ch == '.':
+		return true
+	case isIdentStart(ch):
+		return true
+	default:
+		return false
+	}
 }
 
 // isIdentStart reports whether a byte can start an identifier.

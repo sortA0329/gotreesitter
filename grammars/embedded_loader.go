@@ -20,10 +20,22 @@ import (
 // init() before any Language function is called.
 var externalScannerRegistry = map[string]gotreesitter.ExternalScanner{}
 
+// externalLexStatesRegistry maps language names to their external lex states
+// tables, matching C tree-sitter's ts_external_scanner_states. Populated by
+// zzz_scanner_attachments.go init() for grammars that need precise external
+// token validity filtering.
+var externalLexStatesRegistry = map[string][][]bool{}
+
 // RegisterExternalScanner registers an external scanner for a language name.
 // This is called during init() by zzz_scanner_attachments.go.
 func RegisterExternalScanner(name string, s gotreesitter.ExternalScanner) {
 	externalScannerRegistry[name] = s
+}
+
+// RegisterExternalLexStates registers the external lex states table for a
+// language, matching C tree-sitter's ts_external_scanner_states.
+func RegisterExternalLexStates(name string, states [][]bool) {
+	externalLexStatesRegistry[name] = states
 }
 
 type embeddedLanguageCacheEntry struct {
@@ -71,10 +83,13 @@ func loadEmbeddedLanguage(blobName string) *gotreesitter.Language {
 	entry.once.Do(func() {
 		entry.lang, entry.err = decodeEmbeddedLanguage(blobName)
 		if entry.err == nil {
-			// Attach external scanner if one is registered for this language.
+			// Attach external scanner and lex states if registered.
 			name := strings.TrimSuffix(blobName, ".bin")
 			if s, ok := externalScannerRegistry[name]; ok {
 				entry.lang.ExternalScanner = s
+			}
+			if els, ok := externalLexStatesRegistry[name]; ok {
+				entry.lang.ExternalLexStates = els
 			}
 		}
 	})
@@ -317,6 +332,97 @@ func decodeEmbeddedLanguage(blobName string) (*gotreesitter.Language, error) {
 	}
 
 	compactDecodedLanguage(&lang)
+	repairNoLookaheadLexModes(&lang)
 
 	return &lang, nil
+}
+
+func repairNoLookaheadLexModes(lang *gotreesitter.Language) {
+	if lang == nil || len(lang.LexModes) == 0 || len(lang.ParseActions) == 0 {
+		return
+	}
+	for state := 0; state < len(lang.LexModes) && state < int(lang.StateCount); state++ {
+		if lang.LexModes[state].LexState == ^uint16(0) {
+			continue
+		}
+		eofIdx := grammarLookupActionIndex(lang, gotreesitter.StateID(state), 0)
+		if eofIdx == 0 || int(eofIdx) >= len(lang.ParseActions) {
+			continue
+		}
+		eofEntry := lang.ParseActions[eofIdx]
+		if len(eofEntry.Actions) == 0 {
+			continue
+		}
+		allReduce := true
+		for _, act := range eofEntry.Actions {
+			if act.Type != gotreesitter.ParseActionReduce {
+				allReduce = false
+				break
+			}
+		}
+		if !allReduce {
+			continue
+		}
+
+		onlyEOF := true
+		for sym := gotreesitter.Symbol(1); uint32(sym) < lang.TokenCount; sym++ {
+			if grammarLookupActionIndex(lang, gotreesitter.StateID(state), sym) != 0 {
+				onlyEOF = false
+				break
+			}
+		}
+		if onlyEOF {
+			lang.LexModes[state].LexState = ^uint16(0)
+		}
+	}
+}
+
+func grammarLookupActionIndex(lang *gotreesitter.Language, state gotreesitter.StateID, sym gotreesitter.Symbol) uint16 {
+	if lang == nil {
+		return 0
+	}
+	denseLimit := int(lang.LargeStateCount)
+	if denseLimit == 0 {
+		denseLimit = len(lang.ParseTable)
+	}
+	if int(state) < denseLimit {
+		if int(state) >= len(lang.ParseTable) {
+			return 0
+		}
+		row := lang.ParseTable[state]
+		if int(sym) >= len(row) {
+			return 0
+		}
+		return row[sym]
+	}
+
+	smallIdx := int(state) - int(lang.LargeStateCount)
+	if smallIdx < 0 || smallIdx >= len(lang.SmallParseTableMap) {
+		return 0
+	}
+	table := lang.SmallParseTable
+	offset := lang.SmallParseTableMap[smallIdx]
+	if int(offset) >= len(table) {
+		return 0
+	}
+	groupCount := table[offset]
+	pos := int(offset) + 1
+	for i := uint16(0); i < groupCount; i++ {
+		if pos+1 >= len(table) {
+			break
+		}
+		sectionValue := table[pos]
+		symbolCount := table[pos+1]
+		pos += 2
+		for j := uint16(0); j < symbolCount; j++ {
+			if pos >= len(table) {
+				break
+			}
+			if table[pos] == uint16(sym) {
+				return sectionValue
+			}
+			pos++
+		}
+	}
+	return 0
 }

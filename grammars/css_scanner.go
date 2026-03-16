@@ -37,6 +37,7 @@ func (CssExternalScanner) Create() any                           { return nil }
 func (CssExternalScanner) Destroy(payload any)                   {}
 func (CssExternalScanner) Serialize(payload any, buf []byte) int { return 0 }
 func (CssExternalScanner) Deserialize(payload any, buf []byte)   {}
+func (CssExternalScanner) SupportsIncrementalReuse() bool        { return true }
 
 func (CssExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, validSymbols []bool) bool {
 	// Error recovery sentinel — always decline.
@@ -48,8 +49,6 @@ func (CssExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, v
 
 	// Descendant operator: whitespace followed by a selector-start character.
 	if isCssSpace(ch) && cssValid(validSymbols, cssTokDescendantOp) {
-		lexer.SetResultSymbol(cssSymDescendantOp)
-
 		// Skip all whitespace.
 		cssSkip(lexer)
 		for isCssSpace(lexer.Lookahead()) {
@@ -61,6 +60,7 @@ func (CssExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, v
 		// These characters indicate a selector follows.
 		if next == '#' || next == '.' || next == '[' || next == '-' || next == '*' ||
 			unicode.IsLetter(next) || unicode.IsDigit(next) {
+			lexer.SetResultSymbol(cssSymDescendantOp)
 			return true
 		}
 
@@ -77,6 +77,7 @@ func (CssExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, v
 					return false
 				}
 				if c == '{' {
+					lexer.SetResultSymbol(cssSymDescendantOp)
 					return true
 				}
 				lexer.Advance(false)
@@ -98,7 +99,6 @@ func (CssExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, v
 				return false
 			}
 			lexer.MarkEnd()
-			lexer.SetResultSymbol(cssSymColon)
 
 			// Scan forward to confirm this is a selector context.
 			// If we hit '{' (rule block), it's a pseudo-class.
@@ -111,6 +111,7 @@ func (CssExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, v
 				}
 				lexer.Advance(false)
 				if c == '{' && !inComment {
+					lexer.SetResultSymbol(cssSymColon)
 					return true
 				}
 				if c == '/' && !inComment {
@@ -124,7 +125,11 @@ func (CssExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, v
 				}
 			}
 			// Reached EOF — treat as valid (matches C behavior).
-			return lexer.Lookahead() == 0
+			if lexer.Lookahead() == 0 {
+				lexer.SetResultSymbol(cssSymColon)
+				return true
+			}
+			return false
 		}
 	}
 

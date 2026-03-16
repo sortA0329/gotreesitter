@@ -93,3 +93,65 @@ func TestGSSStackMaterializePanicsOnCorruptDepth(t *testing.T) {
 	}()
 	_ = s.materialize(nil)
 }
+
+func TestGSSNodeHashComputedLazilyForSingleStackNodes(t *testing.T) {
+	var scratch gssScratch
+	scratch.singleStackMode = true
+
+	n1 := &Node{symbol: 1, startByte: 0, endByte: 1, parseState: 5}
+	n2 := &Node{symbol: 2, startByte: 1, endByte: 3, parseState: 6}
+
+	var s gssStack
+	s.push(1, nil, &scratch)
+	s.push(2, n1, &scratch)
+	s.push(3, n2, &scratch)
+
+	if got := s.head.hash; got != 0 {
+		t.Fatalf("head hash before demand = %d, want 0", got)
+	}
+
+	got := gssNodeHash(s.head)
+	if got == 0 {
+		t.Fatal("expected lazy hash to compute non-zero value")
+	}
+	if s.head.hash != got {
+		t.Fatalf("cached head hash = %d, want %d", s.head.hash, got)
+	}
+
+	entries := s.materialize(nil)
+	want := gssHashSeed
+	for i := range entries {
+		want = gssEntryHash(want, entries[i])
+	}
+	if got != want {
+		t.Fatalf("lazy hash = %d, want %d", got, want)
+	}
+}
+
+func TestGSSStacksEqualWithLazyHashes(t *testing.T) {
+	var scratch gssScratch
+	scratch.singleStackMode = true
+
+	left := &Node{symbol: 1, startByte: 0, endByte: 1}
+	right := &Node{symbol: 2, startByte: 1, endByte: 2}
+
+	build := func() gssStack {
+		var s gssStack
+		s.push(1, nil, &scratch)
+		s.push(2, left, &scratch)
+		s.push(3, right, &scratch)
+		return s
+	}
+
+	a := build()
+	b := build()
+	if a.head.hash != 0 || b.head.hash != 0 {
+		t.Fatal("expected stacks to start with lazy hashes")
+	}
+	if !gssStacksEqual(a, b) {
+		t.Fatal("expected equal GSS stacks with lazy hashes")
+	}
+	if a.head.hash == 0 || b.head.hash == 0 {
+		t.Fatal("expected equality check to populate lazy hashes")
+	}
+}

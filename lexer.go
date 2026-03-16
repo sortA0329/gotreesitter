@@ -19,6 +19,10 @@ type Token struct {
 	EndByte    uint32
 	StartPoint Point
 	EndPoint   Point
+	Missing    bool
+	// NoLookahead marks a synthetic EOF used to force EOF-table reductions
+	// without consuming input, matching tree-sitter's lex_state = -1.
+	NoLookahead bool
 }
 
 func bytesToStringNoCopy(b []byte) string {
@@ -88,8 +92,8 @@ func (l *Lexer) Next(startState uint16) Token {
 // a token and true if an accepting state was reached, or false if not.
 // On a skip (whitespace) match, it returns a zero-Symbol token and true.
 func (l *Lexer) scan(startState uint16, startPos int, startRow, startCol uint32) (Token, bool) {
-	curState := int(startState)
-	if curState < 0 || curState >= len(l.states) {
+	curState := int32(startState)
+	if curState < 0 || int(curState) >= len(l.states) {
 		return Token{}, false
 	}
 
@@ -113,10 +117,10 @@ func (l *Lexer) scan(startState uint16, startPos int, startRow, startCol uint32)
 	eofHops := 0
 	// Walk the DFA in the same style as tree-sitter START_LEXER/ADVANCE/SKIP.
 	for {
-		if curState < 0 || curState >= len(l.states) {
+		if curState < 0 || int(curState) >= len(l.states) {
 			break
 		}
-		st := &l.states[curState]
+		st := &l.states[int(curState)]
 
 		if st.AcceptToken > 0 || st.Skip {
 			acceptPos = scanPos
@@ -140,7 +144,7 @@ func (l *Lexer) scan(startState uint16, startPos int, startRow, startCol uint32)
 		eofHops = 0
 
 		r, size := utf8.DecodeRune(l.source[scanPos:])
-		nextState := -1
+		nextState := int32(-1)
 		skipTransition := false
 		for i := range st.Transitions {
 			tr := &st.Transitions[i]
@@ -165,7 +169,7 @@ func (l *Lexer) scan(startState uint16, startPos int, startRow, startCol uint32)
 			scanRow++
 			scanCol = 0
 		} else {
-			scanCol++
+			scanCol += uint32(size)
 		}
 
 		if skipTransition {
@@ -221,6 +225,6 @@ func (l *Lexer) skipOneRune() {
 		l.row++
 		l.col = 0
 	} else {
-		l.col++
+		l.col += uint32(size)
 	}
 }

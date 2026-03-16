@@ -43,6 +43,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	sitter "github.com/tree-sitter/go-tree-sitter"
@@ -148,7 +149,15 @@ func buildParityCRef(rootDir string, entry parityLockEntry) (*parityCRef, error)
 		if err := os.MkdirAll(filepath.Dir(repoDir), 0o755); err != nil {
 			return nil, fmt.Errorf("%s: mkdir repo parent: %w", entry.Name, err)
 		}
-		if err := clonePinnedRepo(entry.RepoURL, entry.Commit, repoDir); err != nil {
+		if cacheDir := parityRepoCacheDir(); cacheDir != "" {
+			cachedRepo, cacheErr := findCachedParityRepo(cacheDir, entry.Name, commitShort)
+			if cacheErr != nil {
+				return nil, fmt.Errorf("%s: parity repo cache miss: %w", entry.Name, cacheErr)
+			}
+			if err := clonePinnedRepoFromLocalCache(cachedRepo, entry.Commit, repoDir); err != nil {
+				return nil, fmt.Errorf("%s: clone pinned repo from local cache: %w", entry.Name, err)
+			}
+		} else if err := clonePinnedRepo(entry.RepoURL, entry.Commit, repoDir); err != nil {
 			return nil, fmt.Errorf("%s: clone pinned repo: %w", entry.Name, err)
 		}
 	}
@@ -162,12 +171,45 @@ func buildParityCRef(rootDir string, entry parityLockEntry) (*parityCRef, error)
 		return nil, fmt.Errorf("%s: compile parser shared library: %w", entry.Name, err)
 	}
 
-	symbol := "tree_sitter_" + paritySafeName(entry.Name)
-	ref, err := loadParitySharedLanguage(soPath, symbol)
-	if err != nil {
-		return nil, fmt.Errorf("%s: load %s: %w", entry.Name, symbol, err)
+	var loadErrs []string
+	for _, symbol := range parityLanguageSymbols(entry) {
+		ref, err := loadParitySharedLanguage(soPath, symbol)
+		if err == nil {
+			return ref, nil
+		}
+		loadErrs = append(loadErrs, fmt.Sprintf("%s: %v", symbol, err))
 	}
-	return ref, nil
+	return nil, fmt.Errorf("%s: load language symbol failed: %s", entry.Name, strings.Join(loadErrs, "; "))
+}
+
+func parityLanguageSymbols(entry parityLockEntry) []string {
+	var out []string
+	seen := make(map[string]bool)
+	add := func(sym string) {
+		if sym == "" || seen[sym] {
+			return
+		}
+		seen[sym] = true
+		out = append(out, sym)
+	}
+
+	add("tree_sitter_" + paritySafeName(entry.Name))
+	add("tree_sitter_" + strings.ToUpper(strings.TrimSpace(entry.Name)))
+
+	repo := strings.TrimSuffix(strings.TrimSpace(entry.RepoURL), "/")
+	repo = strings.TrimSuffix(repo, ".git")
+	if idx := strings.LastIndex(repo, "/"); idx >= 0 && idx+1 < len(repo) {
+		base := repo[idx+1:]
+		add("tree_sitter_" + paritySafeName(base))
+		if strings.HasPrefix(base, "tree-sitter-") {
+			add("tree_sitter_" + paritySafeName(strings.TrimPrefix(base, "tree-sitter-")))
+		}
+		if strings.HasPrefix(base, "tree_sitter_") {
+			add("tree_sitter_" + paritySafeName(strings.TrimPrefix(base, "tree_sitter_")))
+		}
+	}
+
+	return out
 }
 
 func loadParityLock(path string) (map[string]parityLockEntry, error) {
@@ -212,20 +254,62 @@ func loadParityLock(path string) (map[string]parityLockEntry, error) {
 	return entries, nil
 }
 
-func clonePinnedRepo(repoURL, commit, dest string) error {
-	if err := runCommand("", "git", "clone", "--depth=1", repoURL, dest); err != nil {
+func parityRepoCacheDir() string {
+	return strings.TrimSpace(os.Getenv("GTS_PARITY_REPO_CACHE"))
+}
+
+func findCachedParityRepo(cacheDir, name, commitShort string) (string, error) {
+	candidates := []string{
+		filepath.Join(cacheDir, name+"-"+commitShort),
+		filepath.Join(cacheDir, paritySafeName(name)+"-"+commitShort),
+		filepath.Join(cacheDir, paritySafeName(name+"-"+commitShort)),
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("checked %s", strings.Join(candidates, ", "))
+}
+
+func clonePinnedRepoFromLocalCache(cacheRepoDir, commit, dest string) error {
+	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return err
 	}
+	// The host cache is already pinned to the requested commit, so copying it is
+	// enough and avoids Git safe.directory checks on the bind mount.
+	return runCommand("", "cp", "-a", cacheRepoDir+string(filepath.Separator)+".", dest)
+}
+
+func clonePinnedRepo(repoURL, commit, dest string) error {
+	if err := runCommandRetry("", 4, "git", "clone", "--depth=1", repoURL, dest); err != nil {
+		// Fallback to a full clone if shallow clone repeatedly fails with a
+		// transient GitHub transport error.
+		if retryableCommandError(err) {
+			if fullErr := runCommandRetry("", 2, "git", "clone", repoURL, dest); fullErr == nil {
+				goto checkout
+			} else {
+				return fullErr
+			}
+		}
+		return err
+	}
+
+checkout:
+	return clonePinnedCheckout(commit, dest)
+}
+
+func clonePinnedCheckout(commit, dest string) error {
 	if commit == "" {
 		return nil
 	}
 	if err := runCommand("", "git", "-C", dest, "checkout", "--detach", commit); err == nil {
 		return nil
 	}
-	if err := runCommand("", "git", "-C", dest, "fetch", "--depth=1", "origin", commit); err != nil {
+	if err := runCommandRetry("", 4, "git", "-C", dest, "fetch", "--depth=1", "origin", commit); err != nil {
 		return err
 	}
-	return runCommand("", "git", "-C", dest, "checkout", "--detach", "FETCH_HEAD")
+	return runCommandRetry("", 2, "git", "-C", dest, "checkout", "--detach", "FETCH_HEAD")
 }
 
 func compileParserShared(entry parityLockEntry, repoDir, outSO, objDir string) error {
@@ -348,13 +432,33 @@ func regenerateParserSource(repoDir, hintDir string) error {
 		return err
 	}
 
-	abi := strconv.Itoa(parityGenerateABI)
+	abis := make([]int, 0, parityMaxLanguageVersion-parityMinLanguageVersion+1)
+	for abi := parityGenerateABI; abi >= parityMinLanguageVersion; abi-- {
+		abis = append(abis, abi)
+	}
+
+	tryGenerate := func(cmd string, args ...string) error {
+		var lastErr error
+		for _, abi := range abis {
+			abiArgs := append(args, "--abi", strconv.Itoa(abi))
+			if err := runCommand(grammarRoot, cmd, abiArgs...); err == nil {
+				return nil
+			} else {
+				lastErr = err
+			}
+		}
+		if lastErr == nil {
+			return fmt.Errorf("all ABI attempts failed")
+		}
+		return fmt.Errorf("all ABI attempts failed; last error: %w", lastErr)
+	}
+
 	if _, err := exec.LookPath("tree-sitter"); err == nil {
-		if err := runCommand(grammarRoot, "tree-sitter", "generate", "--abi", abi); err == nil {
+		if err := tryGenerate("tree-sitter", "generate"); err == nil {
 			return nil
 		}
 	}
-	return runCommand(grammarRoot, "npx", "--yes", "tree-sitter-cli", "generate", "--abi", abi)
+	return tryGenerate("npx", "--yes", "tree-sitter-cli", "generate")
 }
 
 func findGrammarRoot(repoDir, hintDir string) (string, error) {
@@ -453,6 +557,13 @@ func parityDLError() string {
 func runCommand(dir, cmdName string, args ...string) error {
 	cmd := exec.Command(cmdName, args...)
 	cmd.Dir = dir
+	if cmdName == "git" {
+		cmd.Env = append(
+			os.Environ(),
+			"GIT_HTTP_VERSION=HTTP/1.1",
+			"GIT_TERMINAL_PROMPT=0",
+		)
+	}
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil
@@ -462,6 +573,48 @@ func runCommand(dir, cmdName string, args ...string) error {
 		msg = err.Error()
 	}
 	return fmt.Errorf("%s %s: %s", cmdName, strings.Join(args, " "), msg)
+}
+
+func runCommandRetry(dir string, attempts int, cmdName string, args ...string) error {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		err := runCommand(dir, cmdName, args...)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !retryableCommandError(err) || i == attempts-1 {
+			break
+		}
+		delay := time.Duration(i+1) * time.Second
+		if delay > 5*time.Second {
+			delay = 5 * time.Second
+		}
+		time.Sleep(delay)
+	}
+	return lastErr
+}
+
+func retryableCommandError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "The requested URL returned error: 500") ||
+		strings.Contains(msg, "remote: Internal Server Error") ||
+		strings.Contains(msg, "expected flush after ref listing") ||
+		strings.Contains(msg, "expected 'packfile'") ||
+		strings.Contains(msg, "Could not resolve host") ||
+		strings.Contains(msg, "Temporary failure in name resolution") ||
+		strings.Contains(msg, "Name or service not known") ||
+		strings.Contains(msg, "TLS handshake timeout") ||
+		strings.Contains(msg, "operation timed out") ||
+		strings.Contains(msg, "Operation timed out") ||
+		strings.Contains(msg, "Connection reset by peer") ||
+		strings.Contains(msg, "connection reset by peer")
 }
 
 func findParserC(repoDir string) (string, error) {

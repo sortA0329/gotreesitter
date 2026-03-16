@@ -7,18 +7,10 @@ import (
 	"github.com/odvcencio/gotreesitter"
 )
 
-// Languages where the highlight query compiles but the smoke sample is too
-// simple to produce any highlight ranges. These are not bugs.
+// highlightNoRangesExpected tracks languages whose highlight query compiles
+// but the smoke sample is too simple to produce any highlight ranges.
 var highlightNoRangesExpected = map[string]bool{
-	"jq":      true, // sample ".foo" has no nodes matching jq highlights
-	"jsdoc":   true, // sample "/** hello */" has no nodes matching jsdoc highlights
-	"nginx":   true, // sample "events {}" does not exercise most nginx captures
-	"svelte":  true, // sample is plain HTML text, no svelte-specific nodes
-	"wolfram": true, // sample "1 + 2" has no nodes matching wolfram highlights
-	"cpp":     true, // current smoke sample is too small for useful capture coverage
-	"haskell": true, // sample is intentionally tiny and misses most capture paths
-	"haxe":    true, // sample "1;" intentionally minimal
-	"tsx":     true, // sample has limited syntax for broad TSX highlight rules
+	"cpp": true, // C++ highlight query requires predicate support beyond current Highlighter
 }
 
 func TestAllHighlightQueriesCompile(t *testing.T) {

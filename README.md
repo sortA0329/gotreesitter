@@ -211,15 +211,15 @@ cpu: Intel(R) Core(TM) Ultra 9 285
 
 | Runtime | Full parse | Incremental (1-byte edit) | Incremental (no edit) |
 |---|---:|---:|---:|
-| Native C (pure C runtime) | 1.76 ms | 101.7 μs | 100.4 μs |
-| CGo binding (C runtime via cgo) | 1.98 ms | 128.8 μs | 124.5 μs |
-| gotreesitter (pure Go) | 6.77 ms | 2.43 μs | 2.05 ns |
+| Native C (pure C runtime) | 1.76 ms | 102.3 μs | 101.7 μs |
+| CGo binding (C runtime via cgo) | ~2.0 ms | ~130 μs | — |
+| gotreesitter (pure Go) | 3.52 ms | 2.46 μs | 2.22 ns |
 
 On this workload:
 
-- Full parse is ~3.9x slower than native C (~3.4x slower than CGo).
-- Incremental single-byte edits are ~41.9x faster than native C (~53.1x faster than CGo).
-- No-edit reparses are ~49kx faster than native C (~61kx faster than CGo).
+- Full parse is ~2.0x slower than native C.
+- Incremental single-byte edits are ~41.6x faster than native C (~52.8x faster than CGo).
+- No-edit reparses are ~45,800x faster than native C, zero allocations.
 
 <details>
 <summary>Raw benchmark output</summary>
@@ -242,15 +242,14 @@ GOMAXPROCS=1 go test . -run '^$' -tags treesitter_c_bench \
 
 | Benchmark | Median ns/op | B/op | allocs/op |
 |---|---:|---:|---:|
-| Native C full parse | 1,756,526 | — | — |
-| Native C incremental (1-byte edit) | 101,732 | — | — |
-| Native C incremental (no edit) | 100,385 | — | — |
-| `CTreeSitterGoParseFull` | 1,975,322 | 600 | 6 |
-| `CTreeSitterGoParseIncrementalSingleByteEdit` | 128,830 | 648 | 7 |
-| `CTreeSitterGoParseIncrementalNoEdit` | 124,548 | 600 | 6 |
-| `GoParseFullDFA` | 6,765,290 | 425 | 5 |
-| `GoParseIncrementalSingleByteEditDFA` | 2,426 | 496 | 9 |
-| `GoParseIncrementalNoEditDFA` | 2.045 | 0 | 0 |
+| Native C full parse | 1,764,436 | — | — |
+| Native C incremental (1-byte edit) | 102,336 | — | — |
+| Native C incremental (no edit) | 101,740 | — | — |
+| `CTreeSitterGoParseFull` | ~1,990,000 | 600 | 6 |
+| `CTreeSitterGoParseIncrementalSingleByteEdit` | ~130,000 | 648 | 7 |
+| `GoParseFullDFA` | 3,523,652 | 425 | 5 |
+| `GoParseIncrementalSingleByteEditDFA` | 2,458 | 496 | 9 |
+| `GoParseIncrementalNoEditDFA` | 2.223 | 0 | 0 |
 
 </details>
 
@@ -318,7 +317,7 @@ All shipped highlight and tags queries compile (`156/156` highlight, `69/69` tag
 
 ## Known limitations
 
-- **Full-parse throughput**: still slower than the C runtime on cold full parses (currently ~3.9x on the 500-function Go benchmark). Incremental reparsing amortizes this for editor-style workloads.
+- **Full-parse throughput**: ~2.0x slower than the C runtime on cold full parses (the 500-function Go benchmark). Incremental reparsing — the dominant operation in editor workloads — is 42x faster.
 - **GLR safety caps**: The parser enforces iteration, stack depth, and node count limits proportional to input size. These prevent pathological blowup on grammars with high ambiguity but impose a ceiling on the maximum input complexity that parses without error. The caps are tunable but not removable without risking unbounded resource consumption.
 - **Degraded grammars**: 3 of 206 grammars are currently degraded: `disassembly`, `norg`, and `vimdoc`. Check `entry.Quality` and `tree.RootNode().HasError()`.
 
@@ -342,7 +341,7 @@ Manual refresh:
 ```sh
 go run ./cmd/grammar_updater \
   -lock grammars/languages.lock \
-  -allow-list grammars/update_tier1_top50.txt \
+  -allow-list grammars/update_tier1_core100.txt \
   -max-updates 10 \
   -write \
   -report grammars/grammar_updates.json
@@ -383,7 +382,7 @@ GOTREESITTER_GRAMMAR_BLOB_MMAP=false           # disable mmap (Unix only)
 **Curated language set** (smaller binary):
 
 ```sh
-go build -tags grammar_set_core  # c, go, java, javascript, python, rust, typescript, etc.
+go build -tags grammar_set_core  # curated Core100 embedded grammar set
 GOTREESITTER_GRAMMAR_SET=go,json,python  # runtime restriction
 ```
 
@@ -407,8 +406,11 @@ GOTREESITTER_GRAMMAR_TRANSITION_INTERN_LIMIT=20000
 **GLR stack cap override**:
 
 ```sh
-GOT_GLR_MAX_STACKS=12  # overrides default GLR stack cap (default: 6)
+GOT_GLR_MAX_STACKS=8  # overrides default GLR stack cap (default: 2)
 ```
+
+Default is tuned for performance. Increase this only if a grammar/workload
+needs more GLR alternatives to preserve parity.
 
 **Legacy benchmark compatibility only**:
 

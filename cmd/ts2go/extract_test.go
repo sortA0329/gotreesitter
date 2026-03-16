@@ -173,6 +173,26 @@ func TestExtractConstants(t *testing.T) {
 	}
 }
 
+func TestExtractGrammarInfersProductionIDCountFromArraySizes(t *testing.T) {
+	source := strings.Replace(miniParserC, "#define PRODUCTION_ID_COUNT 2\n", "", 1)
+	source = strings.Replace(source, "ts_field_map_slices[PRODUCTION_ID_COUNT]", "ts_field_map_slices[2]", 1)
+
+	g, err := ExtractGrammar(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if g.ProductionIDCount != 2 {
+		t.Fatalf("ProductionIDCount = %d, want 2", g.ProductionIDCount)
+	}
+	if len(g.FieldMapSlices) != 2 {
+		t.Fatalf("len(FieldMapSlices) = %d, want 2", len(g.FieldMapSlices))
+	}
+	if len(g.FieldMapEntries) != 2 {
+		t.Fatalf("len(FieldMapEntries) = %d, want 2", len(g.FieldMapEntries))
+	}
+}
+
 func TestExtractEnum(t *testing.T) {
 	vals := extractEnum(miniParserC)
 
@@ -362,6 +382,36 @@ func TestExtractFieldMapsModernName(t *testing.T) {
 	}
 }
 
+func TestExtractFieldMapsMixedInherited(t *testing.T) {
+	// Real C grammars use mixed syntax: positional field_id and child_index
+	// with named .inherited. e.g. {field_name, 0, .inherited = true}
+	mixedSource := strings.Replace(miniParserC,
+		`{field_value, 1, true}`,
+		`{field_value, 1, .inherited = true}`, 1)
+
+	g := miniGrammar()
+	g.ProductionIDCount = 2
+	g.FieldCount = 2
+
+	if err := extractFieldMaps(mixedSource, g); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(g.FieldMapEntries) != 2 {
+		t.Fatalf("len(FieldMapEntries) = %d, want 2", len(g.FieldMapEntries))
+	}
+	e := g.FieldMapEntries[1]
+	if e.FieldID != 2 {
+		t.Errorf("FieldMapEntries[1].FieldID = %d, want 2 (field_value)", e.FieldID)
+	}
+	if e.ChildIndex != 1 {
+		t.Errorf("FieldMapEntries[1].ChildIndex = %d, want 1", e.ChildIndex)
+	}
+	if !e.Inherited {
+		t.Error("FieldMapEntries[1].Inherited = false, want true")
+	}
+}
+
 func TestExtractParseTable(t *testing.T) {
 	g := miniGrammar()
 	g.LargeStateCount = 2
@@ -523,6 +573,88 @@ const TSLanguage *tree_sitter_multi(void) {
 	}
 }
 
+func TestExtractParseActionsNamedReduce(t *testing.T) {
+	// Newer tree-sitter versions emit REDUCE with named arguments:
+	// REDUCE(.symbol = X, .child_count = Y, .production_id = Z)
+	src := `
+#define STATE_COUNT 1
+#define SYMBOL_COUNT 1
+#define LARGE_STATE_COUNT 0
+#define TOKEN_COUNT 1
+#define PRODUCTION_ID_COUNT 1
+
+enum ts_symbol_identifiers {
+  sym_class_selector = 42,
+};
+
+static const char * const ts_symbol_names[] = {
+  [0] = "x",
+};
+
+static const TSSymbolMetadata ts_symbol_metadata[] = {
+  [0] = { .visible = false, .named = false, },
+};
+
+static const TSParseActionEntry ts_parse_actions[] = {
+  [0] = {.entry = {.count = 0, .reusable = false}},
+  [1] = {.entry = {.count = 1, .reusable = true}}, REDUCE(.symbol = sym_class_selector, .child_count = 2, .production_id = 2),
+  [3] = {.entry = {.count = 2, .reusable = false}}, REDUCE(.symbol = sym_class_selector, .child_count = 2), SHIFT_REPEAT(16),
+};
+
+static const TSLexMode ts_lex_modes[STATE_COUNT] = {
+  [0] = {.lex_state = 0},
+};
+
+const TSLanguage *tree_sitter_named(void) {
+  return 0;
+}
+`
+	g, err := ExtractGrammar(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(g.ParseActions) != 3 {
+		t.Fatalf("len(ParseActions) = %d, want 3", len(g.ParseActions))
+	}
+
+	// Group 1: named REDUCE with production_id
+	ag := g.ParseActions[1]
+	if len(ag.Actions) != 1 {
+		t.Fatalf("group[1] has %d actions, want 1", len(ag.Actions))
+	}
+	if ag.Actions[0].Type != "reduce" {
+		t.Errorf("Actions[0].Type = %q, want reduce", ag.Actions[0].Type)
+	}
+	if ag.Actions[0].Symbol != 42 {
+		t.Errorf("Actions[0].Symbol = %d, want 42", ag.Actions[0].Symbol)
+	}
+	if ag.Actions[0].ChildCount != 2 {
+		t.Errorf("Actions[0].ChildCount = %d, want 2", ag.Actions[0].ChildCount)
+	}
+	if ag.Actions[0].ProductionID != 2 {
+		t.Errorf("Actions[0].ProductionID = %d, want 2", ag.Actions[0].ProductionID)
+	}
+
+	// Group 2: named REDUCE + SHIFT_REPEAT (multi-action with named reduce)
+	ag2 := g.ParseActions[2]
+	if len(ag2.Actions) != 2 {
+		t.Fatalf("group[2] has %d actions, want 2", len(ag2.Actions))
+	}
+	if ag2.Actions[0].Type != "reduce" {
+		t.Errorf("group[2].Actions[0].Type = %q, want reduce", ag2.Actions[0].Type)
+	}
+	if ag2.Actions[0].Symbol != 42 {
+		t.Errorf("group[2].Actions[0].Symbol = %d, want 42", ag2.Actions[0].Symbol)
+	}
+	if ag2.Actions[1].Type != "shift" {
+		t.Errorf("group[2].Actions[1].Type = %q, want shift", ag2.Actions[1].Type)
+	}
+	if ag2.Actions[1].State != 16 {
+		t.Errorf("group[2].Actions[1].State = %d, want 16", ag2.Actions[1].State)
+	}
+}
+
 func TestExtractLexModes(t *testing.T) {
 	g := miniGrammar()
 	g.StateCount = 5
@@ -581,6 +713,44 @@ static const TSSymbol ts_external_scanner_symbol_map[2] = {
 	}
 }
 
+func TestExtractExternalLexStates(t *testing.T) {
+	src := `
+enum ts_external_token_identifiers {
+  ext_tok_one = 0,
+  ext_tok_two = 1,
+  ext_tok_three = 2,
+};
+static const bool ts_external_scanner_states[4][EXTERNAL_TOKEN_COUNT] = {
+  [1] = {
+    [ext_tok_one] = true,
+    [ext_tok_three] = true,
+  },
+  [3] = {
+    [ext_tok_two] = true,
+  },
+};
+`
+	g := &ExtractedGrammar{
+		ExternalTokenCount: 3,
+		enumValues:         extractEnum(src),
+	}
+	if err := extractExternalLexStates(src, g); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.ExternalLexStates) != 4 {
+		t.Fatalf("len(ExternalLexStates) = %d, want 4", len(g.ExternalLexStates))
+	}
+	if !g.ExternalLexStates[1][0] || g.ExternalLexStates[1][1] || !g.ExternalLexStates[1][2] {
+		t.Fatalf("row 1 = %v, want [true false true]", g.ExternalLexStates[1])
+	}
+	if g.ExternalLexStates[2][0] || g.ExternalLexStates[2][1] || g.ExternalLexStates[2][2] {
+		t.Fatalf("row 2 = %v, want all false", g.ExternalLexStates[2])
+	}
+	if g.ExternalLexStates[3][0] || !g.ExternalLexStates[3][1] || g.ExternalLexStates[3][2] {
+		t.Fatalf("row 3 = %v, want [false true false]", g.ExternalLexStates[3])
+	}
+}
+
 func TestExtractGrammarFull(t *testing.T) {
 	g, err := ExtractGrammar(miniParserC)
 	if err != nil {
@@ -617,9 +787,13 @@ func TestGenerateEmbeddedGo(t *testing.T) {
 	}
 
 	g.ExternalSymbols = []uint16{5}
+	g.ExternalLexStates = [][]bool{{false}, {true}}
 	lang := BuildLanguage(g)
 	if lang == nil {
 		t.Fatal("BuildLanguage returned nil")
+	}
+	if len(lang.ExternalLexStates) != 2 || !lang.ExternalLexStates[1][0] {
+		t.Fatalf("lang.ExternalLexStates = %v, want [[false] [true]]", lang.ExternalLexStates)
 	}
 	blob, err := EncodeLanguageBlob(lang)
 	if err != nil {

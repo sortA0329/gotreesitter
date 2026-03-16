@@ -17,39 +17,66 @@ type CTokenSource struct {
 	done    bool
 	pending []gotreesitter.Token
 
-	eofSymbol           gotreesitter.Symbol
-	identifierSymbol    gotreesitter.Symbol
-	numberSymbol        gotreesitter.Symbol
-	commentSymbol       gotreesitter.Symbol
-	quoteSymbol         gotreesitter.Symbol
-	apostropheSymbol    gotreesitter.Symbol
-	stringContentSymbol gotreesitter.Symbol
-	escapeSymbol        gotreesitter.Symbol
-	characterSymbol     gotreesitter.Symbol
-	primitiveTypeSymbol gotreesitter.Symbol
-	preprocEndSymbol    gotreesitter.Symbol // preproc_include_token2: line terminator for preprocessor directives
-	preprocArgSymbol    gotreesitter.Symbol
+	eofSymbol              gotreesitter.Symbol
+	identifierSymbol       gotreesitter.Symbol
+	numberSymbol           gotreesitter.Symbol
+	commentSymbol          gotreesitter.Symbol
+	quoteSymbol            gotreesitter.Symbol
+	apostropheSymbol       gotreesitter.Symbol
+	stringContentSymbol    gotreesitter.Symbol
+	systemLibStringSymbol  gotreesitter.Symbol
+	escapeSymbol           gotreesitter.Symbol
+	characterSymbol        gotreesitter.Symbol
+	primitiveTypeSymbol    gotreesitter.Symbol
+	preprocParamLParen     gotreesitter.Symbol
+	preprocEndSymbol       gotreesitter.Symbol // preproc_include_token2: line terminator for preprocessor directives
+	preprocArgSymbol       gotreesitter.Symbol
+	preprocDirectiveSymbol gotreesitter.Symbol
+	newlineSymbol          gotreesitter.Symbol
+	endifSymbol            gotreesitter.Symbol
+	rBraceSymbol           gotreesitter.Symbol
 
 	// Preprocessor state tracking
-	preprocState int // 0=normal, 1=afterDirective, 2=afterName (expect arg)
+	preprocState         int
+	parserState          gotreesitter.StateID
+	glrStates            []gotreesitter.StateID
+	lastSyntheticOffset  int
+	preprocDefineNameEnd int
 
-	keywordSymbols map[string]gotreesitter.Symbol
-	literalSymbols map[string]gotreesitter.Symbol
-	maxLiteralLen  int
+	keywordSymbols    map[string]gotreesitter.Symbol
+	literalSymbols    map[string]gotreesitter.Symbol
+	literalAlternates map[string][]gotreesitter.Symbol
+	maxLiteralLen     int
 
 	stringOpeners []prefixedToken
 	charOpeners   []prefixedToken
 }
 
 type cLexerTables struct {
-	keywordSymbols map[string]gotreesitter.Symbol
-	literalSymbols map[string]gotreesitter.Symbol
-	maxLiteralLen  int
-	stringOpeners  []prefixedToken
-	charOpeners    []prefixedToken
+	keywordSymbols    map[string]gotreesitter.Symbol
+	literalSymbols    map[string]gotreesitter.Symbol
+	literalAlternates map[string][]gotreesitter.Symbol
+	maxLiteralLen     int
+	stringOpeners     []prefixedToken
+	charOpeners       []prefixedToken
+}
+
+type literalCandidate struct {
+	sym     gotreesitter.Symbol
+	escapes int
 }
 
 var cLexerTablesCache sync.Map // map[*gotreesitter.Language]*cLexerTables
+
+const (
+	cPreprocNormal = iota
+	cPreprocAfterDefine
+	cPreprocAfterDefineName
+	cPreprocAfterDefineParams
+	cPreprocAfterName
+	cPreprocAfterInclude
+	cPreprocConditionalExpr
+)
 
 func bytesToStringNoCopy(b []byte) string {
 	if len(b) == 0 {
@@ -70,9 +97,11 @@ func NewCTokenSource(src []byte, lang *gotreesitter.Language) (*CTokenSource, er
 	}
 
 	ts := &CTokenSource{
-		src:            src,
-		lang:           lang,
-		cur:            newSourceCursor(src),
+		src:                  src,
+		lang:                 lang,
+		cur:                  newSourceCursor(src),
+		lastSyntheticOffset:  -1,
+		preprocDefineNameEnd: -1,
 	}
 
 	tl := newTokenLookup(lang, "c")
@@ -82,11 +111,20 @@ func NewCTokenSource(src []byte, lang *gotreesitter.Language) (*CTokenSource, er
 	ts.quoteSymbol = tl.optional("\"")
 	ts.apostropheSymbol = tl.optional("'")
 	ts.stringContentSymbol = tl.optional("string_content")
+	ts.systemLibStringSymbol = tl.optional("system_lib_string")
 	ts.escapeSymbol = tl.optional("escape_sequence")
 	ts.characterSymbol = tl.optional("character")
 	ts.primitiveTypeSymbol = tl.optional("primitive_type")
 	ts.preprocEndSymbol = tl.optional("preproc_include_token2")
+	ts.newlineSymbol = tl.optional("\n")
 	ts.preprocArgSymbol = tl.optional("preproc_arg")
+	ts.preprocDirectiveSymbol = tl.optional("preproc_directive")
+	ts.newlineSymbol = tl.optional("\n")
+	ts.endifSymbol = tl.optional("#endif")
+	ts.rBraceSymbol = tl.optional("}")
+	if syms := lang.TokenSymbolsByName("("); len(syms) > 0 {
+		ts.preprocParamLParen = syms[0]
+	}
 
 	if ts.eofSymbol, _ = lang.SymbolByName("end"); ts.eofSymbol == 0 {
 		ts.eofSymbol = 0
@@ -110,6 +148,37 @@ func NewCTokenSourceOrEOF(src []byte, lang *gotreesitter.Language) gotreesitter.
 	return ts
 }
 
+// Reset reinitializes this token source for a new source buffer.
+func (ts *CTokenSource) Reset(src []byte) {
+	ts.src = src
+	ts.cur = newSourceCursor(src)
+	ts.done = false
+	ts.pending = ts.pending[:0]
+	ts.preprocState = cPreprocNormal
+	ts.parserState = 0
+	ts.glrStates = ts.glrStates[:0]
+	ts.lastSyntheticOffset = -1
+	ts.preprocDefineNameEnd = -1
+}
+
+// SupportsIncrementalReuse reports that CTokenSource preserves stable token
+// boundaries across edits and supports deterministic SkipToByte behavior.
+func (ts *CTokenSource) SupportsIncrementalReuse() bool {
+	return true
+}
+
+func (ts *CTokenSource) SetParserState(state gotreesitter.StateID) {
+	ts.parserState = state
+}
+
+func (ts *CTokenSource) SetGLRStates(states []gotreesitter.StateID) {
+	if len(states) == 0 {
+		ts.glrStates = ts.glrStates[:0]
+		return
+	}
+	ts.glrStates = append(ts.glrStates[:0], states...)
+}
+
 func (ts *CTokenSource) Next() gotreesitter.Token {
 	if len(ts.pending) > 0 {
 		tok := ts.pending[0]
@@ -129,19 +198,54 @@ func (ts *CTokenSource) Next() gotreesitter.Token {
 
 		b := ts.cur.peekByte()
 
+		if tok, ok := ts.syntheticConditionalEndToken(); ok {
+			return tok
+		}
+
 		// Newline handling: in preprocessor context, emit as directive terminator
 		if b == '\n' {
-			if ts.preprocState > 0 && ts.preprocEndSymbol != 0 {
-				ts.preprocState = 0
-				return ts.preprocEndToken()
+			if ts.preprocState == cPreprocConditionalExpr && ts.newlineSymbol != 0 {
+				ts.preprocState = cPreprocNormal
+				return ts.lineEndToken(ts.newlineSymbol)
 			}
-			ts.preprocState = 0
+			if ts.preprocState != cPreprocNormal && ts.preprocEndSymbol != 0 {
+				ts.preprocState = cPreprocNormal
+				return ts.lineEndToken(ts.preprocEndSymbol)
+			}
+			ts.preprocState = cPreprocNormal
 			ts.cur.advanceByte()
 			continue
 		}
+		if b == '#' {
+			if tok, ok := ts.directiveToken(); ok {
+				return tok
+			}
+		}
 
-		// In preprocessor "expect arg" state: scan rest of line as preproc_arg
-		if ts.preprocState == 2 && ts.preprocArgSymbol != 0 {
+		if b == '#' {
+			if tok, ok := ts.directiveToken(); ok {
+				return tok
+			}
+		}
+		if ts.preprocState == cPreprocAfterInclude {
+			if tok, ok := ts.systemLibStringToken(); ok {
+				return tok
+			}
+			if ts.preprocArgSymbol != 0 && b != '"' {
+				if tok, ok := ts.preprocArgToken(); ok {
+					return tok
+				}
+			}
+		}
+		if ts.preprocState == cPreprocAfterDefineName {
+			if ts.cur.offset == ts.preprocDefineNameEnd && ts.cur.peekByte() == '(' {
+				ts.preprocState = cPreprocAfterDefineParams
+			} else {
+				ts.preprocState = cPreprocAfterName
+			}
+			ts.preprocDefineNameEnd = -1
+		}
+		if ts.preprocState == cPreprocAfterName && ts.preprocArgSymbol != 0 {
 			if tok, ok := ts.preprocArgToken(); ok {
 				return tok
 			}
@@ -162,20 +266,27 @@ func (ts *CTokenSource) Next() gotreesitter.Token {
 
 		if isCIdentStart(b) {
 			tok := ts.identifierOrKeywordToken()
-			// After directive keyword, next identifier is the macro name
-			if ts.preprocState == 1 {
-				ts.preprocState = 2 // now expect preproc_arg
+			// After #define, the next identifier is the macro name.
+			if ts.preprocState == cPreprocAfterDefine {
+				ts.preprocState = cPreprocAfterDefineName
+				ts.preprocDefineNameEnd = ts.cur.offset
 			}
 			return tok
+		}
+		if ts.shouldLexSignedNumber() {
+			return ts.numberToken()
 		}
 		if isASCIIDigit(b) {
 			return ts.numberToken()
 		}
+		if ts.preprocState == cPreprocAfterDefineParams && ts.cur.peekByte() == '(' && ts.preprocParamLParen != 0 {
+			start := ts.cur.offset
+			startPt := ts.cur.point()
+			ts.cur.advanceByte()
+			return makeToken(ts.preprocParamLParen, ts.src, start, ts.cur.offset, startPt, ts.cur.point())
+		}
 		if tok, ok := ts.literalToken(); ok {
-			// Detect #define start (needs preproc_arg + line terminator)
-			if ts.isPreprocDirective(tok.Text) {
-				ts.preprocState = 1
-			}
+			ts.updatePreprocStateForLiteral(tok.Text)
 			return tok
 		}
 
@@ -195,7 +306,11 @@ func (ts *CTokenSource) SkipToByte(offset uint32) gotreesitter.Token {
 
 	ts.pending = nil
 	ts.done = false
-	ts.preprocState = 0
+	ts.preprocState = cPreprocNormal
+	ts.parserState = 0
+	ts.glrStates = ts.glrStates[:0]
+	ts.lastSyntheticOffset = -1
+	ts.preprocDefineNameEnd = -1
 
 	if target < ts.cur.offset {
 		ts.cur = newSourceCursor(ts.src)
@@ -218,13 +333,14 @@ func (ts *CTokenSource) buildSymbolTables() {
 
 	keywordSymbols := make(map[string]gotreesitter.Symbol)
 	literalSymbols := make(map[string]gotreesitter.Symbol)
+	literalAlternates := make(map[string][]gotreesitter.Symbol)
 	maxLiteralLen := 0
 
 	limit := int(ts.lang.TokenCount)
 	if limit > len(ts.lang.SymbolNames) {
 		limit = len(ts.lang.SymbolNames)
 	}
-	literalEscapes := make(map[string]int)
+	literalCandidates := make(map[string][]literalCandidate)
 
 	for i := 0; i < limit; i++ {
 		name := ts.lang.SymbolNames[i]
@@ -253,36 +369,56 @@ func (ts *CTokenSource) buildSymbolTables() {
 			continue
 		}
 		escapes := tokenNameEscapeCount(name)
-		if prev, exists := literalEscapes[lexeme]; exists && prev <= escapes {
-			continue
+		candidates := literalCandidates[lexeme]
+		duplicate := false
+		for _, candidate := range candidates {
+			if candidate.sym == sym {
+				duplicate = true
+				break
+			}
 		}
-		literalSymbols[lexeme] = sym
-		literalEscapes[lexeme] = escapes
+		if !duplicate {
+			literalCandidates[lexeme] = append(candidates, literalCandidate{
+				sym:     sym,
+				escapes: escapes,
+			})
+		}
 		if len(lexeme) > maxLiteralLen {
 			maxLiteralLen = len(lexeme)
 		}
 	}
 
-	// tree-sitter-c has two distinct token IDs that display as "(".
-	// The declaration/parser path expects the higher-ID variant.
-	if syms := ts.lang.TokenSymbolsByName("("); len(syms) > 0 {
-		literalSymbols["("] = syms[len(syms)-1]
+	for lexeme, candidates := range literalCandidates {
+		if len(candidates) == 0 {
+			continue
+		}
+		orderLiteralCandidates(lexeme, candidates)
+		ordered := make([]gotreesitter.Symbol, 0, len(candidates))
+		for _, candidate := range candidates {
+			ordered = append(ordered, candidate.sym)
+		}
+		literalSymbols[lexeme] = ordered[0]
+		if len(ordered) > 1 {
+			literalAlternates[lexeme] = ordered
+		}
 	}
 
 	base := &CTokenSource{
-		literalSymbols: literalSymbols,
-		quoteSymbol:    ts.quoteSymbol,
-		apostropheSymbol: ts.apostropheSymbol,
+		literalSymbols:    literalSymbols,
+		literalAlternates: literalAlternates,
+		quoteSymbol:       ts.quoteSymbol,
+		apostropheSymbol:  ts.apostropheSymbol,
 	}
 	stringOpeners := base.collectOpeners([]string{"u8\"", "L\"", "U\"", "u\"", "\""}, ts.quoteSymbol)
 	charOpeners := base.collectOpeners([]string{"u8'", "L'", "U'", "u'", "'"}, ts.apostropheSymbol)
 
 	tables := &cLexerTables{
-		keywordSymbols: keywordSymbols,
-		literalSymbols: literalSymbols,
-		maxLiteralLen:  maxLiteralLen,
-		stringOpeners:  stringOpeners,
-		charOpeners:    charOpeners,
+		keywordSymbols:    keywordSymbols,
+		literalSymbols:    literalSymbols,
+		literalAlternates: literalAlternates,
+		maxLiteralLen:     maxLiteralLen,
+		stringOpeners:     stringOpeners,
+		charOpeners:       charOpeners,
 	}
 	if actual, loaded := cLexerTablesCache.LoadOrStore(ts.lang, tables); loaded {
 		ts.applyLexerTables(actual.(*cLexerTables))
@@ -297,9 +433,35 @@ func (ts *CTokenSource) applyLexerTables(tables *cLexerTables) {
 	}
 	ts.keywordSymbols = tables.keywordSymbols
 	ts.literalSymbols = tables.literalSymbols
+	ts.literalAlternates = tables.literalAlternates
 	ts.maxLiteralLen = tables.maxLiteralLen
 	ts.stringOpeners = tables.stringOpeners
 	ts.charOpeners = tables.charOpeners
+}
+
+func orderLiteralCandidates(lexeme string, candidates []literalCandidate) {
+	for i := 0; i < len(candidates); i++ {
+		best := i
+		for j := i + 1; j < len(candidates); j++ {
+			if preferLiteralCandidate(lexeme, candidates[j], candidates[best]) {
+				best = j
+			}
+		}
+		if best != i {
+			candidates[i], candidates[best] = candidates[best], candidates[i]
+		}
+	}
+}
+
+func preferLiteralCandidate(lexeme string, a, b literalCandidate) bool {
+	if a.escapes != b.escapes {
+		return a.escapes < b.escapes
+	}
+	switch lexeme {
+	case "(", ">":
+		return a.sym > b.sym
+	}
+	return a.sym < b.sym
 }
 
 func (ts *CTokenSource) collectOpeners(lexemes []string, fallback gotreesitter.Symbol) []prefixedToken {
@@ -332,7 +494,25 @@ func (ts *CTokenSource) commentToken() (gotreesitter.Token, bool) {
 	ts.cur.advanceByte()
 	ts.cur.advanceByte()
 	if next == '/' {
-		for !ts.cur.eof() && ts.cur.peekByte() != '\n' {
+		for !ts.cur.eof() {
+			if ts.cur.peekByte() == '\\' {
+				if ts.cur.offset+1 < len(ts.src) && ts.src[ts.cur.offset+1] == '\n' {
+					ts.cur.advanceByte()
+					ts.cur.advanceByte()
+					continue
+				}
+				if ts.cur.offset+1 < len(ts.src) && ts.src[ts.cur.offset+1] == '\r' {
+					ts.cur.advanceByte()
+					ts.cur.advanceByte()
+					if !ts.cur.eof() && ts.cur.peekByte() == '\n' {
+						ts.cur.advanceByte()
+					}
+					continue
+				}
+			}
+			if ts.cur.peekByte() == '\n' {
+				break
+			}
 			ts.cur.advanceRune()
 		}
 	} else {
@@ -477,6 +657,9 @@ func (ts *CTokenSource) numberToken() gotreesitter.Token {
 	start := ts.cur.offset
 	startPt := ts.cur.point()
 
+	if !ts.cur.eof() && (ts.cur.peekByte() == '+' || ts.cur.peekByte() == '-') {
+		ts.cur.advanceByte()
+	}
 	if ts.cur.peekByte() == '0' && ts.cur.offset+1 < len(ts.src) && (ts.src[ts.cur.offset+1] == 'x' || ts.src[ts.cur.offset+1] == 'X') {
 		ts.cur.advanceByte()
 		ts.cur.advanceByte()
@@ -518,6 +701,24 @@ func (ts *CTokenSource) numberToken() gotreesitter.Token {
 	return makeToken(ts.numberSymbol, ts.src, start, ts.cur.offset, startPt, ts.cur.point())
 }
 
+func (ts *CTokenSource) shouldLexSignedNumber() bool {
+	if ts.numberSymbol == 0 || !ts.hasAction(ts.numberSymbol) || ts.cur.eof() {
+		return false
+	}
+	b := ts.cur.peekByte()
+	if b != '+' && b != '-' {
+		return false
+	}
+	next := ts.cur.offset + 1
+	if next >= len(ts.src) {
+		return false
+	}
+	if isASCIIDigit(ts.src[next]) {
+		return true
+	}
+	return ts.src[next] == '.' && next+1 < len(ts.src) && isASCIIDigit(ts.src[next+1])
+}
+
 func (ts *CTokenSource) literalToken() (gotreesitter.Token, bool) {
 	sym, n := ts.matchLiteral()
 	if sym == 0 {
@@ -529,6 +730,173 @@ func (ts *CTokenSource) literalToken() (gotreesitter.Token, bool) {
 	return makeToken(sym, ts.src, start, ts.cur.offset, startPt, ts.cur.point()), true
 }
 
+func (ts *CTokenSource) directiveToken() (gotreesitter.Token, bool) {
+	if ts.cur.eof() || ts.cur.peekByte() != '#' {
+		return gotreesitter.Token{}, false
+	}
+
+	end, canonical, specificSym, ok := ts.scanDirective(ts.cur.offset)
+	if !ok {
+		return gotreesitter.Token{}, false
+	}
+	if ts.shouldUseGenericDirective(specificSym) {
+		return ts.emitGenericDirectiveLine(end), true
+	}
+	if specificSym == 0 {
+		return gotreesitter.Token{}, false
+	}
+
+	start := ts.cur.offset
+	startPt := ts.cur.point()
+	ts.cur.advanceBytes(end - start)
+	ts.preprocState = cPreprocNormal
+	ts.lastSyntheticOffset = -1
+
+	tok := makeToken(specificSym, ts.src, start, ts.cur.offset, startPt, ts.cur.point())
+	ts.updatePreprocStateForLiteral(canonical)
+	return tok, true
+}
+
+func (ts *CTokenSource) scanDirective(offset int) (int, string, gotreesitter.Symbol, bool) {
+	if offset < 0 || offset >= len(ts.src) || ts.src[offset] != '#' {
+		return 0, "", 0, false
+	}
+
+	i := offset + 1
+	for i < len(ts.src) {
+		switch ts.src[i] {
+		case ' ', '\t':
+			i++
+			continue
+		}
+		break
+	}
+	wordStart := i
+	for i < len(ts.src) && (isASCIIAlpha(ts.src[i]) || isASCIIDigit(ts.src[i]) || ts.src[i] == '_') {
+		i++
+	}
+	if wordStart == i {
+		return 0, "", 0, false
+	}
+
+	canonical := "#" + bytesToStringNoCopy(ts.src[wordStart:i])
+	sym := ts.literalSymbols[canonical]
+	if sym == 0 {
+		sym = ts.preprocDirectiveSymbol
+	}
+	return i, canonical, sym, true
+}
+
+func (ts *CTokenSource) shouldUseGenericDirective(specificSym gotreesitter.Symbol) bool {
+	if ts.preprocDirectiveSymbol == 0 {
+		return false
+	}
+	if specificSym == 0 {
+		return true
+	}
+	if ts.hasAction(specificSym) {
+		return false
+	}
+	return ts.hasAction(ts.preprocDirectiveSymbol)
+}
+
+func (ts *CTokenSource) emitGenericDirectiveLine(directiveEnd int) gotreesitter.Token {
+	start := ts.cur.offset
+	startPt := ts.cur.point()
+	probe := ts.cur
+	probe.advanceBytes(directiveEnd - start)
+	dirTok := makeToken(ts.preprocDirectiveSymbol, ts.src, start, directiveEnd, startPt, probe.point())
+
+	argProbe := probe
+	argProbe.skipSpacesAndTabs()
+	if ts.preprocArgSymbol != 0 && !argProbe.eof() && argProbe.peekByte() != '\n' {
+		argStart := argProbe.offset
+		argStartPt := argProbe.point()
+		for !argProbe.eof() {
+			b := argProbe.peekByte()
+			if b == '\n' {
+				break
+			}
+			if b == '\\' && argProbe.offset+1 < len(ts.src) && ts.src[argProbe.offset+1] == '\n' {
+				argProbe.advanceByte()
+				argProbe.advanceByte()
+				continue
+			}
+			argProbe.advanceRune()
+		}
+		if argProbe.offset > argStart {
+			ts.pending = append(ts.pending, makeToken(ts.preprocArgSymbol, ts.src, argStart, argProbe.offset, argStartPt, argProbe.point()))
+		}
+	}
+	if ts.preprocEndSymbol != 0 && !argProbe.eof() && argProbe.peekByte() == '\n' {
+		nlStart := argProbe.offset
+		nlStartPt := argProbe.point()
+		argProbe.advanceByte()
+		ts.pending = append(ts.pending, makeToken(ts.preprocEndSymbol, ts.src, nlStart, argProbe.offset, nlStartPt, argProbe.point()))
+	}
+
+	ts.cur = argProbe
+	ts.preprocState = cPreprocNormal
+	ts.lastSyntheticOffset = -1
+	return dirTok
+}
+
+func (ts *CTokenSource) syntheticConditionalEndToken() (gotreesitter.Token, bool) {
+	if ts.endifSymbol == 0 || ts.rBraceSymbol == 0 {
+		return gotreesitter.Token{}, false
+	}
+	if ts.cur.eof() || ts.cur.peekByte() != '\n' {
+		return gotreesitter.Token{}, false
+	}
+	if ts.cur.offset == ts.lastSyntheticOffset {
+		return gotreesitter.Token{}, false
+	}
+	if !ts.hasAction(ts.endifSymbol) || ts.hasAction(ts.rBraceSymbol) {
+		return gotreesitter.Token{}, false
+	}
+	if !ts.nextLineStartsWithBraceThenDirective("#endif") {
+		return gotreesitter.Token{}, false
+	}
+
+	pt := ts.cur.point()
+	ts.lastSyntheticOffset = ts.cur.offset
+	tok := makeToken(ts.endifSymbol, ts.src, ts.cur.offset, ts.cur.offset, pt, pt)
+	tok.Missing = true
+	return tok, true
+}
+
+func (ts *CTokenSource) nextLineStartsWithBraceThenDirective(want string) bool {
+	i := ts.cur.offset + 1
+	i = skipCSpacesAndTabs(ts.src, i)
+	if i >= len(ts.src) || ts.src[i] != '}' {
+		return false
+	}
+	i++
+	i = skipCSpacesAndTabs(ts.src, i)
+	if i >= len(ts.src) || ts.src[i] != '\n' {
+		return false
+	}
+	i++
+	i = skipCSpacesAndTabs(ts.src, i)
+	_, canonical, _, ok := ts.scanDirective(i)
+	return ok && canonical == want
+}
+
+func (ts *CTokenSource) preprocDirectiveState(text string) int {
+	switch text {
+	case "#define":
+		return cPreprocAfterDefine
+	case "#include":
+		return cPreprocAfterInclude
+	case "#if", "#elif":
+		return cPreprocConditionalExpr
+	case "#pragma", "#undef", "#error", "#warning":
+		return cPreprocAfterName
+	default:
+		return cPreprocNormal
+	}
+}
+
 func (ts *CTokenSource) matchLiteral() (gotreesitter.Symbol, int) {
 	remaining := len(ts.src) - ts.cur.offset
 	maxN := ts.maxLiteralLen
@@ -536,6 +904,8 @@ func (ts *CTokenSource) matchLiteral() (gotreesitter.Symbol, int) {
 		maxN = remaining
 	}
 
+	var fallbackSym gotreesitter.Symbol
+	var fallbackN int
 	for n := maxN; n >= 1; n-- {
 		lex := bytesToStringNoCopy(ts.src[ts.cur.offset : ts.cur.offset+n])
 		sym, ok := ts.literalSymbols[lex]
@@ -545,9 +915,21 @@ func (ts *CTokenSource) matchLiteral() (gotreesitter.Symbol, int) {
 		if lexemeNeedsBoundary(lex) && !hasWordBoundaryAfter(ts.src, ts.cur.offset+n) {
 			continue
 		}
-		return sym, n
+		candidates := ts.literalAlternates[lex]
+		if len(candidates) == 0 {
+			candidates = []gotreesitter.Symbol{sym}
+		}
+		if fallbackSym == 0 {
+			fallbackSym = candidates[0]
+			fallbackN = n
+		}
+		for _, candidate := range candidates {
+			if ts.hasAction(candidate) {
+				return candidate, n
+			}
+		}
 	}
-	return 0, 0
+	return fallbackSym, fallbackN
 }
 
 func (ts *CTokenSource) matchAt(lexeme string) bool {
@@ -580,15 +962,40 @@ func (ts *CTokenSource) eofToken() gotreesitter.Token {
 // preprocEndToken emits a preprocessor line terminator token for \n.
 // The C grammar uses preproc_include_token2 as the directive delimiter.
 func (ts *CTokenSource) preprocEndToken() gotreesitter.Token {
+	return ts.lineEndToken(ts.preprocEndSymbol)
+}
+func (ts *CTokenSource) lineEndToken(sym gotreesitter.Symbol) gotreesitter.Token {
 	start := ts.cur.offset
 	startPt := ts.cur.point()
 	ts.cur.advanceByte() // consume '\n'
-	return makeToken(ts.preprocEndSymbol, ts.src, start, ts.cur.offset, startPt, ts.cur.point())
+	return makeToken(sym, ts.src, start, ts.cur.offset, startPt, ts.cur.point())
 }
 
 // preprocArgToken scans the rest of the line (until \n) as a preproc_arg token.
 func (ts *CTokenSource) preprocArgToken() (gotreesitter.Token, bool) {
 	ts.cur.skipSpacesAndTabs()
+	for !ts.cur.eof() && ts.cur.peekByte() == '\\' {
+		next := ts.cur.offset + 1
+		if next >= len(ts.src) {
+			break
+		}
+		if ts.src[next] == '\r' {
+			if next+1 >= len(ts.src) || ts.src[next+1] != '\n' {
+				break
+			}
+			ts.cur.advanceByte()
+			ts.cur.advanceByte()
+			ts.cur.advanceByte()
+			ts.cur.skipSpacesAndTabs()
+			continue
+		}
+		if ts.src[next] != '\n' {
+			break
+		}
+		ts.cur.advanceByte()
+		ts.cur.advanceByte()
+		ts.cur.skipSpacesAndTabs()
+	}
 	if ts.cur.eof() || ts.cur.peekByte() == '\n' {
 		return gotreesitter.Token{}, false
 	}
@@ -601,6 +1008,12 @@ func (ts *CTokenSource) preprocArgToken() (gotreesitter.Token, bool) {
 		b := ts.cur.peekByte()
 		if b == '\n' {
 			break
+		}
+		if b == '/' && ts.cur.offset+1 < len(ts.src) {
+			next := ts.src[ts.cur.offset+1]
+			if next == '/' || next == '*' {
+				break
+			}
 		}
 		if b == '\\' && ts.cur.offset+1 < len(ts.src) && ts.src[ts.cur.offset+1] == '\n' {
 			ts.cur.advanceByte() // backslash
@@ -618,17 +1031,127 @@ func (ts *CTokenSource) preprocArgToken() (gotreesitter.Token, bool) {
 	return makeToken(ts.preprocArgSymbol, ts.src, start, ts.cur.offset, startPt, ts.cur.point()), true
 }
 
-// isPreprocDirective returns true for "flat" preprocessor directives whose
-// grammar productions end with token.immediate(\n) — compiled as
-// preproc_include_token2. Conditional directives (#ifdef, #ifndef, #if,
-// #elif, #else, #endif) handle newlines through lex mode switching and
-// must NOT receive an explicit \n token.
-func (ts *CTokenSource) isPreprocDirective(text string) bool {
-	switch text {
-	case "#define", "#include", "#pragma", "#undef", "#error", "#warning":
-		return true
+func (ts *CTokenSource) systemLibStringToken() (gotreesitter.Token, bool) {
+	if ts.systemLibStringSymbol == 0 || ts.cur.eof() || ts.cur.peekByte() != '<' {
+		return gotreesitter.Token{}, false
 	}
-	return false
+	start := ts.cur.offset
+	startPt := ts.cur.point()
+	ts.cur.advanceByte()
+	for !ts.cur.eof() {
+		b := ts.cur.peekByte()
+		if b == '\n' {
+			return gotreesitter.Token{}, false
+		}
+		ts.cur.advanceRune()
+		if b == '>' {
+			return makeToken(ts.systemLibStringSymbol, ts.src, start, ts.cur.offset, startPt, ts.cur.point()), true
+		}
+	}
+	return gotreesitter.Token{}, false
+}
+
+// updatePreprocStateForLiteral tracks directive-specific newline/argument
+// behavior for the token-source bridge. Flat directives use preproc_arg +
+// preproc_include_token2, while #if/#elif condition lines tokenize their
+// expression normally and terminate with the literal newline token.
+func (ts *CTokenSource) updatePreprocStateForLiteral(text string) {
+	if ts.preprocState == cPreprocAfterDefineParams {
+		if text == ")" {
+			ts.preprocState = cPreprocAfterName
+		}
+		return
+	}
+	switch text {
+	case "#define":
+		ts.preprocState = cPreprocAfterDefine
+	case "#include":
+		ts.preprocState = cPreprocAfterInclude
+	case "#if", "#elif":
+		ts.preprocState = cPreprocConditionalExpr
+	case "#pragma", "#undef", "#error", "#warning":
+		ts.preprocState = cPreprocAfterName
+	}
+}
+
+func (ts *CTokenSource) hasAction(sym gotreesitter.Symbol) bool {
+	if ts == nil || ts.lang == nil || sym == 0 {
+		return false
+	}
+	if len(ts.glrStates) > 0 {
+		for _, state := range ts.glrStates {
+			if ts.lookupActionIndex(state, sym) != 0 {
+				return true
+			}
+		}
+		return false
+	}
+	return ts.lookupActionIndex(ts.parserState, sym) != 0
+}
+
+func (ts *CTokenSource) lookupActionIndex(state gotreesitter.StateID, sym gotreesitter.Symbol) uint16 {
+	if ts.lang == nil {
+		return 0
+	}
+	denseLimit := len(ts.lang.ParseTable)
+	if ts.lang.LargeStateCount > 0 {
+		denseLimit = int(ts.lang.LargeStateCount)
+	}
+	if int(state) < denseLimit {
+		if int(state) >= len(ts.lang.ParseTable) {
+			return 0
+		}
+		row := ts.lang.ParseTable[state]
+		if int(sym) >= len(row) {
+			return 0
+		}
+		return row[sym]
+	}
+
+	smallBase := int(ts.lang.LargeStateCount)
+	smallIdx := int(state) - smallBase
+	if smallIdx < 0 || smallIdx >= len(ts.lang.SmallParseTableMap) {
+		return 0
+	}
+
+	offset := ts.lang.SmallParseTableMap[smallIdx]
+	table := ts.lang.SmallParseTable
+	if int(offset) >= len(table) {
+		return 0
+	}
+
+	groupCount := table[offset]
+	pos := int(offset) + 1
+	for i := uint16(0); i < groupCount; i++ {
+		if pos+1 >= len(table) {
+			break
+		}
+		sectionValue := table[pos]
+		symbolCount := table[pos+1]
+		pos += 2
+		for j := uint16(0); j < symbolCount; j++ {
+			if pos >= len(table) {
+				break
+			}
+			if table[pos] == uint16(sym) {
+				return sectionValue
+			}
+			pos++
+		}
+	}
+	return 0
+}
+
+func skipCSpacesAndTabs(src []byte, offset int) int {
+	for offset < len(src) {
+		switch src[offset] {
+		case ' ', '\t', '\r', '\f':
+			offset++
+			continue
+		}
+		break
+	}
+	return offset
 }
 
 func isCIdentStart(b byte) bool {
@@ -641,7 +1164,11 @@ func isCIdentPart(b byte) bool {
 
 func isCPrimitiveType(text string) bool {
 	switch text {
-	case "char", "int", "float", "double", "void", "_Bool", "_Complex", "bool", "__int128", "size_t", "ssize_t", "ptrdiff_t", "intptr_t", "uintptr_t", "wchar_t", "char16_t", "char32_t":
+	case "char", "int", "float", "double", "void", "_Bool", "_Complex", "bool", "__int128",
+		"size_t", "ssize_t", "ptrdiff_t", "intptr_t", "uintptr_t",
+		"int8_t", "int16_t", "int32_t", "int64_t",
+		"uint8_t", "uint16_t", "uint32_t", "uint64_t",
+		"wchar_t", "char16_t", "char32_t":
 		return true
 	default:
 		return false

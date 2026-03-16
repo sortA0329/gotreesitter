@@ -30,6 +30,7 @@ func (p *queryParser) parse() error {
 			}
 			last := &p.q.patterns[len(p.q.patterns)-1]
 			last.predicates = append(last.predicates, pred)
+			last.endByte = uint32(p.pos)
 			if err := p.validatePatternPredicates(last); err != nil {
 				return err
 			}
@@ -39,34 +40,46 @@ func (p *queryParser) parse() error {
 		switch {
 		case ch == '(':
 			// A top-level pattern.
+			startByte := uint32(p.pos)
 			pat, err := p.parsePattern(0, 0)
 			if err != nil {
 				return err
 			}
+			pat.startByte = startByte
+			pat.endByte = uint32(p.pos)
 			p.q.patterns = append(p.q.patterns, *pat)
 
 		case ch == '[':
 			// Top-level alternation: ["func" "return"] @keyword
+			startByte := uint32(p.pos)
 			pat, err := p.parseAlternationPattern(0, 0)
 			if err != nil {
 				return err
 			}
+			pat.startByte = startByte
+			pat.endByte = uint32(p.pos)
 			p.q.patterns = append(p.q.patterns, *pat)
 
 		case ch == '"':
 			// Top-level string match: "func" @keyword
+			startByte := uint32(p.pos)
 			pat, err := p.parseStringPattern(0)
 			if err != nil {
 				return err
 			}
+			pat.startByte = startByte
+			pat.endByte = uint32(p.pos)
 			p.q.patterns = append(p.q.patterns, *pat)
 
 		case isIdentStart(ch):
 			// Top-level field shorthand: field: (pattern)
+			startByte := uint32(p.pos)
 			pat, err := p.parseFieldShorthandPattern(0)
 			if err != nil {
 				return err
 			}
+			pat.startByte = startByte
+			pat.endByte = uint32(p.pos)
 			p.q.patterns = append(p.q.patterns, *pat)
 
 		case ch == '.':
@@ -109,6 +122,11 @@ func (p *queryParser) parsePattern(depth int, parentSymbolHint Symbol) (*Pattern
 		if err != nil {
 			return nil, err
 		}
+		if nodeType == "_" {
+			// Tree-sitter distinguishes parenthesized `(_)` (named wildcard)
+			// from bare `_` (matches named or anonymous nodes).
+			step.isNamed = true
+		}
 		pat.steps = append(pat.steps, step)
 		rootIdx = 0
 
@@ -132,9 +150,26 @@ func (p *queryParser) parsePattern(depth int, parentSymbolHint Symbol) (*Pattern
 		if len(innerPat.steps) == 0 {
 			return nil, fmt.Errorf("query: empty grouped pattern at position %d", p.pos)
 		}
-		pat.steps = append(pat.steps, innerPat.steps...)
+
+		if p.peekNextIsPatternElement() {
+			// Multi-sibling group: ((a) (b) ...) — insert wildcard root.
+			pat.steps = append(pat.steps, QueryStep{
+				symbol:    0,
+				isNamed:   false,
+				captureID: -1,
+				depth:     depth,
+			})
+			rootIdx = 0
+			for i := range innerPat.steps {
+				innerPat.steps[i].depth++
+			}
+			pat.steps = append(pat.steps, innerPat.steps...)
+		} else {
+			// Single-element group: ((a) @cap (#pred)) — unchanged.
+			pat.steps = append(pat.steps, innerPat.steps...)
+			rootIdx = 0
+		}
 		pat.predicates = append(pat.predicates, innerPat.predicates...)
-		rootIdx = 0
 
 	default:
 		return nil, fmt.Errorf("query: expected node type after '(' at position %d: query: expected identifier at position %d", p.pos, p.pos)
@@ -373,6 +408,7 @@ func (p *queryParser) parseAlternationPattern(depth int, parentSymbolHint Symbol
 
 		var branchPat *Pattern
 		var err error
+		altField := FieldID(0)
 		if ch == '(' || ch == '[' || ch == '"' {
 			branchPat, err = p.parsePatternElement(depth, parentSymbolHint)
 		} else if isIdentStart(ch) {
@@ -386,6 +422,11 @@ func (p *queryParser) parseAlternationPattern(depth int, parentSymbolHint Symbol
 			if p.pos < len(p.input) && p.input[p.pos] == ':' {
 				p.pos++ // consume ':'
 				p.skipWhitespaceAndComments()
+				fieldID, fieldErr := p.resolveField(ident, parentSymbolHint, parentSymbolHint)
+				if fieldErr != nil {
+					return nil, fieldErr
+				}
+				altField = fieldID
 				branchPat, err = p.parsePatternElement(depth, parentSymbolHint)
 			} else {
 				branchPat, err = p.parseIdentifierPatternFromName(depth, ident)
@@ -404,10 +445,17 @@ func (p *queryParser) parseAlternationPattern(depth int, parentSymbolHint Symbol
 		alt := alternativeSymbol{
 			symbol:    root.symbol,
 			isNamed:   root.isNamed,
+			field:     altField,
 			textMatch: root.textMatch,
 			captureID: -1,
 		}
-		if len(branchPat.predicates) > 0 || len(branchPat.steps) > 1 {
+		if root.field != 0 {
+			alt.field = root.field
+			// Field constraints are evaluated at branch selection time; keep the
+			// branch root itself unconstrained after selection.
+			branchPat.steps[0].field = 0
+		}
+		if len(branchPat.predicates) > 0 || len(branchPat.steps) > 1 || alt.field != 0 {
 			alt.steps = make([]QueryStep, len(branchPat.steps))
 			copy(alt.steps, branchPat.steps)
 			alt.predicates = make([]QueryPredicate, len(branchPat.predicates))

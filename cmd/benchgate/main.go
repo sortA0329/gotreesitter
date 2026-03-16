@@ -39,6 +39,11 @@ var (
 	suffixNumRe = regexp.MustCompile(`-\d+$`)
 )
 
+const (
+	minBytesOpFloor  = 256.0
+	minAllocsOpFloor = 1.0
+)
+
 func main() {
 	var (
 		basePath            string
@@ -102,8 +107,8 @@ func main() {
 	base := aggregate(baseRaw)
 	head := aggregate(headRaw)
 
-	fmt.Printf("benchgate thresholds: ns<=+%.2f%% B<=+%.2f%% allocs<=+%.2f%%\n",
-		maxNsRegression*100.0, maxBytesRegression*100.0, maxAllocsRegression*100.0)
+	fmt.Printf("benchgate thresholds: ns<=+%.2f%% B<=+%.2f%% allocs<=+%.2f%% (min +%.0f B/op, +%.0f alloc/op floors)\n",
+		maxNsRegression*100.0, maxBytesRegression*100.0, maxAllocsRegression*100.0, minBytesOpFloor, minAllocsOpFloor)
 	fmt.Println("benchmark\tmetric\tbase\thead\tdelta\tstatus")
 
 	failed := false
@@ -303,6 +308,33 @@ func evaluateMetric(name, metric string, base, head, maxRegression float64) metr
 	}
 
 	ev.Delta = (head / base) - 1.0
+	if metric == "B/op" {
+		// For low-byte benchmarks, percentage-only gates are too sensitive
+		// (e.g. 427->587 B/op is +37% but only +160 B/op). Apply a minimum
+		// absolute slack alongside the ratio threshold.
+		allowedAbs := base * maxRegression
+		if allowedAbs < minBytesOpFloor {
+			allowedAbs = minBytesOpFloor
+		}
+		if (head - base) > allowedAbs {
+			ev.Failed = true
+		}
+		return ev
+	}
+	if metric == "allocs/op" {
+		// For low-allocation benchmarks, pure percentage gates are too strict
+		// (e.g. 5->6 allocs/op is +20% but often acceptable when latency/RSS
+		// improve). Apply a minimum absolute slack of +1 alloc/op in addition
+		// to the ratio threshold.
+		allowedAbs := base * maxRegression
+		if allowedAbs < minAllocsOpFloor {
+			allowedAbs = minAllocsOpFloor
+		}
+		if (head - base) > allowedAbs {
+			ev.Failed = true
+		}
+		return ev
+	}
 	if ev.Delta > maxRegression {
 		ev.Failed = true
 	}

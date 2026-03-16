@@ -4,12 +4,12 @@ package grammars
 
 func init() {
 	Register(LangEntry{
-		Name:           "csv",
-		Extensions:     nil,
-		Language:       CsvLanguage,
-		HighlightQuery: csvHighlightQuery,
+		Name:               "csv",
+		Extensions:         nil,
+		Language:           CsvLanguage,
+		HighlightQuery:     csvHighlightQuery,
 		TokenSourceFactory: defaultTokenSourceFactory("csv"),
 	})
 }
 
-const csvHighlightQuery = ""
+const csvHighlightQuery = "(text) @string\n(number) @number\n(float) @float\n(boolean) @boolean\n\",\" @punctuation.delimiter\n"

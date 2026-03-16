@@ -335,7 +335,6 @@ func ftnScanNumber(lexer *gotreesitter.ExternalLexer) ftnNumberResult {
 // ---------------------------------------------------------------------------
 
 func ftnScanBoz(lexer *gotreesitter.ExternalLexer) bool {
-	lexer.SetResultSymbol(ftnSymBozLiteral)
 	bozPrefix := false
 	var quote rune
 
@@ -360,6 +359,7 @@ func ftnScanBoz(lexer *gotreesitter.ExternalLexer) bool {
 			return false // no boz suffix or prefix provided
 		}
 		lexer.MarkEnd()
+		lexer.SetResultSymbol(ftnSymBozLiteral)
 		return true
 	}
 	return false
@@ -407,8 +407,8 @@ func ftnScanHollerithConstant(lexer *gotreesitter.ExternalLexer) bool {
 		}
 		ftnAdvance(lexer)
 	}
-	lexer.SetResultSymbol(ftnSymHollerithConstant)
 	lexer.MarkEnd()
+	lexer.SetResultSymbol(ftnSymHollerithConstant)
 	return true
 }
 
@@ -420,6 +420,7 @@ func ftnScanEndOfStatement(s *ftnState, lexer *gotreesitter.ExternalLexer) bool 
 	// EOF always ends the statement
 	if lexer.Lookahead() == 0 {
 		ftnSkip(lexer)
+		lexer.MarkEnd()
 		lexer.SetResultSymbol(ftnSymEndOfStatement)
 		return true
 	}
@@ -445,6 +446,7 @@ func ftnScanEndOfStatement(s *ftnState, lexer *gotreesitter.ExternalLexer) bool 
 		}
 	}
 
+	lexer.MarkEnd()
 	lexer.SetResultSymbol(ftnSymEndOfStatement)
 	return true
 }
@@ -460,6 +462,7 @@ func ftnScanStartLineContinuation(s *ftnState, lexer *gotreesitter.ExternalLexer
 	}
 	// Consume the '&'
 	ftnAdvance(lexer)
+	lexer.MarkEnd()
 	lexer.SetResultSymbol(ftnSymLineContinuation)
 	return true
 }
@@ -479,6 +482,7 @@ func ftnScanEndLineContinuation(s *ftnState, lexer *gotreesitter.ExternalLexer) 
 	if lexer.Lookahead() == '&' {
 		ftnAdvance(lexer)
 	}
+	lexer.MarkEnd()
 	lexer.SetResultSymbol(ftnSymLineContinuation)
 	return true
 }
@@ -491,8 +495,6 @@ func ftnScanStringLiteralKind(lexer *gotreesitter.ExternalLexer) bool {
 	if !unicode.IsLetter(lexer.Lookahead()) {
 		return false
 	}
-
-	lexer.SetResultSymbol(ftnSymStringLiteralKind)
 
 	var currentChar rune
 
@@ -509,6 +511,7 @@ func ftnScanStringLiteralKind(lexer *gotreesitter.ExternalLexer) bool {
 		return false
 	}
 
+	lexer.SetResultSymbol(ftnSymStringLiteralKind)
 	return true
 }
 
@@ -524,7 +527,6 @@ func ftnScanStringLiteral(lexer *gotreesitter.ExternalLexer) bool {
 	}
 
 	ftnAdvance(lexer)
-	lexer.SetResultSymbol(ftnSymStringLiteral)
 
 	for lexer.Lookahead() != '\n' && lexer.Lookahead() != 0 {
 		// Handle line continuations inside string literals
@@ -552,6 +554,7 @@ func ftnScanStringLiteral(lexer *gotreesitter.ExternalLexer) bool {
 			lexer.MarkEnd()
 			ftnSkipLiteralContinuationSequence(lexer)
 			if lexer.Lookahead() != openingQuote {
+				lexer.SetResultSymbol(ftnSymStringLiteral)
 				return true
 			}
 		}
@@ -570,6 +573,7 @@ func ftnScanPreprocUnaryOperator(lexer *gotreesitter.ExternalLexer) bool {
 	ch := lexer.Lookahead()
 	if ch == '!' || ch == '~' || ch == '-' || ch == '+' {
 		ftnAdvance(lexer)
+		lexer.MarkEnd()
 		lexer.SetResultSymbol(ftnSymPreprocUnaryOp)
 		return true
 	}
@@ -603,6 +607,7 @@ func ftnTrackLabeledDo(s *ftnState, label int32) {
 func ftnScanDoLabelEos(s *ftnState, lexer *gotreesitter.ExternalLexer) bool {
 	if s.isPendingEosVirtual {
 		s.isPendingEosVirtual = false
+		lexer.MarkEnd()
 		lexer.SetResultSymbol(ftnSymEndOfStatement)
 		return true
 	}
@@ -613,6 +618,7 @@ func ftnScanDoLabelEos(s *ftnState, lexer *gotreesitter.ExternalLexer) bool {
 // DO_LABEL_VIRTUAL or DO_LABEL_CONTINUE and updates internal state accordingly.
 func ftnScanDoLabelPending(s *ftnState, lexer *gotreesitter.ExternalLexer) bool {
 	if s.pendingLabelVirtual > 0 {
+		lexer.MarkEnd()
 		if s.pendingLabelVirtual > 1 {
 			s.pendingLabelVirtual--
 			// schedule an eos for the next token to finish the virtual statement
@@ -632,6 +638,7 @@ func ftnScanDoLabelPending(s *ftnState, lexer *gotreesitter.ExternalLexer) bool 
 // consumed a proper integer value as a label.
 func ftnScanDoLabel(s *ftnState, lexer *gotreesitter.ExternalLexer, label int32) {
 	ftnTrackLabeledDo(s, label)
+	lexer.MarkEnd()
 	lexer.SetResultSymbol(ftnSymDoLabel)
 }
 

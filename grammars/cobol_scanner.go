@@ -1,6 +1,7 @@
 package grammars
 
 import (
+	"sync"
 	"unicode"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
@@ -8,7 +9,7 @@ import (
 
 // External token indexes for the COBOL grammar.
 const (
-	cobolTokWhiteSpaces      = 0
+	cobolTokWhiteSpaces       = 0
 	cobolTokLinePrefixComment = 1
 	cobolTokLineSuffixComment = 2
 	cobolTokLineComment       = 3
@@ -16,14 +17,28 @@ const (
 	cobolTokMultilineString   = 5
 )
 
-const (
-	cobolSymWhiteSpaces      gotreesitter.Symbol = 579
-	cobolSymLinePrefixComment gotreesitter.Symbol = 580
-	cobolSymLineSuffixComment gotreesitter.Symbol = 581
-	cobolSymLineComment       gotreesitter.Symbol = 582
-	cobolSymCommentEntry      gotreesitter.Symbol = 583
-	cobolSymMultilineString   gotreesitter.Symbol = 584
-)
+// cobolSyms caches resolved external symbol IDs for the COBOL grammar.
+var cobolSyms struct {
+	once              sync.Once
+	whiteSpaces       gotreesitter.Symbol
+	linePrefixComment gotreesitter.Symbol
+	lineSuffixComment gotreesitter.Symbol
+	lineComment       gotreesitter.Symbol
+	commentEntry      gotreesitter.Symbol
+	multilineString   gotreesitter.Symbol
+}
+
+func resolveCobolSyms() {
+	cobolSyms.once.Do(func() {
+		lang := CobolLanguage()
+		cobolSyms.whiteSpaces = lang.ExternalSymbols[cobolTokWhiteSpaces]
+		cobolSyms.linePrefixComment = lang.ExternalSymbols[cobolTokLinePrefixComment]
+		cobolSyms.lineSuffixComment = lang.ExternalSymbols[cobolTokLineSuffixComment]
+		cobolSyms.lineComment = lang.ExternalSymbols[cobolTokLineComment]
+		cobolSyms.commentEntry = lang.ExternalSymbols[cobolTokCommentEntry]
+		cobolSyms.multilineString = lang.ExternalSymbols[cobolTokMultilineString]
+	})
+}
 
 // COBOL comment entry keywords (case-insensitive prefixes).
 var cobolCommentEntryKeywords = []string{
@@ -47,6 +62,8 @@ func (CobolExternalScanner) Serialize(payload any, buf []byte) int { return 0 }
 func (CobolExternalScanner) Deserialize(payload any, buf []byte)   {}
 
 func (CobolExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, validSymbols []bool) bool {
+	resolveCobolSyms()
+
 	if lexer.Lookahead() == 0 {
 		return false
 	}
@@ -57,19 +74,19 @@ func (CobolExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer,
 			for cobolIsWhiteSpace(lexer.Lookahead()) {
 				lexer.Advance(true)
 			}
-			lexer.SetResultSymbol(cobolSymWhiteSpaces)
 			lexer.MarkEnd()
+			lexer.SetResultSymbol(cobolSyms.whiteSpaces)
 			return true
 		}
 	}
 
 	// LINE_PREFIX_COMMENT: columns 1-6 (0-5)
 	if cobolValid(validSymbols, cobolTokLinePrefixComment) && lexer.GetColumn() <= 5 {
-		for lexer.GetColumn() <= 5 {
+		for lexer.GetColumn() <= 5 && lexer.Lookahead() != 0 && lexer.Lookahead() != '\n' {
 			lexer.Advance(true)
 		}
-		lexer.SetResultSymbol(cobolSymLinePrefixComment)
 		lexer.MarkEnd()
+		lexer.SetResultSymbol(cobolSyms.linePrefixComment)
 		return true
 	}
 
@@ -80,8 +97,8 @@ func (CobolExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer,
 				for lexer.Lookahead() != '\n' && lexer.Lookahead() != 0 {
 					lexer.Advance(true)
 				}
-				lexer.SetResultSymbol(cobolSymLineComment)
 				lexer.MarkEnd()
+				lexer.SetResultSymbol(cobolSyms.lineComment)
 				return true
 			}
 			lexer.Advance(true)
@@ -96,8 +113,8 @@ func (CobolExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer,
 			for lexer.Lookahead() != '\n' && lexer.Lookahead() != 0 {
 				lexer.Advance(true)
 			}
-			lexer.SetResultSymbol(cobolSymLineSuffixComment)
 			lexer.MarkEnd()
+			lexer.SetResultSymbol(cobolSyms.lineSuffixComment)
 			return true
 		}
 	}
@@ -105,8 +122,16 @@ func (CobolExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer,
 	// COMMENT_ENTRY: content that doesn't start with a known keyword
 	if cobolValid(validSymbols, cobolTokCommentEntry) {
 		if !cobolStartsWithKeyword(lexer) {
+			// Never emit zero-width external tokens: they can cause scanner
+			// spin loops under repeated external-token probes.
+			if lexer.Lookahead() == 0 || lexer.Lookahead() == '\n' {
+				return false
+			}
+			for lexer.Lookahead() != '\n' && lexer.Lookahead() != 0 && lexer.GetColumn() < 72 {
+				lexer.Advance(true)
+			}
 			lexer.MarkEnd()
-			lexer.SetResultSymbol(cobolSymCommentEntry)
+			lexer.SetResultSymbol(cobolSyms.commentEntry)
 			return true
 		}
 		return false
@@ -123,9 +148,9 @@ func (CobolExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer,
 				lexer.Advance(false)
 			}
 			if lexer.Lookahead() == '"' {
-				lexer.SetResultSymbol(cobolSymMultilineString)
 				lexer.Advance(false)
 				lexer.MarkEnd()
+				lexer.SetResultSymbol(cobolSyms.multilineString)
 				return true
 			}
 			// Skip to end of line

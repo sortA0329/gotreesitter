@@ -217,7 +217,7 @@ func (q *Query) matchesPredicates(predicates []QueryPredicate, captures []QueryC
 			}
 			for _, n := range nodes {
 				parent := n.Parent()
-				if parent != nil && typeNameMatchesAny(parent.Type(lang), pred.values) {
+				if parent != nil && nodeTypeMatchesAny(parent, pred.values, lang) {
 					return false
 				}
 			}
@@ -356,12 +356,40 @@ func typeNameMatchesAny(typeName string, names []string) bool {
 	return false
 }
 
+func nodeTypeMatchesAny(node *Node, typeNames []string, lang *Language) bool {
+	if node == nil || lang == nil {
+		return false
+	}
+	nodeType := node.Type(lang)
+	if typeNameMatchesAny(nodeType, typeNames) {
+		return true
+	}
+	nodeInternal := node.Symbol()
+	nodePublic := lang.PublicSymbol(nodeInternal)
+	for _, typeName := range typeNames {
+		supertype, ok := lang.SymbolByName(typeName)
+		if ok {
+			if nodeInternal == supertype || nodePublic == supertype {
+				return true
+			}
+			if lang.IsSupertype(supertype) {
+				for _, child := range lang.SupertypeChildren(supertype) {
+					if child == nodeInternal || lang.PublicSymbol(child) == nodePublic {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
 func nodeHasAncestorType(node *Node, typeNames []string, lang *Language) bool {
 	if node == nil || lang == nil {
 		return false
 	}
 	for p := node.Parent(); p != nil; p = p.Parent() {
-		if typeNameMatchesAny(p.Type(lang), typeNames) {
+		if nodeTypeMatchesAny(p, typeNames, lang) {
 			return true
 		}
 	}

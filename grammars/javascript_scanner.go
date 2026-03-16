@@ -8,22 +8,22 @@ import (
 
 // External token indexes for the javascript grammar.
 const (
-	jsTokAutoSemicolon   = 0
-	jsTokTemplateChars   = 1
-	jsTokTernaryQmark    = 2
-	jsTokHtmlComment     = 3
-	jsTokLogicalOr       = 4
-	jsTokEscapeSequence  = 5
-	jsTokRegexPattern    = 6
-	jsTokJsxText         = 7
+	jsTokAutoSemicolon  = 0
+	jsTokTemplateChars  = 1
+	jsTokTernaryQmark   = 2
+	jsTokHtmlComment    = 3
+	jsTokLogicalOr      = 4
+	jsTokEscapeSequence = 5
+	jsTokRegexPattern   = 6
+	jsTokJsxText        = 7
 )
 
 const (
-	jsSymAutoSemicolon   gotreesitter.Symbol = 129
-	jsSymTemplateChars   gotreesitter.Symbol = 130
-	jsSymTernaryQmark    gotreesitter.Symbol = 131
-	jsSymHtmlComment     gotreesitter.Symbol = 132
-	jsSymJsxText         gotreesitter.Symbol = 133
+	jsSymAutoSemicolon gotreesitter.Symbol = 129
+	jsSymTemplateChars gotreesitter.Symbol = 130
+	jsSymTernaryQmark  gotreesitter.Symbol = 131
+	jsSymHtmlComment   gotreesitter.Symbol = 132
+	jsSymJsxText       gotreesitter.Symbol = 133
 )
 
 // JavaScriptExternalScanner handles automatic semicolons, template strings,
@@ -34,6 +34,7 @@ func (JavaScriptExternalScanner) Create() any                           { return
 func (JavaScriptExternalScanner) Destroy(payload any)                   {}
 func (JavaScriptExternalScanner) Serialize(payload any, buf []byte) int { return 0 }
 func (JavaScriptExternalScanner) Deserialize(payload any, buf []byte)   {}
+func (JavaScriptExternalScanner) SupportsIncrementalReuse() bool        { return true }
 
 func (JavaScriptExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, validSymbols []bool) bool {
 	if jsValid(validSymbols, jsTokTemplateChars) {

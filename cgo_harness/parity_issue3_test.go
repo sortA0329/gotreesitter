@@ -28,6 +28,7 @@ func assertGoIssue3FieldLookups(t *testing.T, src []byte) {
 	if err != nil {
 		t.Fatalf("go parse failed: %v", err)
 	}
+	defer releaseGoTree(tree)
 
 	fn := firstGoNamedChildByType(tree.RootNode(), lang, "function_declaration")
 	if fn == nil {
@@ -72,8 +73,8 @@ func TestParityIssue3Repros(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			if meta, ok := paritySkips[tc.name]; ok && meta.skipReason != "" {
-				t.Skipf("known mismatch: %s", meta.skipReason)
+			if reason := paritySkipReason(tc.name); reason != "" {
+				t.Skipf("known mismatch: %s", reason)
 			}
 			runParityCase(t, tc, "issue3", normalizedSource(tc.name, tc.source))
 		})

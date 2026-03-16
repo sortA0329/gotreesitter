@@ -97,8 +97,7 @@ type editSite struct {
 	end    gotreesitter.Point
 }
 
-func makeGoBenchmarkEditSites(src []byte) []editSite {
-	const marker = "v := "
+func makeBenchmarkEditSites(src []byte, marker string) []editSite {
 	needle := []byte(marker)
 	sites := make([]editSite, 0, 64)
 	from := 0
@@ -121,6 +120,10 @@ func makeGoBenchmarkEditSites(src []byte) []editSite {
 	return sites
 }
 
+func makeGoBenchmarkEditSites(src []byte) []editSite {
+	return makeBenchmarkEditSites(src, "v := ")
+}
+
 func toggleDigitAt(src []byte, offset int) {
 	if offset < 0 || offset >= len(src) {
 		return
@@ -130,6 +133,15 @@ func toggleDigitAt(src []byte, offset int) {
 		return
 	}
 	src[offset] = '0'
+}
+
+func prepareEditedBenchmarkSource(cur, scratch []byte, offset int) []byte {
+	if len(scratch) != len(cur) {
+		scratch = make([]byte, len(cur))
+	}
+	copy(scratch, cur)
+	toggleDigitAt(scratch, offset)
+	return scratch
 }
 
 func mustGoTokenSource(tb testing.TB, src []byte, lang *gotreesitter.Language) *grammars.GoTokenSource {
@@ -188,7 +200,9 @@ func BenchmarkGoParseFullDFA(b *testing.B) {
 		gotreesitter.ResetArenaProfile()
 		gotreesitter.ResetPerfCounters()
 		gotreesitter.EnableArenaProfile(true)
+		gotreesitter.EnableRuntimeAudit(true)
 		defer gotreesitter.EnableArenaProfile(false)
+		defer gotreesitter.EnableRuntimeAudit(false)
 	}
 
 	b.ReportAllocs()
@@ -236,6 +250,18 @@ func BenchmarkGoParseFullDFA(b *testing.B) {
 			"STATS_PARSE nodes_new=%d children_ptrs=%d extras=%d errors=%d reuse_bytes=%d max_stacks=%d\n",
 			lastRuntime.NodesAllocated, p.ParentChildPointers, p.ExtraNodes, p.ErrorNodes, p.ReuseNonLeafBytes, lastRuntime.MaxStacksSeen,
 		)
+		fmt.Printf(
+			"STATS_RUNTIME single_iters=%d multi_iters=%d single_tokens=%d multi_tokens=%d gss_single=%d gss_multi=%d\n",
+			lastRuntime.SingleStackIterations, lastRuntime.MultiStackIterations, lastRuntime.SingleStackTokens, lastRuntime.MultiStackTokens, lastRuntime.SingleStackGSSNodes, lastRuntime.MultiStackGSSNodes,
+		)
+		fmt.Printf(
+			"STATS_SURVIVOR gss_alloc=%d gss_retained=%d gss_dropped=%d parent_alloc=%d parent_retained=%d parent_dropped=%d leaf_alloc=%d leaf_retained=%d leaf_dropped=%d merge_in=%d merge_out=%d merge_slots=%d cull_in=%d cull_out=%d\n",
+			lastRuntime.GSSNodesAllocated, lastRuntime.GSSNodesRetained, lastRuntime.GSSNodesDroppedSameToken,
+			lastRuntime.ParentNodesAllocated, lastRuntime.ParentNodesRetained, lastRuntime.ParentNodesDroppedSameToken,
+			lastRuntime.LeafNodesAllocated, lastRuntime.LeafNodesRetained, lastRuntime.LeafNodesDroppedSameToken,
+			lastRuntime.MergeStacksIn, lastRuntime.MergeStacksOut, lastRuntime.MergeSlotsUsed,
+			lastRuntime.GlobalCullStacksIn, lastRuntime.GlobalCullStacksOut,
+		)
 	}
 }
 
@@ -273,20 +299,15 @@ func BenchmarkGoParseIncrementalSingleByteEdit(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(src)))
 	b.ResetTimer()
+	scratch := make([]byte, len(src))
 
 	for i := 0; i < b.N; i++ {
-		// Toggle one ASCII digit in place so byte/point ranges stay stable.
-		if src[editAt] == '0' {
-			src[editAt] = '1'
-		} else {
-			src[editAt] = '0'
-		}
-
+		next := prepareEditedBenchmarkSource(src, scratch, editAt)
 		tree.Edit(edit)
-		ts.Reset(src)
+		ts.Reset(next)
 		old := tree
 		var err error
-		tree, err = parser.ParseIncrementalWithTokenSource(src, tree, ts)
+		tree, err = parser.ParseIncrementalWithTokenSource(next, tree, ts)
 		if err != nil {
 			b.Fatalf("incremental parse error: %v", err)
 		}
@@ -296,6 +317,7 @@ func BenchmarkGoParseIncrementalSingleByteEdit(b *testing.B) {
 		if old != tree {
 			old.Release()
 		}
+		src, scratch = next, src
 	}
 	tree.Release()
 }
@@ -309,7 +331,9 @@ func BenchmarkGoParseIncrementalSingleByteEditDFA(b *testing.B) {
 		gotreesitter.ResetArenaProfile()
 		gotreesitter.ResetPerfCounters()
 		gotreesitter.EnableArenaProfile(true)
+		gotreesitter.EnableRuntimeAudit(true)
 		defer gotreesitter.EnableArenaProfile(false)
+		defer gotreesitter.EnableRuntimeAudit(false)
 	}
 	var editTotalNS uint64
 	var reuseTotalNS uint64
@@ -325,6 +349,26 @@ func BenchmarkGoParseIncrementalSingleByteEditDFA(b *testing.B) {
 	var recoverHits uint64
 	var entryScratchPeak uint64
 	maxStacksSeen := 0
+	singleStackIterations := 0
+	multiStackIterations := 0
+	var singleStackTokens uint64
+	var multiStackTokens uint64
+	var singleStackGSSNodes uint64
+	var multiStackGSSNodes uint64
+	var gssNodesAllocated uint64
+	var gssNodesRetained uint64
+	var gssNodesDropped uint64
+	var parentNodesAllocated uint64
+	var parentNodesRetained uint64
+	var parentNodesDropped uint64
+	var leafNodesAllocated uint64
+	var leafNodesRetained uint64
+	var leafNodesDropped uint64
+	var mergeStacksIn uint64
+	var mergeStacksOut uint64
+	var mergeSlotsUsed uint64
+	var globalCullStacksIn uint64
+	var globalCullStacksOut uint64
 
 	editAt := bytes.Index(src, []byte("v := 0"))
 	if editAt < 0 {
@@ -358,14 +402,10 @@ func BenchmarkGoParseIncrementalSingleByteEditDFA(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(src)))
 	b.ResetTimer()
+	scratch := make([]byte, len(src))
 
 	for i := 0; i < b.N; i++ {
-		if src[editAt] == '0' {
-			src[editAt] = '1'
-		} else {
-			src[editAt] = '0'
-		}
-
+		next := prepareEditedBenchmarkSource(src, scratch, editAt)
 		editStart := time.Now()
 		tree.Edit(edit)
 		if statsEnabled {
@@ -374,7 +414,7 @@ func BenchmarkGoParseIncrementalSingleByteEditDFA(b *testing.B) {
 		old := tree
 		if statsEnabled {
 			var prof gotreesitter.IncrementalParseProfile
-			tree, prof, err = parser.ParseIncrementalProfiled(src, tree)
+			tree, prof, err = parser.ParseIncrementalProfiled(next, tree)
 			reuseTotalNS += uint64(prof.ReuseCursorNanos)
 			parseTotalNS += uint64(prof.ReparseNanos)
 			reusedSubtrees += prof.ReusedSubtrees
@@ -386,6 +426,26 @@ func BenchmarkGoParseIncrementalSingleByteEditDFA(b *testing.B) {
 			recoverSymbolSkips += prof.RecoverSymbolSkips
 			recoverLookups += prof.RecoverLookups
 			recoverHits += prof.RecoverHits
+			singleStackIterations += prof.SingleStackIterations
+			multiStackIterations += prof.MultiStackIterations
+			singleStackTokens += prof.SingleStackTokens
+			multiStackTokens += prof.MultiStackTokens
+			singleStackGSSNodes += prof.SingleStackGSSNodes
+			multiStackGSSNodes += prof.MultiStackGSSNodes
+			gssNodesAllocated += prof.GSSNodesAllocated
+			gssNodesRetained += prof.GSSNodesRetained
+			gssNodesDropped += prof.GSSNodesDroppedSameToken
+			parentNodesAllocated += prof.ParentNodesAllocated
+			parentNodesRetained += prof.ParentNodesRetained
+			parentNodesDropped += prof.ParentNodesDroppedSameToken
+			leafNodesAllocated += prof.LeafNodesAllocated
+			leafNodesRetained += prof.LeafNodesRetained
+			leafNodesDropped += prof.LeafNodesDroppedSameToken
+			mergeStacksIn += prof.MergeStacksIn
+			mergeStacksOut += prof.MergeStacksOut
+			mergeSlotsUsed += prof.MergeSlotsUsed
+			globalCullStacksIn += prof.GlobalCullStacksIn
+			globalCullStacksOut += prof.GlobalCullStacksOut
 			if prof.EntryScratchPeak > entryScratchPeak {
 				entryScratchPeak = prof.EntryScratchPeak
 			}
@@ -393,7 +453,7 @@ func BenchmarkGoParseIncrementalSingleByteEditDFA(b *testing.B) {
 				maxStacksSeen = prof.MaxStacksSeen
 			}
 		} else {
-			tree, err = parser.ParseIncremental(src, tree)
+			tree, err = parser.ParseIncremental(next, tree)
 		}
 		if err != nil {
 			b.Fatalf("incremental parse error: %v", err)
@@ -404,6 +464,7 @@ func BenchmarkGoParseIncrementalSingleByteEditDFA(b *testing.B) {
 		if old != tree {
 			old.Release()
 		}
+		src, scratch = next, src
 	}
 	if statsEnabled {
 		a := gotreesitter.ArenaProfileSnapshot()
@@ -443,6 +504,18 @@ func BenchmarkGoParseIncrementalSingleByteEditDFA(b *testing.B) {
 		fmt.Printf(
 			"STATS_PERF merge_in_hist=%s merge_alive_hist=%s merge_out_hist=%s fork_actions_hist=%s\n",
 			nonZeroBins(p.MergeStacksInHist[:]), nonZeroBins(p.MergeAliveHist[:]), nonZeroBins(p.MergeOutHist[:]), nonZeroBins(p.ForkActionsHist[:]),
+		)
+		fmt.Printf(
+			"STATS_RUNTIME single_iters=%d multi_iters=%d single_tokens=%d multi_tokens=%d gss_single=%d gss_multi=%d\n",
+			singleStackIterations, multiStackIterations, singleStackTokens, multiStackTokens, singleStackGSSNodes, multiStackGSSNodes,
+		)
+		fmt.Printf(
+			"STATS_SURVIVOR gss_alloc=%d gss_retained=%d gss_dropped=%d parent_alloc=%d parent_retained=%d parent_dropped=%d leaf_alloc=%d leaf_retained=%d leaf_dropped=%d merge_in=%d merge_out=%d merge_slots=%d cull_in=%d cull_out=%d\n",
+			gssNodesAllocated, gssNodesRetained, gssNodesDropped,
+			parentNodesAllocated, parentNodesRetained, parentNodesDropped,
+			leafNodesAllocated, leafNodesRetained, leafNodesDropped,
+			mergeStacksIn, mergeStacksOut, mergeSlotsUsed,
+			globalCullStacksIn, globalCullStacksOut,
 		)
 	}
 	tree.Release()
@@ -538,11 +611,12 @@ func BenchmarkGoParseIncrementalRandomSingleByteEdit(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(src)))
 	b.ResetTimer()
+	scratch := make([]byte, len(src))
 
 	for i := 0; i < b.N; i++ {
 		seed = seed*1664525 + 1013904223
 		site := sites[int(seed%uint32(len(sites)))]
-		toggleDigitAt(src, site.offset)
+		next := prepareEditedBenchmarkSource(src, scratch, site.offset)
 
 		edit := gotreesitter.InputEdit{
 			StartByte:   uint32(site.offset),
@@ -554,9 +628,9 @@ func BenchmarkGoParseIncrementalRandomSingleByteEdit(b *testing.B) {
 		}
 
 		tree.Edit(edit)
-		ts.Reset(src)
+		ts.Reset(next)
 		old := tree
-		tree, err = parser.ParseIncrementalWithTokenSource(src, tree, ts)
+		tree, err = parser.ParseIncrementalWithTokenSource(next, tree, ts)
 		if err != nil {
 			b.Fatalf("incremental parse error: %v", err)
 		}
@@ -566,6 +640,7 @@ func BenchmarkGoParseIncrementalRandomSingleByteEdit(b *testing.B) {
 		if old != tree {
 			old.Release()
 		}
+		src, scratch = next, src
 	}
 	tree.Release()
 }

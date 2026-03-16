@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -38,26 +40,31 @@ var topParityLanguages = []string{
 }
 
 type parityResult struct {
-	Language      string                       `json:"language"`
-	FileID        string                       `json:"file_id"`
-	FilePath      string                       `json:"file_path"`
-	SourceSHA256  string                       `json:"source_sha256"`
-	DumpVersion   string                       `json:"dump_version"`
-	Pass          bool                         `json:"pass"`
-	Category      string                       `json:"category,omitempty"`
-	FirstMismatch *cgoharness.DumpV1Divergence `json:"first_divergence,omitempty"`
-	GoDumpPath    string                       `json:"go_dump_path,omitempty"`
-	CDumpPath     string                       `json:"c_dump_path,omitempty"`
-	Error         string                       `json:"error,omitempty"`
+	Language       string                       `json:"language"`
+	FileID         string                       `json:"file_id"`
+	FilePath       string                       `json:"file_path"`
+	SourceSHA256   string                       `json:"source_sha256"`
+	DumpVersion    string                       `json:"dump_version"`
+	GoRootType     string                       `json:"go_root_type,omitempty"`
+	GoRootHasError bool                         `json:"go_root_has_error,omitempty"`
+	CRootType      string                       `json:"c_root_type,omitempty"`
+	CRootHasError  bool                         `json:"c_root_has_error,omitempty"`
+	Pass           bool                         `json:"pass"`
+	Category       string                       `json:"category,omitempty"`
+	FirstMismatch  *cgoharness.DumpV1Divergence `json:"first_divergence,omitempty"`
+	GoDumpPath     string                       `json:"go_dump_path,omitempty"`
+	CDumpPath      string                       `json:"c_dump_path,omitempty"`
+	Error          string                       `json:"error,omitempty"`
 }
 
 type languageRunner struct {
-	name     string
-	entry    grammars.LangEntry
-	support  grammars.ParseSupport
-	goLang   *gotreesitter.Language
-	goParser *gotreesitter.Parser
-	cParser  *sitter.Parser
+	name                string
+	entry               grammars.LangEntry
+	support             grammars.ParseSupport
+	goLang              *gotreesitter.Language
+	goParser            *gotreesitter.Parser
+	cParser             *sitter.Parser
+	oracleTimeoutMicros uint64
 }
 
 type score struct {
@@ -67,20 +74,28 @@ type score struct {
 
 func main() {
 	var (
-		langFlag     string
-		corpusFlag   string
-		outFlag      string
-		artifactFlag string
-		scoreboardMD string
-		oracleFlag   string
+		langFlag                string
+		corpusFlag              string
+		outFlag                 string
+		artifactFlag            string
+		artifactMode            string
+		scoreboardMD            string
+		oracleFlag              string
+		oracleTimeoutMS         int
+		gcAfterFile             bool
+		skipGoOnOracleRootError bool
 	)
 
 	flag.StringVar(&langFlag, "lang", "top10", "language name, comma list, or top10")
 	flag.StringVar(&corpusFlag, "corpus", "", "corpus root directory")
 	flag.StringVar(&outFlag, "out", "parity_out/results.jsonl", "JSONL output path")
-	flag.StringVar(&artifactFlag, "artifact-dir", "parity_out/dump_v1", "directory for dump.v1 artifacts")
-	flag.StringVar(&scoreboardMD, "scoreboard", "PARITY.md", "scoreboard markdown output path")
+	flag.StringVar(&artifactFlag, "artifact-dir", "parity_out/dump_v1", "directory for dump.v1 artifacts; empty disables dump emission")
+	flag.StringVar(&artifactMode, "artifact-mode", "all", "artifact emission mode: all|failures")
+	flag.StringVar(&scoreboardMD, "scoreboard", "PARITY.md", "scoreboard markdown output path; empty disables scoreboard emission")
 	flag.StringVar(&oracleFlag, "oracle", "c", "oracle runtime (only 'c' is supported)")
+	flag.IntVar(&oracleTimeoutMS, "oracle-timeout-ms", 0, "if >0, set a timeout for pinned C oracle parses and emit oracle_timeout rows when they abort")
+	flag.BoolVar(&gcAfterFile, "gc-after-file", false, "when true, force GC and return free heap pages to the OS after each file; intended for bounded corpus sweeps")
+	flag.BoolVar(&skipGoOnOracleRootError, "skip-go-on-oracle-error", false, "when true, emit a result row and skip gotreesitter parsing if the C oracle root already has parse errors")
 	flag.Parse()
 
 	if corpusFlag == "" {
@@ -88,6 +103,14 @@ func main() {
 	}
 	if oracleFlag != "c" {
 		fatalf("--oracle=%s is not supported; use --oracle c", oracleFlag)
+	}
+	if oracleTimeoutMS < 0 {
+		fatalf("--oracle-timeout-ms must be >= 0")
+	}
+	var err error
+	artifactMode, err = normalizeArtifactMode(artifactMode)
+	if err != nil {
+		fatalf("%v", err)
 	}
 
 	langs := parseLangs(langFlag)
@@ -107,8 +130,10 @@ func main() {
 	if err := os.MkdirAll(filepath.Dir(outFlag), 0o755); err != nil {
 		fatalf("create out dir: %v", err)
 	}
-	if err := os.MkdirAll(artifactFlag, 0o755); err != nil {
-		fatalf("create artifact dir: %v", err)
+	if strings.TrimSpace(artifactFlag) != "" {
+		if err := os.MkdirAll(artifactFlag, 0o755); err != nil {
+			fatalf("create artifact dir: %v", err)
+		}
 	}
 
 	outFile, err := os.Create(outFlag)
@@ -126,7 +151,7 @@ func main() {
 	seenFiles := 0
 
 	for _, lang := range langs {
-		runner, err := buildRunner(lang, entriesByName, supportByName)
+		runner, err := buildRunner(lang, entriesByName, supportByName, oracleTimeoutMS)
 		if err != nil {
 			fatalf("init %s runner: %v", lang, err)
 		}
@@ -139,9 +164,12 @@ func main() {
 			continue
 		}
 
-		langArtifacts := filepath.Join(artifactFlag, lang)
-		if err := os.MkdirAll(langArtifacts, 0o755); err != nil {
-			fatalf("create artifact lang dir %s: %v", langArtifacts, err)
+		langArtifacts := ""
+		if strings.TrimSpace(artifactFlag) != "" {
+			langArtifacts = filepath.Join(artifactFlag, lang)
+			if err := os.MkdirAll(langArtifacts, 0o755); err != nil {
+				fatalf("create artifact lang dir %s: %v", langArtifacts, err)
+			}
 		}
 
 		for _, abs := range files {
@@ -165,12 +193,16 @@ func main() {
 				continue
 			}
 
-			result := runFileParity(runner, langArtifacts, abs, rel, src)
+			result := runFileParity(runner, langArtifacts, artifactMode, skipGoOnOracleRootError, abs, rel, src)
 			if err := enc.Encode(result); err != nil {
 				fatalf("write jsonl for %s: %v", abs, err)
 			}
 			updateScore(scores, lang, result.Pass)
 			seenFiles++
+			if gcAfterFile {
+				runtime.GC()
+				debug.FreeOSMemory()
+			}
 		}
 		runner.Close()
 	}
@@ -178,20 +210,32 @@ func main() {
 	if err := writer.Flush(); err != nil {
 		fatalf("flush %s: %v", outFlag, err)
 	}
-	if err := writeScoreboard(scoreboardMD, scores); err != nil {
-		fatalf("write scoreboard: %v", err)
+	if strings.TrimSpace(scoreboardMD) != "" {
+		if err := writeScoreboard(scoreboardMD, scores); err != nil {
+			fatalf("write scoreboard: %v", err)
+		}
 	}
 
 	fmt.Printf("wrote %d results to %s\n", seenFiles, outFlag)
-	fmt.Printf("updated scoreboard: %s\n", scoreboardMD)
+	if strings.TrimSpace(scoreboardMD) != "" {
+		fmt.Printf("updated scoreboard: %s\n", scoreboardMD)
+	}
 }
 
 func parseLangs(raw string) []string {
 	value := strings.TrimSpace(raw)
-	if value == "" || value == "top10" || value == "top" {
+	switch value {
+	case "", "top10", "top":
 		out := make([]string, len(topParityLanguages))
 		copy(out, topParityLanguages)
 		return out
+	case "top50":
+		if langs, err := loadLangsFromListFile([]string{
+			filepath.Join("..", "grammars", "update_tier1_top50.txt"),
+			filepath.Join("grammars", "update_tier1_top50.txt"),
+		}); err == nil && len(langs) > 0 {
+			return langs
+		}
 	}
 	parts := strings.Split(value, ",")
 	out := make([]string, 0, len(parts))
@@ -210,7 +254,43 @@ func parseLangs(raw string) []string {
 	return out
 }
 
-func buildRunner(lang string, entries map[string]grammars.LangEntry, support map[string]grammars.ParseSupport) (*languageRunner, error) {
+func loadLangsFromListFile(candidates []string) ([]string, error) {
+	var path string
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		st, err := os.Stat(candidate)
+		if err == nil && !st.IsDir() {
+			path = candidate
+			break
+		}
+	}
+	if path == "" {
+		return nil, fmt.Errorf("list file not found")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(string(b), "\n")
+	out := make([]string, 0, len(lines))
+	seen := make(map[string]struct{}, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if _, ok := seen[line]; ok {
+			continue
+		}
+		seen[line] = struct{}{}
+		out = append(out, line)
+	}
+	return out, nil
+}
+
+func buildRunner(lang string, entries map[string]grammars.LangEntry, support map[string]grammars.ParseSupport, oracleTimeoutMS int) (*languageRunner, error) {
 	entry, ok := entries[lang]
 	if !ok {
 		return nil, fmt.Errorf("language %q is not in grammars registry", lang)
@@ -233,13 +313,19 @@ func buildRunner(lang string, entries map[string]grammars.LangEntry, support map
 		cParser.Close()
 		return nil, fmt.Errorf("set C language: %w", err)
 	}
+	var oracleTimeoutMicros uint64
+	if oracleTimeoutMS > 0 {
+		oracleTimeoutMicros = uint64(oracleTimeoutMS) * 1000
+		cParser.SetTimeoutMicros(oracleTimeoutMicros)
+	}
 	return &languageRunner{
-		name:     lang,
-		entry:    entry,
-		support:  report,
-		goLang:   goLang,
-		goParser: goParser,
-		cParser:  cParser,
+		name:                lang,
+		entry:               entry,
+		support:             report,
+		goLang:              goLang,
+		goParser:            goParser,
+		cParser:             cParser,
+		oracleTimeoutMicros: oracleTimeoutMicros,
 	}, nil
 }
 
@@ -288,7 +374,7 @@ func collectFiles(root string) ([]string, string, error) {
 	return files, root, nil
 }
 
-func runFileParity(runner *languageRunner, artifactDir, absPath, fileID string, src []byte) parityResult {
+func runFileParity(runner *languageRunner, artifactDir, artifactMode string, skipGoOnOracleRootError bool, absPath, fileID string, src []byte) parityResult {
 	hash := sha256.Sum256(src)
 	sourceHash := hex.EncodeToString(hash[:])
 
@@ -298,6 +384,23 @@ func runFileParity(runner *languageRunner, artifactDir, absPath, fileID string, 
 		FilePath:     absPath,
 		SourceSHA256: sourceHash,
 		DumpVersion:  cgoharness.DumpV1Version,
+	}
+
+	cTree := runner.cParser.Parse(src, nil)
+	if cTree == nil || cTree.RootNode() == nil {
+		res.Pass = false
+		res.Category, res.Error = oracleParseFailure(runner.oracleTimeoutMicros)
+		return res
+	}
+	defer cTree.Close()
+	cRoot := cTree.RootNode()
+	res.CRootType = cRoot.Kind()
+	res.CRootHasError = cRoot.HasError()
+	if skipGoOnOracleRootError && res.CRootHasError {
+		res.Pass = false
+		res.Category = "oracle_error"
+		res.Error = "skipped gotreesitter parse because C oracle root has errors"
+		return res
 	}
 
 	goTree, goLang, err := parseWithGoRunner(runner, src)
@@ -313,48 +416,75 @@ func runFileParity(runner *languageRunner, artifactDir, absPath, fileID string, 
 		res.Error = "gotreesitter returned nil tree"
 		return res
 	}
+	defer goTree.Release()
+	goRoot := goTree.RootNode()
+	res.GoRootType = goRoot.Type(goLang)
+	res.GoRootHasError = goRoot.HasError()
 
-	cTree := runner.cParser.Parse(src, nil)
-	if cTree == nil || cTree.RootNode() == nil {
-		res.Pass = false
-		res.Category = "c_parse"
-		res.Error = "C oracle returned nil tree"
-		return res
-	}
-	defer cTree.Close()
-
-	goDump := cgoharness.DumpV1FromGo(goTree.RootNode(), goLang)
-	cDump := cgoharness.DumpV1FromC(cTree.RootNode())
-
-	safeID := safeArtifactID(fileID)
-	goDumpPath := filepath.Join(artifactDir, safeID+".go.dump.v1.json")
-	cDumpPath := filepath.Join(artifactDir, safeID+".c.dump.v1.json")
-
-	if err := writeJSON(goDumpPath, goDump); err != nil {
-		res.Pass = false
-		res.Category = "artifact"
-		res.Error = fmt.Sprintf("write %s: %v", goDumpPath, err)
-		return res
-	}
-	if err := writeJSON(cDumpPath, cDump); err != nil {
-		res.Pass = false
-		res.Category = "artifact"
-		res.Error = fmt.Sprintf("write %s: %v", cDumpPath, err)
-		return res
-	}
-	res.GoDumpPath = goDumpPath
-	res.CDumpPath = cDumpPath
-
-	diff := cgoharness.FirstDivergenceDumpV1(goTree.RootNode(), goLang, cTree.RootNode())
+	diff := cgoharness.FirstDivergenceDumpV1(goRoot, goLang, cRoot)
 	if diff != nil {
 		res.Pass = false
 		res.Category = diff.Category
 		res.FirstMismatch = diff
-		return res
+	} else {
+		res.Pass = true
 	}
 
-	res.Pass = true
+	if shouldEmitArtifacts(artifactDir, artifactMode, res.Pass) {
+		goDump := cgoharness.DumpV1FromGo(goRoot, goLang)
+		cDump := cgoharness.DumpV1FromC(cRoot)
+		safeID := safeArtifactID(fileID)
+		goDumpPath := filepath.Join(artifactDir, safeID+".go.dump.v1.json")
+		cDumpPath := filepath.Join(artifactDir, safeID+".c.dump.v1.json")
+
+		if err := writeJSON(goDumpPath, goDump); err != nil {
+			res.Pass = false
+			res.Category = "artifact"
+			res.Error = fmt.Sprintf("write %s: %v", goDumpPath, err)
+			return res
+		}
+		if err := writeJSON(cDumpPath, cDump); err != nil {
+			res.Pass = false
+			res.Category = "artifact"
+			res.Error = fmt.Sprintf("write %s: %v", cDumpPath, err)
+			return res
+		}
+		res.GoDumpPath = goDumpPath
+		res.CDumpPath = cDumpPath
+	}
 	return res
+}
+
+func oracleParseFailure(timeoutMicros uint64) (string, string) {
+	if timeoutMicros > 0 {
+		return "oracle_timeout", fmt.Sprintf("C oracle parse aborted after %dms timeout", timeoutMicros/1000)
+	}
+	return "c_parse", "C oracle returned nil tree"
+}
+
+func normalizeArtifactMode(raw string) (string, error) {
+	switch mode := strings.ToLower(strings.TrimSpace(raw)); mode {
+	case "", "all":
+		return "all", nil
+	case "failures":
+		return "failures", nil
+	default:
+		return "", fmt.Errorf("invalid --artifact-mode %q (want all|failures)", raw)
+	}
+}
+
+func shouldEmitArtifacts(artifactDir, artifactMode string, pass bool) bool {
+	if strings.TrimSpace(artifactDir) == "" {
+		return false
+	}
+	switch artifactMode {
+	case "failures":
+		return !pass
+	case "all":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseWithGoRunner(runner *languageRunner, src []byte) (*gotreesitter.Tree, *gotreesitter.Language, error) {

@@ -71,6 +71,38 @@ func (s *includedRangeTokenSource) SetGLRStates(states []StateID) {
 	}
 }
 
+func (s *includedRangeTokenSource) SupportsIncrementalReuse() bool {
+	if s == nil || s.base == nil {
+		return false
+	}
+	if dts, ok := s.base.(*dfaTokenSource); ok {
+		return languageSupportsIncrementalReuse(dts.language)
+	}
+	if reusable, ok := s.base.(IncrementalReuseTokenSource); ok {
+		return reusable.SupportsIncrementalReuse()
+	}
+	return false
+}
+
+func (s *includedRangeTokenSource) Reset(source []byte) {
+	if s == nil {
+		return
+	}
+	s.idx = 0
+	if resettable, ok := s.base.(interface{ Reset([]byte) }); ok {
+		resettable.Reset(source)
+	}
+}
+
+func (s *includedRangeTokenSource) Close() {
+	if s == nil || s.base == nil {
+		return
+	}
+	if closer, ok := s.base.(interface{ Close() }); ok {
+		closer.Close()
+	}
+}
+
 func (s *includedRangeTokenSource) Next() Token {
 	return s.filterToken(Token{}, false)
 }

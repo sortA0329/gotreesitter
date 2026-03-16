@@ -1,0 +1,330 @@
+package gotreesitter
+
+type runtimeAuditNodeKind uint8
+
+const (
+	runtimeAuditNodeKindLeaf runtimeAuditNodeKind = iota + 1
+	runtimeAuditNodeKindParent
+)
+
+type runtimeAuditNodeInfo struct {
+	gen  uint32
+	kind runtimeAuditNodeKind
+}
+
+type runtimeAudit struct {
+	enabled         bool
+	currentTokenGen uint32
+	tokenActive     bool
+
+	gssGen   map[*gssNode]uint32
+	nodeInfo map[*Node]runtimeAuditNodeInfo
+	seenGSS  map[*gssNode]struct{}
+	seenNode map[*Node]struct{}
+
+	currentGSSAllocated    uint64
+	currentGSSRetained     uint64
+	currentParentAllocated uint64
+	currentParentRetained  uint64
+	currentLeafAllocated   uint64
+	currentLeafRetained    uint64
+
+	totalGSSAllocated    uint64
+	totalGSSRetained     uint64
+	totalGSSDropped      uint64
+	totalParentAllocated uint64
+	totalParentRetained  uint64
+	totalParentDropped   uint64
+	totalLeafAllocated   uint64
+	totalLeafRetained    uint64
+	totalLeafDropped     uint64
+
+	mergeStacksIn       uint64
+	mergeStacksOut      uint64
+	mergeSlotsUsed      uint64
+	globalCullStacksIn  uint64
+	globalCullStacksOut uint64
+}
+
+var runtimeAuditEnabled bool
+
+// EnableRuntimeAudit toggles per-parse survivor instrumentation.
+// This debug hook is intended for single-threaded benchmark/profiling runs.
+func EnableRuntimeAudit(enabled bool) {
+	runtimeAuditEnabled = enabled
+}
+
+func (a *runtimeAudit) beginParse() {
+	if !runtimeAuditEnabled {
+		a.reset()
+		return
+	}
+	a.enabled = true
+	a.currentTokenGen = 0
+	a.tokenActive = false
+	a.currentGSSAllocated = 0
+	a.currentGSSRetained = 0
+	a.currentParentAllocated = 0
+	a.currentParentRetained = 0
+	a.currentLeafAllocated = 0
+	a.currentLeafRetained = 0
+	a.totalGSSAllocated = 0
+	a.totalGSSRetained = 0
+	a.totalGSSDropped = 0
+	a.totalParentAllocated = 0
+	a.totalParentRetained = 0
+	a.totalParentDropped = 0
+	a.totalLeafAllocated = 0
+	a.totalLeafRetained = 0
+	a.totalLeafDropped = 0
+	a.mergeStacksIn = 0
+	a.mergeStacksOut = 0
+	a.mergeSlotsUsed = 0
+	a.globalCullStacksIn = 0
+	a.globalCullStacksOut = 0
+	if a.gssGen == nil {
+		a.gssGen = make(map[*gssNode]uint32)
+	} else {
+		clearRuntimeAuditGSSMap(a.gssGen)
+	}
+	if a.nodeInfo == nil {
+		a.nodeInfo = make(map[*Node]runtimeAuditNodeInfo)
+	} else {
+		clearRuntimeAuditNodeMap(a.nodeInfo)
+	}
+	if a.seenGSS == nil {
+		a.seenGSS = make(map[*gssNode]struct{})
+	} else {
+		clearRuntimeAuditSeenGSSMap(a.seenGSS)
+	}
+	if a.seenNode == nil {
+		a.seenNode = make(map[*Node]struct{})
+	} else {
+		clearRuntimeAuditSeenNodeMap(a.seenNode)
+	}
+}
+
+func (a *runtimeAudit) reset() {
+	a.enabled = false
+	a.currentTokenGen = 0
+	a.tokenActive = false
+	a.currentGSSAllocated = 0
+	a.currentGSSRetained = 0
+	a.currentParentAllocated = 0
+	a.currentParentRetained = 0
+	a.currentLeafAllocated = 0
+	a.currentLeafRetained = 0
+	a.totalGSSAllocated = 0
+	a.totalGSSRetained = 0
+	a.totalGSSDropped = 0
+	a.totalParentAllocated = 0
+	a.totalParentRetained = 0
+	a.totalParentDropped = 0
+	a.totalLeafAllocated = 0
+	a.totalLeafRetained = 0
+	a.totalLeafDropped = 0
+	a.mergeStacksIn = 0
+	a.mergeStacksOut = 0
+	a.mergeSlotsUsed = 0
+	a.globalCullStacksIn = 0
+	a.globalCullStacksOut = 0
+	if a.gssGen != nil {
+		clearRuntimeAuditGSSMap(a.gssGen)
+	}
+	if a.nodeInfo != nil {
+		clearRuntimeAuditNodeMap(a.nodeInfo)
+	}
+	if a.seenGSS != nil {
+		clearRuntimeAuditSeenGSSMap(a.seenGSS)
+	}
+	if a.seenNode != nil {
+		clearRuntimeAuditSeenNodeMap(a.seenNode)
+	}
+}
+
+func (a *runtimeAudit) startToken(stacks []glrStack) {
+	if a == nil || !a.enabled {
+		return
+	}
+	if a.tokenActive {
+		a.observeFrontier(stacks)
+		a.finishToken()
+	}
+	a.currentTokenGen++
+	a.tokenActive = true
+	a.currentGSSAllocated = 0
+	a.currentGSSRetained = 0
+	a.currentParentAllocated = 0
+	a.currentParentRetained = 0
+	a.currentLeafAllocated = 0
+	a.currentLeafRetained = 0
+}
+
+func (a *runtimeAudit) finishParse(stacks []glrStack) {
+	if a == nil || !a.enabled || !a.tokenActive {
+		return
+	}
+	a.observeFrontier(stacks)
+	a.finishToken()
+}
+
+func (a *runtimeAudit) finishToken() {
+	if a == nil || !a.enabled || !a.tokenActive {
+		return
+	}
+	a.totalGSSAllocated += a.currentGSSAllocated
+	a.totalGSSRetained += a.currentGSSRetained
+	if a.currentGSSAllocated > a.currentGSSRetained {
+		a.totalGSSDropped += a.currentGSSAllocated - a.currentGSSRetained
+	}
+	a.totalParentAllocated += a.currentParentAllocated
+	a.totalParentRetained += a.currentParentRetained
+	if a.currentParentAllocated > a.currentParentRetained {
+		a.totalParentDropped += a.currentParentAllocated - a.currentParentRetained
+	}
+	a.totalLeafAllocated += a.currentLeafAllocated
+	a.totalLeafRetained += a.currentLeafRetained
+	if a.currentLeafAllocated > a.currentLeafRetained {
+		a.totalLeafDropped += a.currentLeafAllocated - a.currentLeafRetained
+	}
+	a.tokenActive = false
+}
+
+func (a *runtimeAudit) recordGSSAlloc(n *gssNode) {
+	if a == nil || !a.enabled || !a.tokenActive || n == nil {
+		return
+	}
+	a.currentGSSAllocated++
+	a.gssGen[n] = a.currentTokenGen
+}
+
+func (a *runtimeAudit) recordNodeAlloc(n *Node, kind runtimeAuditNodeKind) {
+	if a == nil || !a.enabled || !a.tokenActive || n == nil {
+		return
+	}
+	switch kind {
+	case runtimeAuditNodeKindParent:
+		a.currentParentAllocated++
+	case runtimeAuditNodeKindLeaf:
+		a.currentLeafAllocated++
+	default:
+		return
+	}
+	a.nodeInfo[n] = runtimeAuditNodeInfo{gen: a.currentTokenGen, kind: kind}
+}
+
+func (a *runtimeAudit) recordMerge(in, out, slots int) {
+	if a == nil || !a.enabled {
+		return
+	}
+	a.mergeStacksIn += uint64(in)
+	a.mergeStacksOut += uint64(out)
+	a.mergeSlotsUsed += uint64(slots)
+}
+
+func (a *runtimeAudit) recordGlobalCull(in, out int) {
+	if a == nil || !a.enabled {
+		return
+	}
+	a.globalCullStacksIn += uint64(in)
+	a.globalCullStacksOut += uint64(out)
+}
+
+func (a *runtimeAudit) observeFrontier(stacks []glrStack) {
+	if a == nil || !a.enabled || !a.tokenActive {
+		return
+	}
+	clearRuntimeAuditSeenGSSMap(a.seenGSS)
+	clearRuntimeAuditSeenNodeMap(a.seenNode)
+	var gssRetained uint64
+	var parentRetained uint64
+	var leafRetained uint64
+	for i := range stacks {
+		if stacks[i].dead {
+			continue
+		}
+		if stacks[i].gss.head != nil {
+			a.observeGSSChain(stacks[i].gss.head, &gssRetained, &parentRetained, &leafRetained)
+			continue
+		}
+		a.observeEntries(stacks[i].entries, &parentRetained, &leafRetained)
+	}
+	a.currentGSSRetained = gssRetained
+	a.currentParentRetained = parentRetained
+	a.currentLeafRetained = leafRetained
+}
+
+func (a *runtimeAudit) observeGSSChain(head *gssNode, gssRetained, parentRetained, leafRetained *uint64) {
+	if a == nil || head == nil {
+		return
+	}
+	for n := head; n != nil; n = n.prev {
+		gen, ok := a.gssGen[n]
+		if !ok || gen != a.currentTokenGen {
+			break
+		}
+		if _, seen := a.seenGSS[n]; !seen {
+			a.seenGSS[n] = struct{}{}
+			*gssRetained = *gssRetained + 1
+		}
+		a.observeNode(n.entry.node, parentRetained, leafRetained)
+	}
+}
+
+func (a *runtimeAudit) observeEntries(entries []stackEntry, parentRetained, leafRetained *uint64) {
+	if a == nil || len(entries) == 0 {
+		return
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		node := entries[i].node
+		info, ok := a.nodeInfo[node]
+		if !ok || info.gen != a.currentTokenGen {
+			break
+		}
+		a.observeNode(node, parentRetained, leafRetained)
+	}
+}
+
+func (a *runtimeAudit) observeNode(node *Node, parentRetained, leafRetained *uint64) {
+	if a == nil || node == nil {
+		return
+	}
+	info, ok := a.nodeInfo[node]
+	if !ok || info.gen != a.currentTokenGen {
+		return
+	}
+	if _, seen := a.seenNode[node]; seen {
+		return
+	}
+	a.seenNode[node] = struct{}{}
+	switch info.kind {
+	case runtimeAuditNodeKindParent:
+		*parentRetained = *parentRetained + 1
+	case runtimeAuditNodeKindLeaf:
+		*leafRetained = *leafRetained + 1
+	}
+}
+
+func clearRuntimeAuditGSSMap(m map[*gssNode]uint32) {
+	for k := range m {
+		delete(m, k)
+	}
+}
+
+func clearRuntimeAuditNodeMap(m map[*Node]runtimeAuditNodeInfo) {
+	for k := range m {
+		delete(m, k)
+	}
+}
+
+func clearRuntimeAuditSeenGSSMap(m map[*gssNode]struct{}) {
+	for k := range m {
+		delete(m, k)
+	}
+}
+
+func clearRuntimeAuditSeenNodeMap(m map[*Node]struct{}) {
+	for k := range m {
+		delete(m, k)
+	}
+}

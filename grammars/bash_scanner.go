@@ -92,10 +92,10 @@ func (h *bshHeredoc) reset() {
 
 // bshState holds scanner state across parse calls.
 type bshState struct {
-	lastGlobParenDepth   uint8
-	extWasInDoubleQuote  bool
-	extSawOutsideQuote   bool
-	heredocs             []bshHeredoc
+	lastGlobParenDepth  uint8
+	extWasInDoubleQuote bool
+	extSawOutsideQuote  bool
+	heredocs            []bshHeredoc
 }
 
 // BashExternalScanner implements gotreesitter.ExternalScanner for the Bash grammar.
@@ -237,6 +237,12 @@ func bshSkip(lexer *gotreesitter.ExternalLexer) {
 	lexer.Advance(true)
 }
 
+func bshSkipHorizontalSpace(lexer *gotreesitter.ExternalLexer) {
+	for lexer.Lookahead() == ' ' || lexer.Lookahead() == '\t' {
+		bshSkip(lexer)
+	}
+}
+
 // bshAdvanceWord consumes a POSIX "word" from the lexer, appending the
 // unquoted content to unquoted. Returns true if the word is non-empty.
 func bshAdvanceWord(lexer *gotreesitter.ExternalLexer) (unquoted []byte, ok bool) {
@@ -332,6 +338,43 @@ func bshDelimiterSize(d []byte) int {
 	return len(d)
 }
 
+func bshIsReservedWordBoundary(r rune) bool {
+	return r == 0 || bshIsSpace(r) || r == ';' || r == '&' || r == '|' || r == ')'
+}
+
+func bshScanOpeningParen(lexer *gotreesitter.ExternalLexer, validSymbols []bool) bool {
+	if !bshIsValid(validSymbols, bshTokConcat) {
+		bshSkipHorizontalSpace(lexer)
+	}
+	if lexer.Lookahead() != '(' {
+		return false
+	}
+
+	bshAdvance(lexer)
+	lexer.MarkEnd()
+	lexer.SetResultSymbol(bshSymOpeningParen)
+	return true
+}
+
+func bshScanEsac(lexer *gotreesitter.ExternalLexer, validSymbols []bool) bool {
+	if !bshIsValid(validSymbols, bshTokConcat) {
+		bshSkipHorizontalSpace(lexer)
+	}
+	for _, want := range []rune{'e', 's', 'a', 'c'} {
+		if lexer.Lookahead() != want {
+			return false
+		}
+		bshAdvance(lexer)
+	}
+	if !bshIsReservedWordBoundary(lexer.Lookahead()) {
+		return false
+	}
+
+	lexer.MarkEnd()
+	lexer.SetResultSymbol(bshSymEsac)
+	return true
+}
+
 // ---- heredoc scanning ----
 
 func bshScanBareDollar(lexer *gotreesitter.ExternalLexer) bool {
@@ -341,8 +384,8 @@ func bshScanBareDollar(lexer *gotreesitter.ExternalLexer) bool {
 
 	if lexer.Lookahead() == '$' {
 		bshAdvance(lexer)
-		lexer.SetResultSymbol(bshSymBareDollar)
 		lexer.MarkEnd()
+		lexer.SetResultSymbol(bshSymBareDollar)
 		return bshIsSpace(lexer.Lookahead()) || lexer.Lookahead() == 0 || lexer.Lookahead() == '"'
 	}
 
@@ -354,7 +397,6 @@ func bshScanHeredocStart(heredoc *bshHeredoc, lexer *gotreesitter.ExternalLexer)
 		bshSkip(lexer)
 	}
 
-	lexer.SetResultSymbol(bshSymHeredocStart)
 	heredoc.isRaw = lexer.Lookahead() == '\'' || lexer.Lookahead() == '"' || lexer.Lookahead() == '\\'
 
 	unquoted, found := bshAdvanceWord(lexer)
@@ -363,6 +405,8 @@ func bshScanHeredocStart(heredoc *bshHeredoc, lexer *gotreesitter.ExternalLexer)
 		return false
 	}
 	heredoc.delimiter = unquoted
+	lexer.MarkEnd()
+	lexer.SetResultSymbol(bshSymHeredocStart)
 	return true
 }
 
@@ -523,14 +567,14 @@ func bshScanRegex(s *bshState, lexer *gotreesitter.ExternalLexer, validSymbols [
 		lexer.MarkEnd()
 
 		type regexState struct {
-			done                        bool
-			advancedOnce                bool
-			foundNonAlnumDollarUDash    bool
-			lastWasEscape               bool
-			inSingleQuote               bool
-			parenDepth                  uint32
-			bracketDepth                uint32
-			braceDepth                  uint32
+			done                     bool
+			advancedOnce             bool
+			foundNonAlnumDollarUDash bool
+			lastWasEscape            bool
+			inSingleQuote            bool
+			parenDepth               uint32
+			bracketDepth             uint32
+			braceDepth               uint32
 		}
 		st := regexState{}
 
@@ -996,6 +1040,18 @@ func bshScanBraceStart(s *bshState, lexer *gotreesitter.ExternalLexer, validSymb
 // ---- main scan ----
 
 func bshScan(s *bshState, lexer *gotreesitter.ExternalLexer, validSymbols []bool) bool {
+	// OPENING_PAREN / ESAC
+	if bshIsValid(validSymbols, bshTokOpeningParen) && !bshInErrorRecovery(validSymbols) {
+		if bshScanOpeningParen(lexer, validSymbols) {
+			return true
+		}
+	}
+	if bshIsValid(validSymbols, bshTokEsac) && !bshInErrorRecovery(validSymbols) {
+		if bshScanEsac(lexer, validSymbols) {
+			return true
+		}
+	}
+
 	// CONCAT
 	if bshIsValid(validSymbols, bshTokConcat) && !bshInErrorRecovery(validSymbols) {
 		la := lexer.Lookahead()

@@ -4,12 +4,12 @@ package grammars
 
 func init() {
 	Register(LangEntry{
-		Name:           "crystal",
-		Extensions:     []string{".cr"},
-		Language:       CrystalLanguage,
-		HighlightQuery: crystalHighlightQuery,
+		Name:               "crystal",
+		Extensions:         []string{".cr"},
+		Language:           CrystalLanguage,
+		HighlightQuery:     crystalHighlightQuery,
 		TokenSourceFactory: defaultTokenSourceFactory("crystal"),
 	})
 }
 
-const crystalHighlightQuery = ""
+const crystalHighlightQuery = "(identifier) @variable\n(integer) @number\n"

@@ -11,6 +11,112 @@ type parseConfig struct {
 	profiling   bool
 }
 
+type normalizationTokenSourceFactory func([]byte) (TokenSource, error)
+
+// ParserLogType categorizes parser log messages.
+type ParserLogType uint8
+
+const (
+	// ParserLogParse emits parser-loop lifecycle and control-flow logs.
+	ParserLogParse ParserLogType = iota
+	// ParserLogLex emits token-source and token-consumption logs.
+	ParserLogLex
+)
+
+// ParserLogger receives parser debug logs when configured via SetLogger.
+type ParserLogger func(kind ParserLogType, message string)
+
+func normalizeReturnedTree(root *Node, source []byte, lang *Language) {
+	normalizeReturnedTreeWithRanges(root, source, lang, nil)
+}
+
+func normalizeReturnedTreeWithRanges(root *Node, source []byte, lang *Language, incrementalRanges []Range) {
+	if root == nil || lang == nil {
+		return
+	}
+	normalizeGoCompatibilityInRanges(root, source, lang, incrementalRanges)
+	normalizeScalaTemplateBodyObjectFragments(root, source, lang)
+	normalizeScalaRecoveredObjectTemplateBodies(root, source, lang)
+	normalizeScalaDefinitionFields(root, source, lang)
+	normalizeScalaTemplateBodyFunctionAnnotations(root, source, lang)
+	normalizeScalaTemplateBodyFunctionEnds(root, source, lang)
+	normalizeScalaCaseClauseEnds(root, source, lang)
+	normalizeHTMLRecoveredNestedCustomTagRanges(root, source, lang)
+	normalizeRootEOFNewlineSpan(root, source, lang)
+}
+
+func shouldNormalizeIncrementalReturnedTree(tree, oldTree *Tree) bool {
+	if tree == nil {
+		return false
+	}
+	if oldTree == nil {
+		return true
+	}
+	return rootOrNil(tree) != rootOrNil(oldTree)
+}
+
+func normalizeReturnedIncrementalTree(tree, oldTree *Tree, source []byte, lang *Language) {
+	if !shouldNormalizeIncrementalReturnedTree(tree, oldTree) {
+		return
+	}
+	var incrementalRanges []Range
+	if oldTree != nil {
+		incrementalRanges = oldTree.ChangedRanges()
+		if len(incrementalRanges) == 0 {
+			incrementalRanges = nil
+		}
+	}
+	normalizeReturnedTreeWithRanges(rootOrNil(tree), source, lang, incrementalRanges)
+}
+
+func (p *Parser) dfaReparseFactory() normalizationTokenSourceFactory {
+	if p == nil || p.language == nil || len(p.language.LexStates) == 0 {
+		return nil
+	}
+	return func(source []byte) (TokenSource, error) {
+		lexer := NewLexer(p.language.LexStates, source)
+		return acquireDFATokenSource(lexer, p.language, p.lookupActionIndex, p.hasKeywordState), nil
+	}
+}
+
+func (p *Parser) tokenSourceReparseFactory(ts TokenSource) normalizationTokenSourceFactory {
+	if rebuilder, ok := ts.(TokenSourceRebuilder); ok {
+		return func(source []byte) (TokenSource, error) {
+			return rebuilder.RebuildTokenSource(source, p.language)
+		}
+	}
+	return nil
+}
+
+func (p *Parser) parseForRecovery(source []byte) (*Tree, error) {
+	if p == nil || p.language == nil {
+		return nil, ErrNoLanguage
+	}
+	parser := p.recoveryParser
+	if parser == nil || parser.language != p.language {
+		parser = NewParser(p.language)
+		p.recoveryParser = parser
+	}
+	parser.skipRecoveryReparse = true
+	if p.reparseFactory != nil {
+		ts, err := p.reparseFactory(source)
+		if err != nil {
+			return nil, err
+		}
+		return parser.ParseWithTokenSource(source, ts)
+	}
+	return parser.Parse(source)
+}
+
+func parseWithSnippetParser(lang *Language, source []byte) (*Tree, error) {
+	parser := acquireSnippetParser(lang)
+	if parser == nil {
+		return nil, ErrNoLanguage
+	}
+	defer releaseSnippetParser(parser)
+	return parser.Parse(source)
+}
+
 // ParseOption configures ParseWith behavior.
 type ParseOption func(*parseConfig)
 
@@ -43,6 +149,72 @@ type ParseResult struct {
 	Profile IncrementalParseProfile
 	// ProfileAvailable reports whether Profile contains attribution data.
 	ProfileAvailable bool
+}
+
+// Language returns the parser's configured language.
+func (p *Parser) Language() *Language {
+	if p == nil {
+		return nil
+	}
+	return p.language
+}
+
+// SetGLRTrace enables verbose GLR stack tracing to stdout (debug only).
+func (p *Parser) SetGLRTrace(enabled bool) {
+	if p == nil {
+		return
+	}
+	p.glrTrace = enabled
+}
+
+// SetLogger installs a parser debug logger. Pass nil to disable logging.
+func (p *Parser) SetLogger(logger ParserLogger) {
+	if p == nil {
+		return
+	}
+	p.logger = logger
+}
+
+// Logger returns the currently configured parser debug logger.
+func (p *Parser) Logger() ParserLogger {
+	if p == nil {
+		return nil
+	}
+	return p.logger
+}
+
+// SetTimeoutMicros configures a per-parse timeout in microseconds.
+// A value of 0 disables timeout checks.
+func (p *Parser) SetTimeoutMicros(timeoutMicros uint64) {
+	if p == nil {
+		return
+	}
+	p.timeoutMicros = timeoutMicros
+}
+
+// TimeoutMicros returns the parser timeout in microseconds.
+func (p *Parser) TimeoutMicros() uint64 {
+	if p == nil {
+		return 0
+	}
+	return p.timeoutMicros
+}
+
+// SetCancellationFlag configures a caller-owned cancellation flag.
+// Parsing stops when the pointed value becomes non-zero.
+func (p *Parser) SetCancellationFlag(flag *uint32) {
+	if p == nil {
+		return
+	}
+	p.cancellationFlag = flag
+}
+
+// CancellationFlag returns the parser's current cancellation flag pointer.
+func (p *Parser) CancellationFlag() *uint32 {
+	if p == nil {
+		return nil
+	}
+	return p.cancellationFlag
 }
 
 // SetIncludedRanges configures parser include ranges.
@@ -81,6 +253,14 @@ type TokenSource interface {
 	Next() Token
 }
 
+// TokenSourceRebuilder is an optional extension for token sources that can
+// build a fresh equivalent token source for another source buffer. Result
+// normalization uses this to reparse isolated fragments with the same lexer
+// backend as the original parse.
+type TokenSourceRebuilder interface {
+	RebuildTokenSource(source []byte, lang *Language) (TokenSource, error)
+}
+
 // ByteSkippableTokenSource can jump to a byte offset and return the first
 // token at or after that position.
 type ByteSkippableTokenSource interface {
@@ -95,6 +275,15 @@ type ByteSkippableTokenSource interface {
 type PointSkippableTokenSource interface {
 	ByteSkippableTokenSource
 	SkipToByteWithPoint(offset uint32, pt Point) Token
+}
+
+// IncrementalReuseTokenSource is an opt-in marker for custom token sources
+// that are safe for incremental subtree reuse. Implementations must provide
+// stable token boundaries across edits and support deterministic SkipToByte*
+// behavior so reused-tree fast-forwarding remains correct.
+type IncrementalReuseTokenSource interface {
+	TokenSource
+	SupportsIncrementalReuse() bool
 }
 
 type parserStateTokenSource interface {
@@ -126,17 +315,22 @@ func (p *Parser) Parse(source []byte) (*Tree, error) {
 	if err := p.checkDFALexer(); err != nil {
 		return nil, err
 	}
+	prevFactory := p.reparseFactory
+	p.reparseFactory = p.dfaReparseFactory()
+	defer func() {
+		p.reparseFactory = prevFactory
+	}()
 	lexer := NewLexer(p.language.LexStates, source)
-	ts := &dfaTokenSource{
-		lexer:             lexer,
-		language:          p.language,
-		lookupActionIndex: p.lookupActionIndex,
-		hasKeywordState:   p.hasKeywordState,
+	ts := acquireDFATokenSource(lexer, p.language, p.lookupActionIndex, p.hasKeywordState)
+	deterministicExternalConflicts := fullParseUsesDeterministicExternalConflicts(p.language)
+	initialMaxStacks := fullParseInitialMaxStacks(p.language, p.maxConflictWidth)
+	tree := p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil, initialMaxStacks, 0, 0, deterministicExternalConflicts)
+	tree = p.retryFullParseWithDFA(source, initialMaxStacks, deterministicExternalConflicts, tree)
+	if shouldRepeatExternalScannerFullParse(p.language, tree) {
+		tree = p.retryFullParseWithDFA(source, initialMaxStacks, deterministicExternalConflicts, tree)
 	}
-	if p.language.ExternalScanner != nil {
-		ts.externalPayload = p.language.ExternalScanner.Create()
-	}
-	return p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil), nil
+	normalizeReturnedTree(rootOrNil(tree), source, p.language)
+	return tree, nil
 }
 
 // ParseWithTokenSource parses source using a custom token source.
@@ -146,7 +340,20 @@ func (p *Parser) ParseWithTokenSource(source []byte, ts TokenSource) (*Tree, err
 	if err := p.checkLanguageCompatible(); err != nil {
 		return nil, err
 	}
-	return p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil), nil
+	prevFactory := p.reparseFactory
+	p.reparseFactory = p.tokenSourceReparseFactory(ts)
+	defer func() {
+		p.reparseFactory = prevFactory
+	}()
+	deterministicExternalConflicts := fullParseUsesDeterministicExternalConflicts(p.language)
+	initialMaxStacks := fullParseInitialMaxStacks(p.language, p.maxConflictWidth)
+	tree := p.parseInternal(source, p.wrapIncludedRanges(ts), nil, nil, arenaClassFull, nil, initialMaxStacks, 0, 0, deterministicExternalConflicts)
+	tree = p.retryFullParseWithTokenSource(source, ts, initialMaxStacks, deterministicExternalConflicts, tree)
+	if shouldRepeatExternalScannerFullParse(p.language, tree) {
+		tree = p.retryFullParseWithTokenSource(source, ts, initialMaxStacks, deterministicExternalConflicts, tree)
+	}
+	normalizeReturnedTree(rootOrNil(tree), source, p.language)
+	return tree, nil
 }
 
 // ParseIncremental re-parses source after edits were applied to oldTree.
@@ -162,17 +369,16 @@ func (p *Parser) ParseIncremental(source []byte, oldTree *Tree) (*Tree, error) {
 	if err := p.checkDFALexer(); err != nil {
 		return nil, err
 	}
+	prevFactory := p.reparseFactory
+	p.reparseFactory = p.dfaReparseFactory()
+	defer func() {
+		p.reparseFactory = prevFactory
+	}()
 	lexer := NewLexer(p.language.LexStates, source)
-	ts := &dfaTokenSource{
-		lexer:             lexer,
-		language:          p.language,
-		lookupActionIndex: p.lookupActionIndex,
-		hasKeywordState:   p.hasKeywordState,
-	}
-	if p.language.ExternalScanner != nil {
-		ts.externalPayload = p.language.ExternalScanner.Create()
-	}
-	return p.parseIncrementalInternal(source, oldTree, p.wrapIncludedRanges(ts), nil), nil
+	ts := acquireDFATokenSource(lexer, p.language, p.lookupActionIndex, p.hasKeywordState)
+	tree := p.parseIncrementalInternal(source, oldTree, p.wrapIncludedRanges(ts), nil)
+	normalizeReturnedIncrementalTree(tree, oldTree, source, p.language)
+	return tree, nil
 }
 
 // ParseIncrementalWithTokenSource is like ParseIncremental but uses a custom
@@ -184,7 +390,14 @@ func (p *Parser) ParseIncrementalWithTokenSource(source []byte, oldTree *Tree, t
 	if canReuseUnchangedTree(source, oldTree, p.language) {
 		return oldTree, nil
 	}
-	return p.parseIncrementalInternal(source, oldTree, p.wrapIncludedRanges(ts), nil), nil
+	prevFactory := p.reparseFactory
+	p.reparseFactory = p.tokenSourceReparseFactory(ts)
+	defer func() {
+		p.reparseFactory = prevFactory
+	}()
+	tree := p.parseIncrementalInternal(source, oldTree, p.wrapIncludedRanges(ts), nil)
+	normalizeReturnedIncrementalTree(tree, oldTree, source, p.language)
+	return tree, nil
 }
 
 // ParseIncrementalProfiled is like ParseIncremental and also returns runtime
@@ -199,18 +412,16 @@ func (p *Parser) ParseIncrementalProfiled(source []byte, oldTree *Tree) (*Tree, 
 	if err := p.checkDFALexer(); err != nil {
 		return nil, IncrementalParseProfile{}, err
 	}
+	prevFactory := p.reparseFactory
+	p.reparseFactory = p.dfaReparseFactory()
+	defer func() {
+		p.reparseFactory = prevFactory
+	}()
 	lexer := NewLexer(p.language.LexStates, source)
-	ts := &dfaTokenSource{
-		lexer:             lexer,
-		language:          p.language,
-		lookupActionIndex: p.lookupActionIndex,
-		hasKeywordState:   p.hasKeywordState,
-	}
-	if p.language.ExternalScanner != nil {
-		ts.externalPayload = p.language.ExternalScanner.Create()
-	}
+	ts := acquireDFATokenSource(lexer, p.language, p.lookupActionIndex, p.hasKeywordState)
 	timing := &incrementalParseTiming{}
 	tree := p.parseIncrementalInternal(source, oldTree, p.wrapIncludedRanges(ts), timing)
+	normalizeReturnedIncrementalTree(tree, oldTree, source, p.language)
 	return tree, timing.toProfile(), nil
 }
 
@@ -223,8 +434,14 @@ func (p *Parser) ParseIncrementalWithTokenSourceProfiled(source []byte, oldTree 
 	if canReuseUnchangedTree(source, oldTree, p.language) {
 		return oldTree, IncrementalParseProfile{}, nil
 	}
+	prevFactory := p.reparseFactory
+	p.reparseFactory = p.tokenSourceReparseFactory(ts)
+	defer func() {
+		p.reparseFactory = prevFactory
+	}()
 	timing := &incrementalParseTiming{}
 	tree := p.parseIncrementalInternal(source, oldTree, p.wrapIncludedRanges(ts), timing)
+	normalizeReturnedIncrementalTree(tree, oldTree, source, p.language)
 	return tree, timing.toProfile(), nil
 }
 

@@ -51,6 +51,8 @@ type ExtractedGrammar struct {
 
 	// External token index -> grammar symbol ID.
 	ExternalSymbols []uint16
+	// Optional external lex state validity table from ts_external_scanner_states.
+	ExternalLexStates [][]bool
 
 	// ABI 15: reserved words (flat array, 0-terminated per set).
 	ReservedWords          []uint16
@@ -143,6 +145,7 @@ func ExtractGrammar(source string) (*ExtractedGrammar, error) {
 		// Not fatal — name can be provided via flag.
 		g.Name = "unknown"
 	}
+	inferProductionIDCount(source, g)
 
 	if err := extractSymbolNames(source, g); err != nil {
 		return nil, fmt.Errorf("symbol names: %w", err)
@@ -192,6 +195,9 @@ func ExtractGrammar(source string) (*ExtractedGrammar, error) {
 	if g.ExternalTokenCount > 0 {
 		if err := extractExternalSymbols(source, g); err != nil {
 			// Not fatal: grammars without external scanners will omit this.
+		}
+		if err := extractExternalLexStates(source, g); err != nil {
+			// Not fatal: some grammars omit the table and fall back to action probing.
 		}
 	}
 
@@ -266,6 +272,32 @@ func extractConstants(source string, g *ExtractedGrammar) error {
 	}
 
 	return nil
+}
+
+func inferProductionIDCount(source string, g *ExtractedGrammar) {
+	if g == nil || g.ProductionIDCount > 0 {
+		return
+	}
+	for _, arrayName := range []string{"ts_field_map_slices", "ts_alias_sequences"} {
+		if count, ok := inferFirstArrayDimension(source, arrayName, g.enumValues); ok && count > 0 {
+			g.ProductionIDCount = count
+			return
+		}
+	}
+}
+
+func inferFirstArrayDimension(source, arrayName string, enums map[string]int) (int, bool) {
+	re := regexp.MustCompile(fmt.Sprintf(`(?m)\b%s\s*\[\s*(\w+)\s*\]`, regexp.QuoteMeta(arrayName)))
+	matches := re.FindAllStringSubmatch(source, -1)
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		if resolved, ok := resolveIndexedName(m[1], enums); ok && resolved > 0 {
+			return resolved, true
+		}
+	}
+	return 0, false
 }
 
 // extractEnum parses the C enum block(s) and returns a map of name->value.
@@ -907,23 +939,27 @@ func parseFieldMapEntry(g *ExtractedGrammar, body string) (FieldMapEntry, bool) 
 		}
 	}
 
-	// Fallback for positional entries: field_id, child_index, inherited
-	if !found {
+	// Positional fallback for field_id, child_index, inherited.
+	// Also handles mixed syntax like {field_name, 0, .inherited = true}
+	// where .inherited matched above but field_id/child_index are positional.
+	if !found || entry.FieldID == 0 {
 		tokens := parseIdentifierLikeTokens(body)
-		if len(tokens) == 0 {
+		if len(tokens) == 0 && !found {
 			return entry, false
 		}
 
-		if len(tokens) >= 1 {
+		if entry.FieldID == 0 && len(tokens) >= 1 {
 			if v, ok := parseFieldMapToken(g, tokens[0]); ok {
 				entry.FieldID = v
 				found = true
 			}
 		}
-		if len(tokens) >= 2 {
-			if v, ok := parseFieldMapUnsignedInt(tokens[1]); ok {
-				entry.ChildIndex = v
-				found = true
+		if !found || entry.ChildIndex == 0 {
+			if len(tokens) >= 2 {
+				if v, ok := parseFieldMapUnsignedInt(tokens[1]); ok {
+					entry.ChildIndex = v
+					found = true
+				}
 			}
 		}
 		if len(tokens) >= 3 {
@@ -1318,6 +1354,12 @@ func parseReduceActionArgs(args string, g *ExtractedGrammar) (ExtractedAction, e
 		return ExtractedAction{}, fmt.Errorf("reduce expects at least symbol and child count")
 	}
 
+	// Detect named-argument format: REDUCE(.symbol = X, .child_count = Y, ...)
+	// Newer tree-sitter versions emit this instead of positional REDUCE(X, Y, ...).
+	if strings.Contains(fields[0], "=") {
+		return parseReduceNamedArgs(fields, g)
+	}
+
 	symStr := strings.TrimSpace(fields[0])
 	sym, _ := g.resolveSymbol(symStr)
 	childCount, err := strconv.Atoi(strings.TrimSpace(fields[1]))
@@ -1367,6 +1409,54 @@ func parseReduceActionArgs(args string, g *ExtractedGrammar) (ExtractedAction, e
 		action.ProductionID = numericExtras[1]
 	}
 
+	return action, nil
+}
+
+// parseReduceNamedArgs handles the named-argument REDUCE format used by newer
+// tree-sitter versions: REDUCE(.symbol = X, .child_count = Y, .production_id = Z).
+func parseReduceNamedArgs(fields []string, g *ExtractedGrammar) (ExtractedAction, error) {
+	action := ExtractedAction{Type: "reduce"}
+	hasSymbol, hasChildCount := false, false
+
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		key, value, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(key), "."))
+		value = strings.TrimSpace(value)
+
+		switch key {
+		case "symbol":
+			sym, _ := g.resolveSymbol(value)
+			action.Symbol = sym
+			hasSymbol = true
+		case "child_count":
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				return ExtractedAction{}, fmt.Errorf("reduce .child_count: %w", err)
+			}
+			action.ChildCount = n
+			hasChildCount = true
+		case "dynamic_precedence", "precedence", "prec":
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				continue
+			}
+			action.Precedence = n
+		case "production_id":
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				continue
+			}
+			action.ProductionID = n
+		}
+	}
+
+	if !hasSymbol || !hasChildCount {
+		return ExtractedAction{}, fmt.Errorf("reduce named args missing .symbol or .child_count")
+	}
 	return action, nil
 }
 
@@ -2277,6 +2367,76 @@ func extractExternalSymbols(source string, g *ExtractedGrammar) error {
 		return err
 	}
 	g.ExternalSymbols = parseIndexedSymbolArray(body, g.ExternalTokenCount, g.enumValues)
+	return nil
+}
+
+// extractExternalLexStates parses ts_external_scanner_states[][].
+func extractExternalLexStates(source string, g *ExtractedGrammar) error {
+	if g == nil || g.ExternalTokenCount == 0 {
+		return nil
+	}
+
+	dimRe := regexp.MustCompile(`ts_external_scanner_states\[(\d+)\]\[[^\]]+\]`)
+	dm := dimRe.FindStringSubmatch(source)
+	if dm == nil {
+		return fmt.Errorf("external lex states table not found")
+	}
+	rowCount, err := strconv.Atoi(dm[1])
+	if err != nil || rowCount <= 0 {
+		return fmt.Errorf("invalid external lex states row count %q", dm[1])
+	}
+
+	body, err := findArrayBody(source, "ts_external_scanner_states")
+	if err != nil {
+		return err
+	}
+
+	table := make([][]bool, rowCount)
+	for i := range table {
+		table[i] = make([]bool, g.ExternalTokenCount)
+	}
+
+	rowRe := regexp.MustCompile(`\[(\w+)\]\s*=\s*\{`)
+	locs := rowRe.FindAllStringSubmatchIndex(body, -1)
+	for _, loc := range locs {
+		rowName := body[loc[2]:loc[3]]
+		rowIdx, ok := resolveIndexedName(rowName, g.enumValues)
+		if !ok || rowIdx < 0 || rowIdx >= rowCount {
+			continue
+		}
+
+		braceStart := loc[1] - 1
+		depth := 0
+		end := -1
+		for i := braceStart; i < len(body); i++ {
+			switch body[i] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					end = i
+					i = len(body)
+				}
+			}
+		}
+		if end < 0 {
+			return fmt.Errorf("unterminated external lex state row %q", rowName)
+		}
+
+		rowBody := body[braceStart+1 : end]
+		entryRe := regexp.MustCompile(`\[(\w+)\]\s*=\s*true`)
+		entries := entryRe.FindAllStringSubmatch(rowBody, -1)
+		for _, m := range entries {
+			colIdx, ok := resolveIndexedName(m[1], g.enumValues)
+			if !ok || colIdx < 0 || colIdx >= g.ExternalTokenCount {
+				continue
+			}
+			table[rowIdx][colIdx] = true
+		}
+	}
+
+	g.ExternalLexStates = table
 	return nil
 }
 

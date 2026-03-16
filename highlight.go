@@ -1,14 +1,18 @@
 package gotreesitter
 
-import "sort"
+import (
+	"fmt"
+	"sort"
+)
 
 // HighlightRange represents a styled range of source code, mapping a byte span
 // to a capture name from a highlight query. The editor maps capture names
 // (e.g., "keyword", "string", "function") to FSS style classes.
 type HighlightRange struct {
-	StartByte uint32
-	EndByte   uint32
-	Capture   string // "keyword", "string", "function", etc.
+	StartByte    uint32
+	EndByte      uint32
+	Capture      string // "keyword", "string", "function", etc.
+	PatternIndex int    // query pattern index; later patterns override earlier for identical ranges
 }
 
 // Highlighter is a high-level API that takes source code and returns styled
@@ -19,6 +23,9 @@ type Highlighter struct {
 	query              *Query
 	lang               *Language
 	tokenSourceFactory func(source []byte) TokenSource
+	injectionQuery     *Query
+	injectionResolver  HighlighterInjectionResolver
+	childQueries       map[string]*Query
 }
 
 // HighlighterOption configures a Highlighter.
@@ -52,6 +59,17 @@ func NewHighlighter(lang *Language, highlightQuery string, opts ...HighlighterOp
 	for _, opt := range opts {
 		opt(h)
 	}
+	if lang != nil {
+		if spec, ok := lookupHighlighterInjection(lang.Name); ok {
+			injQ, injErr := NewQuery(spec.Query, lang)
+			if injErr != nil {
+				return nil, fmt.Errorf("highlighter injection query for %q: %w", lang.Name, injErr)
+			}
+			h.injectionQuery = injQ
+			h.injectionResolver = spec.ResolveLanguage
+			h.childQueries = make(map[string]*Query)
+		}
+	}
 	return h, nil
 }
 
@@ -69,7 +87,7 @@ func (h *Highlighter) HighlightIncremental(source []byte, oldTree *Tree) ([]High
 		return nil, tree
 	}
 
-	return h.highlightTree(tree), tree
+	return h.highlightTree(tree, source), tree
 }
 
 // Highlight parses the source code and executes the highlight query, returning
@@ -89,16 +107,16 @@ func (h *Highlighter) Highlight(source []byte) []HighlightRange {
 	}
 	defer tree.Release()
 
-	return h.highlightTree(tree)
+	return h.highlightTree(tree, source)
 }
 
 func (h *Highlighter) parse(source []byte, oldTree *Tree) *Tree {
 	return dispatchParse(h.parser, source, oldTree, h.tokenSourceFactory, h.lang)
 }
 
-func (h *Highlighter) highlightTree(tree *Tree) []HighlightRange {
+func (h *Highlighter) highlightTree(tree *Tree, source []byte) []HighlightRange {
 	matches := h.query.Execute(tree)
-	if len(matches) == 0 {
+	if len(matches) == 0 && h.injectionQuery == nil {
 		return nil
 	}
 
@@ -110,126 +128,121 @@ func (h *Highlighter) highlightTree(tree *Tree) []HighlightRange {
 				continue
 			}
 			ranges = append(ranges, HighlightRange{
-				StartByte: node.StartByte(),
-				EndByte:   node.EndByte(),
-				Capture:   c.Name,
+				StartByte:    node.StartByte(),
+				EndByte:      node.EndByte(),
+				Capture:      c.Name,
+				PatternIndex: m.PatternIndex,
 			})
 		}
 	}
+
+	ranges = h.appendInjectedRanges(tree, source, ranges)
 
 	if len(ranges) == 0 {
 		return nil
 	}
 
-	sort.Slice(ranges, func(i, j int) bool {
-		if ranges[i].StartByte != ranges[j].StartByte {
-			return ranges[i].StartByte < ranges[j].StartByte
-		}
-		wi := ranges[i].EndByte - ranges[i].StartByte
-		wj := ranges[j].EndByte - ranges[j].StartByte
-		return wi > wj
-	})
-
 	return resolveOverlaps(ranges)
 }
 
-// resolveOverlaps takes a sorted slice of ranges (sorted by StartByte asc,
-// span width desc) and returns a non-overlapping slice where inner (narrower)
-// captures take priority over outer (wider) ones.
+// resolveOverlaps takes a range list (in any order) and returns a sorted,
+// non-overlapping slice where inner (narrower) captures take priority over
+// outer (wider) ones.
 //
-// Algorithm: sweep through byte positions, maintaining a stack of active
-// outer ranges. When an inner range is encountered, it replaces the outer
-// range for its span, and the outer range continues after the inner one ends.
+// Algorithm:
+//  1. Sort ranges by start asc, width desc.
+//  2. Sweep boundaries with a stack of active nested ranges.
+//     The top of the stack is the currently active innermost capture.
+//
+// This avoids the previous second O(n log n) event sort.
 func resolveOverlaps(ranges []HighlightRange) []HighlightRange {
 	if len(ranges) == 0 {
 		return nil
 	}
 
-	// Use an event-based approach: for each range, create start/end events,
-	// then sweep through them. The most recently started (innermost) range
-	// is the active one at any point.
-
-	type event struct {
-		pos     uint32
-		isStart bool
-		idx     int // index into ranges
-	}
-
-	events := make([]event, 0, len(ranges)*2)
+	sorted := make([]HighlightRange, 0, len(ranges))
 	for i := range ranges {
-		events = append(events,
-			event{pos: ranges[i].StartByte, isStart: true, idx: i},
-			event{pos: ranges[i].EndByte, isStart: false, idx: i},
-		)
+		r := ranges[i]
+		if r.EndByte > r.StartByte {
+			sorted = append(sorted, r)
+		}
+	}
+	if len(sorted) == 0 {
+		return nil
 	}
 
-	// Sort events: by position, then ends before starts at same position,
-	// then for starts at the same position, narrower ranges (higher index
-	// since ranges are sorted wider-first) come after wider ones.
-	sort.Slice(events, func(i, j int) bool {
-		if events[i].pos != events[j].pos {
-			return events[i].pos < events[j].pos
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].StartByte != sorted[j].StartByte {
+			return sorted[i].StartByte < sorted[j].StartByte
 		}
-		// At same position: ends before starts.
-		if events[i].isStart != events[j].isStart {
-			return !events[i].isStart // end events first
+		wi := sorted[i].EndByte - sorted[i].StartByte
+		wj := sorted[j].EndByte - sorted[j].StartByte
+		if wi != wj {
+			return wi > wj // wider (outer) ranges first
 		}
-		if events[i].isStart {
-			// Both starts: wider (lower index) first so it's pushed onto
-			// the stack first, and narrower is on top (takes priority).
-			return events[i].idx < events[j].idx
-		}
-		// Both ends: narrower (higher index) ends first.
-		return events[i].idx > events[j].idx
+		// Identical ranges: later patterns override earlier (more specific wins).
+		return sorted[i].PatternIndex < sorted[j].PatternIndex
 	})
 
-	// Sweep through events maintaining a stack of active range indices.
-	// The top of the stack is the currently active (innermost) capture.
-	type stackEntry struct {
-		idx int
-	}
-	var stack []stackEntry
-	active := make([]bool, len(ranges)) // which range indices are currently active
-
+	var stack []HighlightRange
 	var result []HighlightRange
-	var lastPos uint32
-	var lastCapture string
-	hasLast := false
-
-	flushSegment := func(endPos uint32) {
-		if hasLast && endPos > lastPos && lastCapture != "" {
-			result = append(result, HighlightRange{
-				StartByte: lastPos,
-				EndByte:   endPos,
-				Capture:   lastCapture,
-			})
+	emit := func(start, end uint32, capture string) {
+		if capture == "" || end <= start {
+			return
 		}
+		if n := len(result); n > 0 && result[n-1].Capture == capture && result[n-1].EndByte == start {
+			result[n-1].EndByte = end
+			return
+		}
+		result = append(result, HighlightRange{StartByte: start, EndByte: end, Capture: capture})
 	}
 
-	for _, ev := range events {
-		if ev.pos > lastPos && hasLast {
-			flushSegment(ev.pos)
+	curPos := sorted[0].StartByte
+	nextStartIdx := 0
+
+	for nextStartIdx < len(sorted) || len(stack) > 0 {
+		nextStartPos := ^uint32(0)
+		if nextStartIdx < len(sorted) {
+			nextStartPos = sorted[nextStartIdx].StartByte
+		}
+		nextEndPos := ^uint32(0)
+		if len(stack) > 0 {
+			nextEndPos = stack[len(stack)-1].EndByte
+		}
+		nextPos := nextStartPos
+		if nextEndPos < nextPos {
+			nextPos = nextEndPos
 		}
 
-		if ev.isStart {
-			stack = append(stack, stackEntry{idx: ev.idx})
-			active[ev.idx] = true
-		} else {
-			active[ev.idx] = false
-			// Pop inactive entries from top of stack.
-			for len(stack) > 0 && !active[stack[len(stack)-1].idx] {
+		if len(stack) > 0 && nextPos > curPos {
+			emit(curPos, nextPos, stack[len(stack)-1].Capture)
+			curPos = nextPos
+		} else if curPos < nextPos {
+			curPos = nextPos
+		}
+
+		// End events at this boundary are processed before start events.
+		for len(stack) > 0 && stack[len(stack)-1].EndByte <= curPos {
+			stack = stack[:len(stack)-1]
+		}
+		for nextStartIdx < len(sorted) && sorted[nextStartIdx].StartByte == curPos {
+			stack = append(stack, sorted[nextStartIdx])
+			nextStartIdx++
+		}
+
+		// Skip forward to the next start when no capture is active.
+		if len(stack) == 0 && nextStartIdx < len(sorted) && curPos < sorted[nextStartIdx].StartByte {
+			curPos = sorted[nextStartIdx].StartByte
+		}
+		if len(stack) == 0 && nextStartIdx >= len(sorted) {
+			break
+		}
+		if len(stack) > 0 && curPos < stack[len(stack)-1].StartByte {
+			curPos = stack[len(stack)-1].StartByte
+		}
+		if len(stack) > 0 && curPos > stack[len(stack)-1].EndByte {
+			for len(stack) > 0 && curPos >= stack[len(stack)-1].EndByte {
 				stack = stack[:len(stack)-1]
-			}
-		}
-
-		// Determine current capture from top of active stack.
-		lastPos = ev.pos
-		lastCapture = ""
-		hasLast = true
-		for i := len(stack) - 1; i >= 0; i-- {
-			if active[stack[i].idx] {
-				lastCapture = ranges[stack[i].idx].Capture
-				break
 			}
 		}
 	}

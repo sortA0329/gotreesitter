@@ -19,9 +19,20 @@ type reuseCursor struct {
 	stack []reuseFrame
 	next  *Node
 
+	topLevel      []*Node
+	topLevelIndex int
+
 	cachedStart      uint32
 	cachedStartValid bool
 	cached           []*Node
+
+	rejectDirty                   uint64
+	rejectAncestorDirtyBeforeEdit uint64
+	rejectHasError                uint64
+	rejectInvalidSpan             uint64
+	rejectOutOfBounds             uint64
+	rejectRootNonLeafChanged      uint64
+	rejectLargeNonLeaf            uint64
 }
 
 // reuseScratch holds reusable buffers for incremental reuse traversal.
@@ -56,8 +67,33 @@ func (c *reuseCursor) reset(oldTree *Tree, source []byte, scratch *reuseScratch)
 	c.cachedStart = 0
 	c.cachedStartValid = false
 	c.cached = scratch.cache[:0]
+	c.rejectDirty = 0
+	c.rejectAncestorDirtyBeforeEdit = 0
+	c.rejectHasError = 0
+	c.rejectInvalidSpan = 0
+	c.rejectOutOfBounds = 0
+	c.rejectRootNonLeafChanged = 0
+	c.rejectLargeNonLeaf = 0
 
-	c.stack = append(c.stack, reuseFrame{node: oldTree.RootNode()})
+	root := oldTree.RootNode()
+	c.stack = append(c.stack, reuseFrame{node: root})
+	c.topLevel = nil
+	c.topLevelIndex = 0
+	if c.hasEdits && root != nil && len(root.children) > 0 {
+		firstAffected := -1
+		for i, child := range root.children {
+			if child == nil {
+				continue
+			}
+			if child.endByte > c.minEditAt {
+				firstAffected = i
+				break
+			}
+		}
+		if firstAffected >= 0 && firstAffected+1 < len(root.children) {
+			c.topLevel = root.children[firstAffected+1:]
+		}
+	}
 	return c
 }
 
@@ -85,6 +121,9 @@ func (c *reuseCursor) candidates(start uint32) []*Node {
 	c.cached = c.cached[:0]
 	c.cachedStart = start
 	c.cachedStartValid = true
+	if c.collectTopLevelCandidates(start) {
+		return c.cached
+	}
 
 	for {
 		n := c.peek()
@@ -108,6 +147,70 @@ func (c *reuseCursor) candidates(start uint32) []*Node {
 			c.cached = append(c.cached, c.pop())
 		}
 	}
+}
+
+func (c *reuseCursor) collectTopLevelCandidates(start uint32) bool {
+	if c == nil || len(c.topLevel) == 0 {
+		return false
+	}
+	for c.topLevelIndex < len(c.topLevel) {
+		n := c.topLevel[c.topLevelIndex]
+		if n == nil {
+			c.topLevelIndex++
+			continue
+		}
+		if n.startByte < start {
+			c.topLevelIndex++
+			continue
+		}
+		if n.startByte > start {
+			return false
+		}
+		for c.topLevelIndex < len(c.topLevel) {
+			n = c.topLevel[c.topLevelIndex]
+			if n == nil {
+				c.topLevelIndex++
+				continue
+			}
+			if n.startByte != start {
+				return true
+			}
+			c.topLevelIndex++
+			if c.reusableIndexedNode(n) {
+				c.cached = append(c.cached, n)
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func (c *reuseCursor) reusableIndexedNode(cur *Node) bool {
+	if cur == nil {
+		return false
+	}
+	dirtyHere := cur.dirty
+	if dirtyHere && nodeBytesEqual(cur.startByte, cur.endByte, c.oldSource, c.newSource) {
+		cur.dirty = false
+		dirtyHere = false
+	}
+	if cur.hasError {
+		c.rejectHasError++
+		return false
+	}
+	if cur.endByte <= cur.startByte {
+		c.rejectInvalidSpan++
+		return false
+	}
+	if cur.endByte > c.sourceLen {
+		c.rejectOutOfBounds++
+		return false
+	}
+	if dirtyHere {
+		c.rejectDirty++
+		return false
+	}
+	return true
 }
 
 func (c *reuseCursor) peek() *Node {
@@ -163,12 +266,23 @@ func (c *reuseCursor) advance() *Node {
 		}
 
 		if frame.underDirty && c.hasEdits && cur.endByte <= c.minEditAt {
+			c.rejectAncestorDirtyBeforeEdit++
 			continue
 		}
-		if cur.hasError || cur.endByte <= cur.startByte || cur.endByte > c.sourceLen {
+		if cur.hasError {
+			c.rejectHasError++
+			continue
+		}
+		if cur.endByte <= cur.startByte {
+			c.rejectInvalidSpan++
+			continue
+		}
+		if cur.endByte > c.sourceLen {
+			c.rejectOutOfBounds++
 			continue
 		}
 		if dirtyHere {
+			c.rejectDirty++
 			continue
 		}
 		return cur
@@ -205,6 +319,7 @@ func (p *Parser) tryReuseSubtree(s *glrStack, lookahead Token, ts TokenSource, i
 			if !(n.startByte == 0 &&
 				n.endByte == idx.sourceLen &&
 				nodeBytesEqual(n.startByte, n.endByte, idx.oldSource, idx.newSource)) {
+				idx.rejectRootNonLeafChanged++
 				continue
 			}
 		}
@@ -212,7 +327,11 @@ func (p *Parser) tryReuseSubtree(s *glrStack, lookahead Token, ts TokenSource, i
 		if !ok {
 			continue
 		}
-		return reuseNode(p, s, n, nextState, lookahead, ts, idx, entryScratch, gssScratch)
+		cp, ok := canReuseNodeWithExternalScannerCheckpoint(ts, state, n)
+		if !ok {
+			continue
+		}
+		return reuseNode(p, s, n, nextState, state, lookahead, ts, idx, entryScratch, gssScratch, cp)
 	}
 
 	// Conservative fallback: try small non-root non-leaf nodes. This increases
@@ -225,6 +344,9 @@ func (p *Parser) tryReuseSubtree(s *glrStack, lookahead Token, ts TokenSource, i
 		}
 		span := n.EndByte() - n.StartByte()
 		if span == 0 || span > maxNonLeafReuseSpan {
+			if span > maxNonLeafReuseSpan {
+				idx.rejectLargeNonLeaf++
+			}
 			continue
 		}
 		nextState, truncateDepth, ok := p.reuseNonLeafTargetStateOnStack(s, n, lookahead.StartByte, entryScratch)
@@ -236,13 +358,18 @@ func (p *Parser) tryReuseSubtree(s *glrStack, lookahead Token, ts TokenSource, i
 				continue
 			}
 		}
-		return reuseNode(p, s, n, nextState, lookahead, ts, idx, entryScratch, gssScratch)
+		startState := s.top().state
+		cp, ok := canReuseNodeWithExternalScannerCheckpoint(ts, startState, n)
+		if !ok {
+			continue
+		}
+		return reuseNode(p, s, n, nextState, startState, lookahead, ts, idx, entryScratch, gssScratch, cp)
 	}
 
 	return lookahead, 0, false
 }
 
-func reuseNode(p *Parser, s *glrStack, n *Node, nextState StateID, lookahead Token, ts TokenSource, idx *reuseCursor, entryScratch *glrEntryScratch, gssScratch *gssScratch) (Token, uint32, bool) {
+func reuseNode(p *Parser, s *glrStack, n *Node, nextState StateID, startState StateID, lookahead Token, ts TokenSource, idx *reuseCursor, entryScratch *glrEntryScratch, gssScratch *gssScratch, checkpoint externalScannerCheckpointRef) (Token, uint32, bool) {
 	if perfCountersEnabled {
 		perfRecordReuseSuccess()
 		if n.ChildCount() == 0 {
@@ -268,15 +395,37 @@ func reuseNode(p *Parser, s *glrStack, n *Node, nextState StateID, lookahead Tok
 	}
 
 	// dfaTokenSource fast skip does not preserve external-scanner state.
-	// Advance token-by-token in that case to keep scanner payload in sync.
-	if dts, ok := ts.(*dfaTokenSource); ok && dts.language != nil && dts.language.ExternalScanner != nil {
+	// For checkpointed scanner languages, only reuse nodes when the start
+	// parser/scanner state matches exactly, then restore the recorded end
+	// snapshot before skipping to the node end.
+	if dts := underlyingDFATokenSource(ts); dts != nil && dts.language != nil && dts.language.ExternalScanner != nil {
+		if languageUsesExternalScannerCheckpoints(dts.language) {
+			if stateful, ok := ts.(parserStateTokenSource); ok {
+				stateful.SetParserState(nextState)
+				stateful.SetGLRStates(nil)
+			}
+			if startState != n.PreGotoState() {
+				return lookahead, 0, false
+			}
+			if tok, ok := fastForwardWithExternalScannerCheckpoint(ts, n, checkpoint); ok {
+				return tok, reusedBytes, true
+			}
+		}
 		return advanceTokenSourceTo(ts, lookahead, n.EndByte()), reusedBytes, true
 	}
 
 	if skipper, ok := ts.(PointSkippableTokenSource); ok {
+		if stateful, ok := ts.(parserStateTokenSource); ok {
+			stateful.SetParserState(nextState)
+			stateful.SetGLRStates(nil)
+		}
 		return skipper.SkipToByteWithPoint(n.EndByte(), n.EndPoint()), reusedBytes, true
 	}
 	if skipper, ok := ts.(ByteSkippableTokenSource); ok {
+		if stateful, ok := ts.(parserStateTokenSource); ok {
+			stateful.SetParserState(nextState)
+			stateful.SetGLRStates(nil)
+		}
 		return skipper.SkipToByte(n.EndByte()), reusedBytes, true
 	}
 

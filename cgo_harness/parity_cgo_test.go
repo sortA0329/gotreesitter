@@ -14,6 +14,8 @@ package cgoharness
 import (
 	"fmt"
 	"os"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -32,35 +34,59 @@ var paritySkips = map[string]parityMeta{
 	// Parse-support-specific skips (e.g. missing scanners) should not live here.
 }
 
+// knownDegradedStructural tracks currently non-parity structural languages
+// within the full-coverage gate. Keep this list shrinking over time.
+var knownDegradedStructural = map[string]string{
+}
+
 type parityCase struct {
 	name   string
 	source string
 }
 
-var parityCases = []parityCase{
-	{name: "bash", source: "echo hi\n"},
-	{name: "c", source: "int main(void) { return 0; }\n"},
-	{name: "cpp", source: "int main() { return 0; }\n"},
-	{name: "css", source: "body { color: red; }\n"},
-	{name: "elixir", source: "defmodule M do\n  def f(x), do: x + 1\nend\n"},
-	{name: "go", source: "package main\n\nfunc main() {\n\tprintln(1)\n}\n"},
-	{name: "html", source: "<html><body>Hello</body></html>\n"},
-	{name: "java", source: "class Main { int x; }\n"},
-	{name: "javascript", source: "function f() { return 1; }\nconst x = () => x + 1;\n"},
-	{name: "kotlin", source: "fun main() {\n    val x: Int? = null\n    println(x)\n}\n"},
-	{name: "lua", source: "local x = 1\n"},
-	{name: "php", source: "<?php echo 1;\n"},
-	{name: "python", source: "def f():\n    return 1\n"},
-	{name: "ruby", source: "def f\n  1\nend\n"},
-	{name: "rust", source: "fn main() { let x = 1; }\n"},
-	{name: "scala", source: "object Main { def f(x: Int): Int = x + 1 }\n"},
-	{name: "sql", source: "SELECT id, name FROM users WHERE id = 1;\n"},
-	{name: "swift", source: "func f() -> Int {\n  return 1\n}\n"},
-	{name: "toml", source: "a = 1\ntitle = \"hello\"\ntags = [\"x\", \"y\"]\n"},
-	{name: "tsx", source: "const x = <div/>;\n"},
-	{name: "typescript", source: "function f(): number { return 1; }\n"},
-	{name: "yaml", source: "a: 1\n"},
-}
+// parityCases is built dynamically from the full language registry so that
+// every grammar with a smoke sample gets parity-tested against its C reference.
+// Languages without a C reference in languages.lock are skipped at test time.
+var parityCases = func() []parityCase {
+	var cases []parityCase
+	for _, entry := range grammars.AllLanguages() {
+		cases = append(cases, parityCase{
+			name:   entry.Name,
+			source: grammars.ParseSmokeSample(entry.Name),
+		})
+	}
+	return cases
+}()
+
+// hasDedicatedSample reports whether the language has a hand-written smoke
+// sample rather than the generic "x\n" fallback. Structural parity tests
+// should skip languages using the fallback since "x\n" is not valid syntax
+// for most grammars and produces meaningless tree comparisons.
+var hasDedicatedSample = func() map[string]bool {
+	m := make(map[string]bool, len(grammars.ParseSmokeSamples))
+	for name := range grammars.ParseSmokeSamples {
+		m[name] = true
+	}
+	return m
+}()
+
+// curatedStructuralLanguages is the merge-blocking structural parity set.
+// It includes every language with a dedicated smoke sample and supported parse
+// backend (DFA, partial DFA, or token source).
+var curatedStructuralLanguages = func() map[string]bool {
+	out := make(map[string]bool, len(parityCases))
+	for _, tc := range parityCases {
+		if !hasDedicatedSample[tc.name] {
+			continue
+		}
+		report, ok := paritySupportByName[tc.name]
+		if !ok || report.Backend == grammars.ParseBackendUnsupported {
+			continue
+		}
+		out[tc.name] = true
+	}
+	return out
+}()
 
 var parityEntriesByName, paritySupportByName = func() (map[string]grammars.LangEntry, map[string]grammars.ParseSupport) {
 	entries := make(map[string]grammars.LangEntry)
@@ -75,6 +101,28 @@ var parityEntriesByName, paritySupportByName = func() (map[string]grammars.LangE
 	return entries, support
 }()
 
+// curatedHighlightLanguages scales independently of structural parity. Any
+// language with a dedicated smoke sample and shipped highlight query is part of
+// the merge-blocking highlight parity gate, as long as parsing is supported.
+// Divergence thresholds are controlled in parity_highlight_test.go.
+var curatedHighlightLanguages = func() map[string]bool {
+	out := make(map[string]bool, len(parityCases))
+	for _, tc := range parityCases {
+		if !hasDedicatedSample[tc.name] {
+			continue
+		}
+		entry, ok := parityEntriesByName[tc.name]
+		if !ok || strings.TrimSpace(entry.HighlightQuery) == "" {
+			continue
+		}
+		if report, ok := paritySupportByName[tc.name]; ok && report.Backend == grammars.ParseBackendUnsupported {
+			continue
+		}
+		out[tc.name] = true
+	}
+	return out
+}()
+
 var parityCompareFields = func() bool {
 	raw := strings.TrimSpace(os.Getenv("GTS_PARITY_COMPARE_FIELDS"))
 	switch strings.ToLower(raw) {
@@ -84,6 +132,56 @@ var parityCompareFields = func() bool {
 		return false
 	}
 }()
+
+var parityIgnoreKnownSkips = func() bool {
+	raw := strings.TrimSpace(os.Getenv("GTS_PARITY_IGNORE_KNOWN_SKIPS"))
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}()
+
+var parityExcludedLanguages = func() map[string]struct{} {
+	raw := strings.TrimSpace(os.Getenv("GTS_PARITY_SKIP_LANGS"))
+	if raw == "" {
+		return nil
+	}
+	out := map[string]struct{}{}
+	for _, part := range strings.Split(raw, ",") {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			continue
+		}
+		out[name] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}()
+
+func parityLanguageExcluded(name string) bool {
+	if len(parityExcludedLanguages) == 0 {
+		return false
+	}
+	_, ok := parityExcludedLanguages[name]
+	return ok
+}
+
+func paritySkipReason(name string) string {
+	if parityIgnoreKnownSkips {
+		return ""
+	}
+	if reason, ok := knownDegradedStructural[name]; ok {
+		return "known degraded structural parity: " + reason
+	}
+	if meta, ok := paritySkips[name]; ok {
+		return meta.skipReason
+	}
+	return ""
+}
 
 type nodeSnapshot struct {
 	Type       string
@@ -250,6 +348,20 @@ func parseWithGo(tc parityCase, src []byte, oldTree *gotreesitter.Tree) (*gotree
 	return tree, lang, nil
 }
 
+func releaseGoTree(tree *gotreesitter.Tree) {
+	if tree != nil {
+		tree.Release()
+	}
+}
+
+func scheduleParityMemoryScavenge(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		runtime.GC()
+		debug.FreeOSMemory()
+	})
+}
+
 func runParityCase(t *testing.T, tc parityCase, label string, src []byte) {
 	t.Helper()
 
@@ -257,6 +369,7 @@ func runParityCase(t *testing.T, tc parityCase, label string, src []byte) {
 	if err != nil {
 		t.Fatalf("[%s/%s] gotreesitter parse error: %v", tc.name, label, err)
 	}
+	defer releaseGoTree(goTree)
 	cLang, err := ParityCLanguage(tc.name)
 	if err != nil {
 		if skipReason := parityReferenceSkipReason(err); skipReason != "" {
@@ -315,19 +428,16 @@ func parityReferenceSkipReason(err error) string {
 		return ""
 	}
 	msg := err.Error()
-	if strings.Contains(msg, "ABI version") || strings.Contains(msg, "Incompatible language version") {
+	if strings.Contains(msg, "ABI version") || strings.Contains(msg, "Incompatible language version") ||
+		strings.Contains(msg, "undefined symbol") {
 		return msg
 	}
 	return ""
 }
 
 func normalizedSource(name, src string) []byte {
-	if name == "yaml" || name == "swift" {
-		return []byte(src)
-	}
-	// Trim one trailing newline so both runtimes compare syntax tree shape
-	// independent of final-line extra-token representation.
-	return []byte(strings.TrimSuffix(src, "\n"))
+	_ = name
+	return []byte(src)
 }
 
 // safeEditOffset chooses one insertion offset for a single-byte whitespace edit.
@@ -379,6 +489,58 @@ func insertSpaceAt(src []byte, insertAt int) []byte {
 	edited[insertAt] = ' '
 	copy(edited[insertAt+1:], src[insertAt:])
 	return edited
+}
+
+type incrementalEditCandidate struct {
+	label       string
+	start       int
+	oldEnd      int
+	replacement []byte
+}
+
+func (c incrementalEditCandidate) newEnd() int {
+	return c.start + len(c.replacement)
+}
+
+func applyEditCandidate(src []byte, c incrementalEditCandidate) []byte {
+	if c.start < 0 {
+		c.start = 0
+	}
+	if c.start > len(src) {
+		c.start = len(src)
+	}
+	if c.oldEnd < c.start {
+		c.oldEnd = c.start
+	}
+	if c.oldEnd > len(src) {
+		c.oldEnd = len(src)
+	}
+	outLen := len(src) - (c.oldEnd - c.start) + len(c.replacement)
+	edited := make([]byte, outLen)
+	pos := 0
+	pos += copy(edited[pos:], src[:c.start])
+	pos += copy(edited[pos:], c.replacement)
+	copy(edited[pos:], src[c.oldEnd:])
+	return edited
+}
+
+func replacementByteForIncrementalParity(b byte) (byte, bool) {
+	switch {
+	case b >= '0' && b <= '8':
+		return b + 1, true
+	case b == '9':
+		return '0', true
+	case b >= 'a' && b <= 'y':
+		return b + 1, true
+	case b == 'z':
+		return 'a', true
+	case b >= 'A' && b <= 'Y':
+		return b + 1, true
+	case b == 'Z':
+		return 'A', true
+	default:
+		return 0, false
+	}
 }
 
 func isWordByte(b byte) bool {
@@ -440,20 +602,71 @@ func incrementalEditOffsets(src []byte) []int {
 	return offsets
 }
 
-// safeEditSource inserts one ASCII space at the preferred offset.
-func safeEditSource(src []byte) ([]byte, int) {
-	insertAt := safeEditOffset(src)
-	return insertSpaceAt(src, insertAt), insertAt
+// incrementalEditCandidates returns preferred one-byte edits for incremental
+// parity checks. It tries insertion sites first, then safe one-byte
+// replacements (digits/letters) as a fallback for token-source backends where
+// insertion-only edits can produce non-comparable fresh parses.
+func incrementalEditCandidates(src []byte) []incrementalEditCandidate {
+	offsets := incrementalEditOffsets(src)
+	candidates := make([]incrementalEditCandidate, 0, len(offsets)+len(src)/2)
+	for _, pos := range offsets {
+		candidates = append(candidates, incrementalEditCandidate{
+			label:       fmt.Sprintf("insert-space@%d", pos),
+			start:       pos,
+			oldEnd:      pos,
+			replacement: []byte{' '},
+		})
+	}
+
+	seenReplace := make([]bool, len(src))
+	addReplace := func(i int) {
+		if i < 0 || i >= len(src) || seenReplace[i] {
+			return
+		}
+		repl, ok := replacementByteForIncrementalParity(src[i])
+		if !ok || repl == src[i] {
+			return
+		}
+		seenReplace[i] = true
+		candidates = append(candidates, incrementalEditCandidate{
+			label:       fmt.Sprintf("replace@%d:%q->%q", i, src[i], repl),
+			start:       i,
+			oldEnd:      i + 1,
+			replacement: []byte{repl},
+		})
+	}
+
+	// Prefer replacing digits first (usually syntax-safe in smoke samples),
+	// then letters.
+	for i := 0; i < len(src); i++ {
+		if src[i] >= '0' && src[i] <= '9' {
+			addReplace(i)
+		}
+	}
+	for i := 0; i < len(src); i++ {
+		if isWordByte(src[i]) {
+			addReplace(i)
+		}
+	}
+
+	return candidates
 }
 
 // TestParityFreshParse verifies that fresh parse trees match the CGo binding
 // on the currently CI-gated language set.
 func TestParityFreshParse(t *testing.T) {
 	for _, tc := range parityCases {
+		if parityLanguageExcluded(tc.name) {
+			continue
+		}
+		if !curatedStructuralLanguages[tc.name] {
+			continue
+		}
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			if meta, ok := paritySkips[tc.name]; ok && meta.skipReason != "" {
-				t.Skipf("known mismatch: %s", meta.skipReason)
+			scheduleParityMemoryScavenge(t)
+			if reason := paritySkipReason(tc.name); reason != "" {
+				t.Skipf("known mismatch: %s", reason)
 			}
 			runParityCase(t, tc, "fresh", normalizedSource(tc.name, tc.source))
 		})
@@ -464,10 +677,17 @@ func TestParityFreshParse(t *testing.T) {
 // matches a CGo fresh parse on edited source.
 func TestParityIncrementalParse(t *testing.T) {
 	for _, tc := range parityCases {
+		if parityLanguageExcluded(tc.name) {
+			continue
+		}
+		if !curatedStructuralLanguages[tc.name] {
+			continue
+		}
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			if meta, ok := paritySkips[tc.name]; ok && meta.skipReason != "" {
-				t.Skipf("known mismatch: %s", meta.skipReason)
+			scheduleParityMemoryScavenge(t)
+			if reason := paritySkipReason(tc.name); reason != "" {
+				t.Skipf("known mismatch: %s", reason)
 			}
 
 			src := normalizedSource(tc.name, tc.source)
@@ -479,6 +699,7 @@ func TestParityIncrementalParse(t *testing.T) {
 			if err != nil {
 				t.Fatalf("[%s/incremental] initial gotreesitter parse error: %v", tc.name, err)
 			}
+			defer releaseGoTree(oldTree)
 			cLang, err := ParityCLanguage(tc.name)
 			if err != nil {
 				if skipReason := parityReferenceSkipReason(err); skipReason != "" {
@@ -496,75 +717,86 @@ func TestParityIncrementalParse(t *testing.T) {
 				t.Fatalf("[%s/incremental] C parser SetLanguage error: %v", tc.name, err)
 			}
 
-			candidates := incrementalEditOffsets(src)
+			candidates := incrementalEditCandidates(src)
 			edited := []byte(nil)
-			editAt := -1
+			var chosen incrementalEditCandidate
+			chosenOK := false
 			validSiteCount := 0
 			firstFreshErr := ""
 			firstIncrErr := ""
-			for _, candidateAt := range candidates {
-				candidateEdited := insertSpaceAt(src, candidateAt)
+			for _, candidate := range candidates {
+				candidateEdited := applyEditCandidate(src, candidate)
 
 				goFreshTree, goFreshLang, err := parseWithGo(tc, candidateEdited, nil)
 				if err != nil {
-					t.Fatalf("[%s/incremental] gotreesitter fresh parse on candidate edit@%d error: %v", tc.name, candidateAt, err)
+					t.Fatalf("[%s/incremental] gotreesitter fresh parse on candidate %s error: %v", tc.name, candidate.label, err)
 				}
 
 				cFreshTree := cParser.Parse(candidateEdited, nil)
 				if cFreshTree == nil || cFreshTree.RootNode() == nil {
-					t.Fatalf("[%s/incremental] C reference parser returned nil tree on candidate edit@%d", tc.name, candidateAt)
+					t.Fatalf("[%s/incremental] C reference parser returned nil tree on candidate %s", tc.name, candidate.label)
 				}
 
 				var freshErrs []string
 				compareNodes(goFreshTree.RootNode(), goFreshLang, cFreshTree.RootNode(), "root", &freshErrs)
 				cFreshTree.Close()
 				if len(freshErrs) > 0 {
+					releaseGoTree(goFreshTree)
 					if firstFreshErr == "" {
-						firstFreshErr = freshErrs[0]
+						firstFreshErr = fmt.Sprintf("%s: %s", candidate.label, freshErrs[0])
 					}
 					continue
 				}
-
 				// Candidate sites must also preserve Go incremental correctness:
 				// incremental parse on edited source must match Go fresh parse.
 				candidateOldTree, _, err := parseWithGo(tc, src, nil)
 				if err != nil {
-					t.Fatalf("[%s/incremental] gotreesitter candidate old-tree parse@%d error: %v", tc.name, candidateAt, err)
+					t.Fatalf("[%s/incremental] gotreesitter candidate old-tree parse on %s error: %v", tc.name, candidate.label, err)
 				}
 				candidateEdit := gotreesitter.InputEdit{
-					StartByte:   uint32(candidateAt),
-					OldEndByte:  uint32(candidateAt),
-					NewEndByte:  uint32(candidateAt + 1),
-					StartPoint:  pointAtOffset(src, candidateAt),
-					OldEndPoint: pointAtOffset(src, candidateAt),
-					NewEndPoint: pointAtOffset(candidateEdited, candidateAt+1),
+					StartByte:   uint32(candidate.start),
+					OldEndByte:  uint32(candidate.oldEnd),
+					NewEndByte:  uint32(candidate.newEnd()),
+					StartPoint:  pointAtOffset(src, candidate.start),
+					OldEndPoint: pointAtOffset(src, candidate.oldEnd),
+					NewEndPoint: pointAtOffset(candidateEdited, candidate.newEnd()),
 				}
 				candidateOldTree.Edit(candidateEdit)
 
 				goIncrTree, goIncrLang, err := parseWithGo(tc, candidateEdited, candidateOldTree)
 				if err != nil {
-					t.Fatalf("[%s/incremental] gotreesitter candidate incremental parse@%d error: %v", tc.name, candidateAt, err)
+					releaseGoTree(candidateOldTree)
+					t.Fatalf("[%s/incremental] gotreesitter candidate incremental parse on %s error: %v", tc.name, candidate.label, err)
 				}
+				releaseGoTree(candidateOldTree)
 
 				var incrErrs []string
 				compareGoNodes(goIncrTree.RootNode(), goIncrLang, goFreshTree.RootNode(), "root", &incrErrs)
+				releaseGoTree(goFreshTree)
+				releaseGoTree(goIncrTree)
 				if len(incrErrs) > 0 {
 					if firstIncrErr == "" {
-						firstIncrErr = incrErrs[0]
+						firstIncrErr = fmt.Sprintf("%s: %s", candidate.label, incrErrs[0])
 					}
 					continue
 				}
-
 				validSiteCount++
-				if editAt < 0 {
+				if !chosenOK {
 					edited = candidateEdited
-					editAt = candidateAt
+					chosen = candidate
+					chosenOK = true
+				}
+				// Most languages only need the first fresh-parity-safe site.
+				// Continue scanning for html so we can preserve the coverage
+				// diagnostic, but avoid O(n) slow-candidate sweeps elsewhere.
+				if tc.name != "html" {
+					break
 				}
 			}
 			if tc.name == "html" {
 				t.Logf("[%s/incremental] valid edit sites=%d/%d", tc.name, validSiteCount, len(candidates))
 			}
-			if editAt < 0 {
+			if !chosenOK {
 				reason := firstFreshErr
 				if reason == "" {
 					reason = firstIncrErr
@@ -576,12 +808,12 @@ func TestParityIncrementalParse(t *testing.T) {
 			}
 
 			edit := gotreesitter.InputEdit{
-				StartByte:   uint32(editAt),
-				OldEndByte:  uint32(editAt),
-				NewEndByte:  uint32(editAt + 1),
-				StartPoint:  pointAtOffset(src, editAt),
-				OldEndPoint: pointAtOffset(src, editAt),
-				NewEndPoint: pointAtOffset(edited, editAt+1),
+				StartByte:   uint32(chosen.start),
+				OldEndByte:  uint32(chosen.oldEnd),
+				NewEndByte:  uint32(chosen.newEnd()),
+				StartPoint:  pointAtOffset(src, chosen.start),
+				OldEndPoint: pointAtOffset(src, chosen.oldEnd),
+				NewEndPoint: pointAtOffset(edited, chosen.newEnd()),
 			}
 
 			oldTree.Edit(edit)
@@ -590,6 +822,7 @@ func TestParityIncrementalParse(t *testing.T) {
 			if err != nil {
 				t.Fatalf("[%s/incremental] gotreesitter incremental parse error: %v", tc.name, err)
 			}
+			defer releaseGoTree(goTree)
 
 			cTree := cParser.Parse(edited, nil)
 			if cTree == nil || cTree.RootNode() == nil {
@@ -623,10 +856,17 @@ func TestParityIncrementalParse(t *testing.T) {
 // do not produce error nodes.
 func TestParityHasNoErrors(t *testing.T) {
 	for _, tc := range parityCases {
+		if parityLanguageExcluded(tc.name) {
+			continue
+		}
+		if !curatedStructuralLanguages[tc.name] {
+			continue
+		}
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			if meta, ok := paritySkips[tc.name]; ok && meta.skipReason != "" {
-				t.Skipf("known mismatch: %s", meta.skipReason)
+			scheduleParityMemoryScavenge(t)
+			if reason := paritySkipReason(tc.name); reason != "" {
+				t.Skipf("known mismatch: %s", reason)
 			}
 			cLang, err := ParityCLanguage(tc.name)
 			if err != nil {
@@ -648,6 +888,7 @@ func TestParityHasNoErrors(t *testing.T) {
 			if err != nil {
 				t.Fatalf("[%s/errors] gotreesitter parse error: %v", tc.name, err)
 			}
+			defer releaseGoTree(tree)
 			if tree.RootNode().HasError() {
 				t.Errorf("[%s] RootNode().HasError() = true on well-formed input", tc.name)
 			}

@@ -39,7 +39,7 @@ func sexpr(n *gotreesitter.Node, lang *gotreesitter.Language) string {
 var correctnessGoldens = map[string]string{
 	"bash":       "(program (command (command_name (word)) (word)))",
 	"c":          "(translation_unit (function_definition (primitive_type) (function_declarator (identifier) (parameter_list (parameter_declaration (primitive_type)))) (compound_statement (return_statement (number_literal)))))",
-	"cpp":        "(translation_unit (function_definition (primitive_type) (function_declarator (identifier) (parameter_list)) (compound_statement (return_statement (number_literal)))))",
+	"cpp":        "(translation_unit (preproc_include (system_lib_string)) (function_definition (primitive_type) (function_declarator (identifier) (parameter_list)) (compound_statement (expression_statement (binary_expression (qualified_identifier (namespace_identifier) (identifier)) (number_literal))) (return_statement (number_literal)))))",
 	"css":        "(stylesheet (rule_set (selectors (tag_name)) (block (declaration (property_name) (plain_value)))))",
 	"elixir":     "(source (call (identifier) (arguments (alias)) (do_block (call (identifier) (arguments (call (identifier) (arguments (identifier))) (keywords (pair (keyword) (identifier))))))))",
 	"go":         "(source_file (package_clause (package_identifier)) (function_declaration (identifier) (parameter_list) (block (statement_list (expression_statement (call_expression (identifier) (argument_list (int_literal))))))))",
@@ -73,6 +73,10 @@ func TestCorrectnessSnapshots(t *testing.T) {
 			if !ok {
 				t.Fatalf("language %q not registered", name)
 			}
+			// Snapshot tests should always load a fresh embedded language so
+			// preceding package tests cannot leak cached runtime mutations into
+			// the golden parse surface.
+			UnloadEmbeddedLanguage(entry.Name + ".bin")
 			t.Cleanup(func() { UnloadEmbeddedLanguage(entry.Name + ".bin") })
 			lang := entry.Language()
 			report := EvaluateParseSupport(entry, lang)

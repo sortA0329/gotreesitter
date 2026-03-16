@@ -1,6 +1,9 @@
 package gotreesitter
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // testLanguage returns a minimal Language for use in tree tests.
 func testLanguage() *Language {
@@ -97,6 +100,34 @@ func TestLeafNodeTypeOutOfRange(t *testing.T) {
 	n := NewLeafNode(Symbol(999), true, 0, 1, Point{}, Point{Row: 0, Column: 1})
 	if got := n.Type(lang); got != "" {
 		t.Errorf("Type out of range: got %q, want empty", got)
+	}
+}
+
+func TestLeafNodeTypeUnescapesPunctuationSymbols(t *testing.T) {
+	lang := &Language{
+		Name:        "test",
+		SymbolNames: []string{"", "\\?", "\\?.", "\\?:", "identifier", "defined\\?", "\\u2200", "$\\?", "\\\\"},
+	}
+
+	tests := []struct {
+		sym  Symbol
+		want string
+	}{
+		{sym: 1, want: "?"},
+		{sym: 2, want: "?."},
+		{sym: 3, want: "?:"},
+		{sym: 4, want: "identifier"},
+		{sym: 5, want: "defined?"},
+		{sym: 6, want: "\\u2200"},
+		{sym: 7, want: "$?"},
+		{sym: 8, want: "\\\\"},
+	}
+
+	for _, tc := range tests {
+		n := NewLeafNode(tc.sym, true, 0, 1, Point{}, Point{Row: 0, Column: 1})
+		if got := n.Type(lang); got != tc.want {
+			t.Fatalf("Type(%d) = %q, want %q", tc.sym, got, tc.want)
+		}
 	}
 }
 
@@ -307,6 +338,149 @@ func TestTree(t *testing.T) {
 	}
 	if tree.Language() != lang {
 		t.Error("Language: wrong")
+	}
+}
+
+func TestTreeCopyIndependentNodes(t *testing.T) {
+	lang := testLanguage()
+	left := NewLeafNode(Symbol(1), true, 0, 3, Point{Row: 0, Column: 0}, Point{Row: 0, Column: 3})
+	right := NewLeafNode(Symbol(2), true, 3, 6, Point{Row: 0, Column: 3}, Point{Row: 0, Column: 6})
+	root := NewParentNode(Symbol(3), true, []*Node{left, right}, nil, 0)
+	tree := NewTree(root, []byte("abcdef"), lang)
+	tree.Edit(InputEdit{
+		StartByte:   3,
+		OldEndByte:  4,
+		NewEndByte:  5,
+		StartPoint:  Point{Row: 0, Column: 3},
+		OldEndPoint: Point{Row: 0, Column: 4},
+		NewEndPoint: Point{Row: 0, Column: 5},
+	})
+
+	cp := tree.Copy()
+	if cp == nil {
+		t.Fatal("Copy() returned nil")
+	}
+	if cp == tree {
+		t.Fatal("Copy() returned same tree pointer")
+	}
+	if cp.RootNode() == tree.RootNode() {
+		t.Fatal("copy root should be a distinct node pointer")
+	}
+	if cp.RootNode().Child(0) == tree.RootNode().Child(0) {
+		t.Fatal("copy child should be a distinct node pointer")
+	}
+	if cp.Language() != tree.Language() {
+		t.Fatal("copy language mismatch")
+	}
+	if got, want := len(cp.Edits()), len(tree.Edits()); got != want {
+		t.Fatalf("copy edits len: got %d want %d", got, want)
+	}
+
+	// Mutating the copy must not mutate the original.
+	beforeOrigEnd := tree.RootNode().EndByte()
+	cp.Edit(InputEdit{
+		StartByte:   0,
+		OldEndByte:  0,
+		NewEndByte:  2,
+		StartPoint:  Point{Row: 0, Column: 0},
+		OldEndPoint: Point{Row: 0, Column: 0},
+		NewEndPoint: Point{Row: 0, Column: 2},
+	})
+	if tree.RootNode().EndByte() != beforeOrigEnd {
+		t.Fatalf("original tree root mutated by copy edit: got %d want %d", tree.RootNode().EndByte(), beforeOrigEnd)
+	}
+}
+
+func TestTreeCopySurvivesOriginalRelease(t *testing.T) {
+	lang := testLanguage()
+	root := NewLeafNode(Symbol(1), true, 0, 1, Point{}, Point{Row: 0, Column: 1})
+	tree := NewTree(root, []byte("x"), lang)
+	cp := tree.Copy()
+	if cp == nil || cp.RootNode() == nil {
+		t.Fatal("copy/root should be non-nil")
+	}
+
+	tree.Release()
+	if cp.RootNode() == nil {
+		t.Fatal("copy root should remain valid after releasing original")
+	}
+	if got, want := cp.RootNode().Text(cp.Source()), "x"; got != want {
+		t.Fatalf("copy text: got %q want %q", got, want)
+	}
+}
+
+func TestTreeRootNodeWithOffsetShiftsDescendants(t *testing.T) {
+	lang := testLanguage()
+	a := NewLeafNode(Symbol(1), true, 1, 3, Point{Row: 0, Column: 1}, Point{Row: 0, Column: 3})
+	b := NewLeafNode(Symbol(2), true, 4, 8, Point{Row: 1, Column: 0}, Point{Row: 1, Column: 4})
+	root := NewParentNode(Symbol(3), true, []*Node{a, b}, nil, 0)
+	tree := NewTree(root, []byte("abcdefgh"), lang)
+
+	offset := tree.RootNodeWithOffset(10, Point{Row: 3, Column: 7})
+	if offset == nil {
+		t.Fatal("RootNodeWithOffset returned nil")
+	}
+	if offset == tree.RootNode() {
+		t.Fatal("RootNodeWithOffset should return a distinct node for non-zero offset")
+	}
+
+	if got, want := offset.StartByte(), uint32(11); got != want {
+		t.Fatalf("root start byte: got %d want %d", got, want)
+	}
+	if got, want := offset.EndByte(), uint32(18); got != want {
+		t.Fatalf("root end byte: got %d want %d", got, want)
+	}
+	if got, want := offset.StartPoint(), (Point{Row: 3, Column: 8}); got != want {
+		t.Fatalf("root start point: got %+v want %+v", got, want)
+	}
+
+	first := offset.Child(0)
+	if first == nil {
+		t.Fatal("offset first child nil")
+	}
+	if got, want := first.StartPoint(), (Point{Row: 3, Column: 8}); got != want {
+		t.Fatalf("first child start point: got %+v want %+v", got, want)
+	}
+	if got, want := first.EndPoint(), (Point{Row: 3, Column: 10}); got != want {
+		t.Fatalf("first child end point: got %+v want %+v", got, want)
+	}
+
+	second := offset.Child(1)
+	if second == nil {
+		t.Fatal("offset second child nil")
+	}
+	if got, want := second.StartPoint(), (Point{Row: 4, Column: 0}); got != want {
+		t.Fatalf("second child start point: got %+v want %+v", got, want)
+	}
+	if got, want := second.EndPoint(), (Point{Row: 4, Column: 4}); got != want {
+		t.Fatalf("second child end point: got %+v want %+v", got, want)
+	}
+
+	// Original tree must remain unchanged.
+	if got, want := tree.RootNode().StartByte(), uint32(1); got != want {
+		t.Fatalf("original root start byte mutated: got %d want %d", got, want)
+	}
+	if got, want := tree.RootNode().StartPoint(), (Point{Row: 0, Column: 1}); got != want {
+		t.Fatalf("original root start point mutated: got %+v want %+v", got, want)
+	}
+}
+
+func TestTreeWriteDOT(t *testing.T) {
+	lang := testLanguage()
+	left := NewLeafNode(Symbol(1), true, 0, 3, Point{Row: 0, Column: 0}, Point{Row: 0, Column: 3})
+	right := NewLeafNode(Symbol(2), true, 3, 6, Point{Row: 0, Column: 3}, Point{Row: 0, Column: 6})
+	root := NewParentNode(Symbol(3), true, []*Node{left, right}, nil, 0)
+	tree := NewTree(root, []byte("abcdef"), lang)
+
+	dot := tree.DOT(lang)
+	if !strings.Contains(dot, "digraph gotreesitter") {
+		t.Fatalf("DOT missing graph header: %q", dot)
+	}
+	if !strings.Contains(dot, "expression [0,6)") {
+		t.Fatalf("DOT missing root label: %q", dot)
+	}
+	if !strings.Contains(dot, "n0 -> n") {
+		t.Fatalf("DOT missing edge: %q", dot)
 	}
 }
 
@@ -622,5 +796,56 @@ func TestTreeChangedRanges(t *testing.T) {
 	}
 	if ranges[0].StartByte != 1 || ranges[0].EndByte != 4 {
 		t.Fatalf("ChangedRanges bytes: got %d-%d, want 1-4", ranges[0].StartByte, ranges[0].EndByte)
+	}
+}
+
+func TestNodeEditFromSubnodeMutatesContainingRoot(t *testing.T) {
+	left := NewLeafNode(Symbol(1), true, 0, 3, Point{Row: 0, Column: 0}, Point{Row: 0, Column: 3})
+	right := NewLeafNode(Symbol(2), true, 3, 6, Point{Row: 0, Column: 3}, Point{Row: 0, Column: 6})
+	root := NewParentNode(Symbol(4), true, []*Node{left, right}, nil, 0)
+	tree := NewTree(root, []byte("abcdef"), testLanguage())
+
+	right.Edit(InputEdit{
+		StartByte:   3,
+		OldEndByte:  4,
+		NewEndByte:  6, // +2 bytes
+		StartPoint:  Point{Row: 0, Column: 3},
+		OldEndPoint: Point{Row: 0, Column: 4},
+		NewEndPoint: Point{Row: 0, Column: 6},
+	})
+
+	// Root and edited subtree should move together.
+	if got, want := tree.RootNode().EndByte(), uint32(8); got != want {
+		t.Fatalf("root.EndByte: got %d, want %d", got, want)
+	}
+	if got, want := right.EndByte(), uint32(8); got != want {
+		t.Fatalf("right.EndByte: got %d, want %d", got, want)
+	}
+	// Unaffected left sibling should remain unchanged.
+	if got, want := left.EndByte(), uint32(3); got != want {
+		t.Fatalf("left.EndByte: got %d, want %d", got, want)
+	}
+	// Node-level edit does not append tree edit history.
+	if got := len(tree.Edits()); got != 0 {
+		t.Fatalf("tree.Edits len: got %d, want 0", got)
+	}
+}
+
+func TestNodeEditDetachedNode(t *testing.T) {
+	n := NewLeafNode(Symbol(1), true, 5, 7, Point{Row: 1, Column: 5}, Point{Row: 1, Column: 7})
+	n.Edit(InputEdit{
+		StartByte:   0,
+		OldEndByte:  0,
+		NewEndByte:  2, // insertion before node => shift by +2
+		StartPoint:  Point{Row: 0, Column: 0},
+		OldEndPoint: Point{Row: 0, Column: 0},
+		NewEndPoint: Point{Row: 0, Column: 2},
+	})
+
+	if got, want := n.StartByte(), uint32(7); got != want {
+		t.Fatalf("StartByte: got %d, want %d", got, want)
+	}
+	if got, want := n.EndByte(), uint32(9); got != want {
+		t.Fatalf("EndByte: got %d, want %d", got, want)
 	}
 }

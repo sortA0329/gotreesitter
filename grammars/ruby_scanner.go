@@ -63,8 +63,8 @@ const (
 	rbySymBlockAmpersand                   gotreesitter.Symbol = 143
 	rbySymSplatStar                        gotreesitter.Symbol = 144
 	rbySymUnaryMinus                       gotreesitter.Symbol = 145
-	rbySymBinaryMinus                      gotreesitter.Symbol = 146
-	rbySymUnaryMinusNum                    gotreesitter.Symbol = 147
+	rbySymUnaryMinusNum                    gotreesitter.Symbol = 146
+	rbySymBinaryMinus                      gotreesitter.Symbol = 147
 	rbySymBinaryStar                       gotreesitter.Symbol = 148
 	rbySymSingletonClassLeftAngleLeftAngle gotreesitter.Symbol = 149
 	rbySymHashKeySymbol                    gotreesitter.Symbol = 150

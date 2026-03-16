@@ -37,6 +37,7 @@ func (TsxExternalScanner) Create() any                           { return nil }
 func (TsxExternalScanner) Destroy(payload any)                   {}
 func (TsxExternalScanner) Serialize(payload any, buf []byte) int { return 0 }
 func (TsxExternalScanner) Deserialize(payload any, buf []byte)   {}
+func (TsxExternalScanner) SupportsIncrementalReuse() bool        { return true }
 
 func (TsxExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, validSymbols []bool) bool {
 	if tsxValid(validSymbols, tsxTokTemplateChars) {

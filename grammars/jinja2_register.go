@@ -4,12 +4,12 @@ package grammars
 
 func init() {
 	Register(LangEntry{
-		Name:           "jinja2",
-		Extensions:     []string{".j2", ".jinja2", ".jinja"},
-		Language:       Jinja2Language,
-		HighlightQuery: jinja2HighlightQuery,
+		Name:               "jinja2",
+		Extensions:         []string{".j2", ".jinja2", ".jinja"},
+		Language:           Jinja2Language,
+		HighlightQuery:     jinja2HighlightQuery,
 		TokenSourceFactory: defaultTokenSourceFactory("jinja2"),
 	})
 }
 
-const jinja2HighlightQuery = ""
+const jinja2HighlightQuery = "(jinja_expression) @keyword\n"

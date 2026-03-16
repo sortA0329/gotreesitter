@@ -4,12 +4,12 @@ package grammars
 
 func init() {
 	Register(LangEntry{
-		Name:           "swift",
-		Extensions:     []string{".swift"},
-		Language:       SwiftLanguage,
-		HighlightQuery: swiftHighlightQuery,
+		Name:               "swift",
+		Extensions:         []string{".swift"},
+		Language:           SwiftLanguage,
+		HighlightQuery:     swiftHighlightQuery,
 		TokenSourceFactory: defaultTokenSourceFactory("swift"),
 	})
 }
 
-const swiftHighlightQuery = ""
+const swiftHighlightQuery = "(comment) @comment\n(identifier) @variable\n(type_identifier) @type\n(function_declaration\n  (identifier) @function)\n[\n  \"func\"\n  \"class\"\n  \"struct\"\n  \"enum\"\n  \"protocol\"\n  \"extension\"\n  \"if\"\n  \"else\"\n  \"switch\"\n  \"case\"\n  \"for\"\n  \"while\"\n  \"return\"\n  \"let\"\n  \"var\"\n  \"true\"\n  \"false\"\n] @keyword\n"

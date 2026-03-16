@@ -46,6 +46,11 @@ var inferredTagsQueryPatterns = []tagsQueryPattern{
 	{Query: "(class_specifier (type_identifier) @name) @definition.class", Symbols: []string{"class_specifier", "type_identifier"}},
 	{Query: "(struct_specifier (type_identifier) @name) @definition.type", Symbols: []string{"struct_specifier", "type_identifier"}},
 
+	// Constants and variables.
+	{Query: "(const_spec (identifier) @name) @definition.constant", Symbols: []string{"const_spec", "identifier"}},
+	{Query: "(var_spec (identifier) @name) @definition.variable", Symbols: []string{"var_spec", "identifier"}},
+	{Query: "(short_var_declaration (identifier) @name) @definition.variable", Symbols: []string{"short_var_declaration", "identifier"}},
+
 	// Common call references.
 	{Query: "(call_expression (identifier) @name) @reference.call", Symbols: []string{"call_expression", "identifier"}},
 	{Query: "(call_expression (field_identifier) @name) @reference.call", Symbols: []string{"call_expression", "field_identifier"}},

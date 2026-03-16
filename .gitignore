@@ -18,6 +18,11 @@ parity_report
 
 # Benchmark outputs
 cgo_harness/reports/
+harness_out/
+parity_out/
+
+# Generated real-corpus artifacts
+cgo_harness/corpus_real/
 
 # IDE
 .idea/

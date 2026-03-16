@@ -2,8 +2,11 @@ package gotreesitter
 
 import (
 	"fmt"
+	"io"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Range is a span of source text.
@@ -25,6 +28,7 @@ type Node struct {
 	endPoint     Point
 	children     []*Node
 	fieldIDs     []FieldID // parallel to children, 0 = no field
+	fieldSources []uint8   // parallel to children, 0 = none, 1 = direct, 2 = inherited
 	isNamed      bool
 	isExtra      bool
 	isMissing    bool
@@ -36,6 +40,28 @@ type Node struct {
 	ownerArena   *nodeArena
 }
 
+func defaultFieldSources(fieldIDs []FieldID) []uint8 {
+	return defaultFieldSourcesInArena(nil, fieldIDs)
+}
+
+func defaultFieldSourcesInArena(arena *nodeArena, fieldIDs []FieldID) []uint8 {
+	if len(fieldIDs) == 0 {
+		return nil
+	}
+	var out []uint8
+	if arena != nil {
+		out = arena.allocFieldSourceSlice(len(fieldIDs))
+	} else {
+		out = make([]uint8, len(fieldIDs))
+	}
+	for i, fid := range fieldIDs {
+		if fid != 0 {
+			out[i] = fieldSourceDirect
+		}
+	}
+	return out
+}
+
 // ParseStopReason reports why parseInternal terminated.
 type ParseStopReason string
 
@@ -44,30 +70,58 @@ const (
 	ParseStopAccepted        ParseStopReason = "accepted"
 	ParseStopNoStacksAlive   ParseStopReason = "no_stacks_alive"
 	ParseStopTokenSourceEOF  ParseStopReason = "token_source_eof"
+	ParseStopTimeout         ParseStopReason = "timeout"
+	ParseStopCancelled       ParseStopReason = "cancelled"
 	ParseStopIterationLimit  ParseStopReason = "iteration_limit"
 	ParseStopStackDepthLimit ParseStopReason = "stack_depth_limit"
 	ParseStopNodeLimit       ParseStopReason = "node_limit"
+	ParseStopMemoryBudget    ParseStopReason = "memory_budget"
 )
 
 // ParseRuntime captures parser-loop diagnostics for a completed tree.
 type ParseRuntime struct {
-	StopReason          ParseStopReason
-	SourceLen           uint32
-	ExpectedEOFByte     uint32
-	RootEndByte         uint32
-	Truncated           bool
-	TokenSourceEOFEarly bool
-	TokensConsumed      uint64
-	LastTokenEndByte    uint32
-	LastTokenSymbol     Symbol
-	LastTokenWasEOF     bool
-	IterationLimit      int
-	StackDepthLimit     int
-	NodeLimit           int
-	Iterations          int
-	NodesAllocated      int
-	PeakStackDepth      int
-	MaxStacksSeen       int
+	StopReason                  ParseStopReason
+	SourceLen                   uint32
+	ExpectedEOFByte             uint32
+	RootEndByte                 uint32
+	Truncated                   bool
+	TokenSourceEOFEarly         bool
+	TokensConsumed              uint64
+	LastTokenEndByte            uint32
+	LastTokenSymbol             Symbol
+	LastTokenWasEOF             bool
+	IterationLimit              int
+	StackDepthLimit             int
+	NodeLimit                   int
+	MemoryBudgetBytes           int64
+	Iterations                  int
+	NodesAllocated              int
+	ArenaBytesAllocated         int64
+	ScratchBytesAllocated       int64
+	EntryScratchBytesAllocated  int64
+	GSSBytesAllocated           int64
+	PeakStackDepth              int
+	MaxStacksSeen               int
+	SingleStackIterations       int
+	MultiStackIterations        int
+	SingleStackTokens           uint64
+	MultiStackTokens            uint64
+	SingleStackGSSNodes         uint64
+	MultiStackGSSNodes          uint64
+	GSSNodesAllocated           uint64
+	GSSNodesRetained            uint64
+	GSSNodesDroppedSameToken    uint64
+	ParentNodesAllocated        uint64
+	ParentNodesRetained         uint64
+	ParentNodesDroppedSameToken uint64
+	LeafNodesAllocated          uint64
+	LeafNodesRetained           uint64
+	LeafNodesDroppedSameToken   uint64
+	MergeStacksIn               uint64
+	MergeStacksOut              uint64
+	MergeSlotsUsed              uint64
+	GlobalCullStacksIn          uint64
+	GlobalCullStacksOut         uint64
 }
 
 // Summary returns a stable one-line diagnostic string for parse-runtime stats.
@@ -77,10 +131,12 @@ func (rt ParseRuntime) Summary() string {
 		stopReason = ParseStopNone
 	}
 	return fmt.Sprintf(
-		"truncated=%v stopReason=%s tokenEOFEarly=%v tokens=%d lastTokenEnd=%d expectedEOF=%d lastTokenSymbol=%d lastTokenEOF=%v iterations=%d/%d nodes=%d/%d peakDepth=%d/%d maxStacks=%d",
+		"truncated=%v stopReason=%s tokenEOFEarly=%v tokens=%d lastTokenEnd=%d expectedEOF=%d lastTokenSymbol=%d lastTokenEOF=%v iterations=%d/%d nodes=%d/%d arena=%d/%d scratch=%d(entry=%d gss=%d)/%d peakDepth=%d/%d maxStacks=%d",
 		rt.Truncated, stopReason, rt.TokenSourceEOFEarly, rt.TokensConsumed,
 		rt.LastTokenEndByte, rt.ExpectedEOFByte, rt.LastTokenSymbol, rt.LastTokenWasEOF,
 		rt.Iterations, rt.IterationLimit, rt.NodesAllocated, rt.NodeLimit,
+		rt.ArenaBytesAllocated, rt.MemoryBudgetBytes,
+		rt.ScratchBytesAllocated, rt.EntryScratchBytesAllocated, rt.GSSBytesAllocated, rt.MemoryBudgetBytes,
 		rt.PeakStackDepth, rt.StackDepthLimit, rt.MaxStacksSeen,
 	)
 }
@@ -293,10 +349,50 @@ func (n *Node) Text(source []byte) string {
 
 // Type returns the node's type name from the language.
 func (n *Node) Type(lang *Language) string {
+	if n != nil && n.symbol == errorSymbol {
+		return "ERROR"
+	}
 	if int(n.symbol) < len(lang.SymbolNames) {
-		return lang.SymbolNames[n.symbol]
+		name := lang.SymbolNames[n.symbol]
+		name = unescapePunctuationSymbolName(name)
+		return name
 	}
 	return ""
+}
+
+func unescapePunctuationSymbolName(name string) string {
+	if !strings.Contains(name, "\\") {
+		return name
+	}
+	var b strings.Builder
+	b.Grow(len(name))
+	changed := false
+	for i := 0; i < len(name); {
+		r, size := utf8.DecodeRuneInString(name[i:])
+		if r != '\\' {
+			b.WriteRune(r)
+			i += size
+			continue
+		}
+		if i+size >= len(name) {
+			b.WriteRune(r)
+			i += size
+			continue
+		}
+		next, nextSize := utf8.DecodeRuneInString(name[i+size:])
+		if next == '\\' || unicode.IsLetter(next) || unicode.IsDigit(next) {
+			b.WriteRune(r)
+			i += size
+			continue
+		}
+		changed = true
+		b.WriteRune(next)
+		i += size + nextSize
+	}
+	if !changed {
+		return name
+	}
+	return b.String()
 }
 
 func pointLessThan(a, b Point) bool {
@@ -534,6 +630,7 @@ func newParentNode(arena *nodeArena, sym Symbol, named bool, children []*Node, f
 	n.isNamed = named
 	n.children = children
 	n.fieldIDs = fieldIDs
+	n.fieldSources = defaultFieldSourcesInArena(arena, fieldIDs)
 	n.productionID = productionID
 	n.childIndex = -1
 	populateParentNode(n, children)
@@ -569,10 +666,17 @@ func newLeafNodeInArena(arena *nodeArena, sym Symbol, named bool, startByte, end
 	n.endPoint = endPoint
 	n.childIndex = -1
 	n.ownerArena = arena
+	if arena.audit != nil {
+		arena.audit.recordNodeAlloc(n, runtimeAuditNodeKindLeaf)
+	}
 	return n
 }
 
 func newParentNodeInArena(arena *nodeArena, sym Symbol, named bool, children []*Node, fieldIDs []FieldID, productionID uint16) *Node {
+	return newParentNodeInArenaWithFieldSources(arena, sym, named, children, fieldIDs, nil, productionID)
+}
+
+func newParentNodeInArenaWithFieldSources(arena *nodeArena, sym Symbol, named bool, children []*Node, fieldIDs []FieldID, fieldSources []uint8, productionID uint16) *Node {
 	if arena == nil {
 		return newParentNode(nil, sym, named, children, fieldIDs, productionID)
 	}
@@ -585,13 +689,25 @@ func newParentNodeInArena(arena *nodeArena, sym Symbol, named bool, children []*
 	n.isNamed = named
 	n.children = children
 	n.fieldIDs = fieldIDs
+	if fieldSources != nil {
+		n.fieldSources = fieldSources
+	} else {
+		n.fieldSources = defaultFieldSourcesInArena(arena, fieldIDs)
+	}
 	n.productionID = productionID
 	n.childIndex = -1
 	populateParentNode(n, children)
+	if arena.audit != nil {
+		arena.audit.recordNodeAlloc(n, runtimeAuditNodeKindParent)
+	}
 	return n
 }
 
 func newParentNodeInArenaNoLinks(arena *nodeArena, sym Symbol, named bool, children []*Node, fieldIDs []FieldID, productionID uint16, trackChildErrors bool) *Node {
+	return newParentNodeInArenaNoLinksWithFieldSources(arena, sym, named, children, fieldIDs, nil, productionID, trackChildErrors)
+}
+
+func newParentNodeInArenaNoLinksWithFieldSources(arena *nodeArena, sym Symbol, named bool, children []*Node, fieldIDs []FieldID, fieldSources []uint8, productionID uint16, trackChildErrors bool) *Node {
 	if arena == nil {
 		return newParentNode(nil, sym, named, children, fieldIDs, productionID)
 	}
@@ -604,9 +720,17 @@ func newParentNodeInArenaNoLinks(arena *nodeArena, sym Symbol, named bool, child
 	n.isNamed = named
 	n.children = children
 	n.fieldIDs = fieldIDs
+	if fieldSources != nil {
+		n.fieldSources = fieldSources
+	} else {
+		n.fieldSources = defaultFieldSourcesInArena(arena, fieldIDs)
+	}
 	n.productionID = productionID
 	n.childIndex = -1
 	populateParentNodeNoLinks(n, children, trackChildErrors)
+	if arena.audit != nil {
+		arena.audit.recordNodeAlloc(n, runtimeAuditNodeKindParent)
+	}
 	return n
 }
 
@@ -614,14 +738,15 @@ func newParentNodeInArenaNoLinks(arena *nodeArena, sym Symbol, named bool, child
 // Tree is safe for concurrent reads after construction. Edit and Release are
 // not safe for concurrent use.
 type Tree struct {
-	root          *Node
-	source        []byte
-	language      *Language
-	edits         []InputEdit  // pending edits applied to this tree
-	arena         *nodeArena   // primary arena that owns newly-built nodes
-	borrowedArena []*nodeArena // arenas borrowed via subtree reuse
-	parseRuntime  ParseRuntime
-	released      bool
+	root           *Node
+	source         []byte
+	language       *Language
+	edits          []InputEdit  // pending edits applied to this tree
+	lastEditedLeaf *Node        // deepest leaf overlapped by the most recent edit, when tracked
+	arena          *nodeArena   // primary arena that owns newly-built nodes
+	borrowedArena  []*nodeArena // arenas borrowed via subtree reuse
+	parseRuntime   ParseRuntime
+	released       bool
 }
 
 // NewTree creates a new Tree.
@@ -634,13 +759,15 @@ func NewTree(root *Node, source []byte, lang *Language) *Tree {
 }
 
 func newTreeWithArenas(root *Node, source []byte, lang *Language, arena *nodeArena, borrowed []*nodeArena) *Tree {
-	return &Tree{
+	tree := &Tree{
 		root:          root,
 		source:        source,
 		language:      lang,
 		arena:         arena,
 		borrowedArena: uniqueArenas(borrowed, arena),
 	}
+	rebuildExternalScannerCheckpoints(root, lang)
+	return tree
 }
 
 func uniqueArenas(arenas []*nodeArena, exclude *nodeArena) []*nodeArena {
@@ -680,6 +807,7 @@ func (t *Tree) Release() {
 		return
 	}
 	t.released = true
+	t.lastEditedLeaf = nil
 	for _, a := range t.borrowedArena {
 		a.Release()
 	}
@@ -694,11 +822,255 @@ func (t *Tree) Release() {
 // RootNode returns the tree's root node.
 func (t *Tree) RootNode() *Node { return t.root }
 
+// RootNodeWithOffset returns a copy of the root node with all spans shifted by
+// the provided byte and point offsets.
+//
+// This mirrors tree-sitter C's root-node-with-offset behavior for callers that
+// need to embed a parsed tree at a larger document offset.
+func (t *Tree) RootNodeWithOffset(offsetBytes uint32, offsetExtent Point) *Node {
+	if t == nil || t.root == nil {
+		return nil
+	}
+	if offsetBytes == 0 && offsetExtent == (Point{}) {
+		return t.root
+	}
+	return cloneTreeNodesWithOffset(t.root, offsetBytes, offsetExtent)
+}
+
 // Source returns the original source text.
 func (t *Tree) Source() []byte { return t.source }
 
 // Language returns the language used to parse this tree.
 func (t *Tree) Language() *Language { return t.language }
+
+// WriteDOT writes a DOT graph representation of this tree to w.
+func (t *Tree) WriteDOT(w io.Writer, lang *Language) error {
+	if w == nil {
+		return fmt.Errorf("tree: nil writer")
+	}
+	if t == nil || t.root == nil {
+		_, err := io.WriteString(w, "digraph gotreesitter {\n}\n")
+		return err
+	}
+
+	type dotItem struct {
+		node *Node
+		id   int
+	}
+
+	if _, err := io.WriteString(w, "digraph gotreesitter {\n"); err != nil {
+		return err
+	}
+
+	nextID := 1
+	stack := []dotItem{{node: t.root, id: 0}}
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		item := stack[last]
+		stack = stack[:last]
+		n := item.node
+		if n == nil {
+			continue
+		}
+
+		label := fmt.Sprintf("%s [%d,%d)", n.Type(lang), n.StartByte(), n.EndByte())
+		if _, err := fmt.Fprintf(w, "  n%d [label=%q];\n", item.id, label); err != nil {
+			return err
+		}
+
+		for _, child := range n.children {
+			if child == nil {
+				continue
+			}
+			childID := nextID
+			nextID++
+			if _, err := fmt.Fprintf(w, "  n%d -> n%d;\n", item.id, childID); err != nil {
+				return err
+			}
+			stack = append(stack, dotItem{node: child, id: childID})
+		}
+	}
+
+	_, err := io.WriteString(w, "}\n")
+	return err
+}
+
+// DOT returns a DOT graph representation of this tree.
+func (t *Tree) DOT(lang *Language) string {
+	var b strings.Builder
+	_ = t.WriteDOT(&b, lang)
+	return b.String()
+}
+
+// Copy returns an independent copy of this tree.
+//
+// The copied tree has distinct node objects, so subsequent Tree.Edit calls on
+// either tree do not mutate the other's spans/dirty bits. Source bytes and
+// language pointer are shared (read-only).
+func (t *Tree) Copy() *Tree {
+	if t == nil {
+		return nil
+	}
+
+	out := &Tree{
+		source:       t.source,
+		language:     t.language,
+		parseRuntime: t.parseRuntime,
+	}
+	if len(t.edits) > 0 {
+		out.edits = make([]InputEdit, len(t.edits))
+		copy(out.edits, t.edits)
+	}
+	if t.root == nil {
+		return out
+	}
+
+	class := arenaClassIncremental
+	if t.arena != nil {
+		class = t.arena.class
+	}
+	arena := acquireNodeArena(class)
+	out.root = cloneTreeNodesIntoArena(t.root, arena)
+	out.arena = arena
+	return out
+}
+
+func cloneTreeNodesIntoArena(root *Node, arena *nodeArena) *Node {
+	if root == nil {
+		return nil
+	}
+
+	type clonePair struct {
+		old *Node
+		new *Node
+	}
+
+	cloneNode := func(src *Node) *Node {
+		dst := arena.allocNodeFast()
+		*dst = *src
+		dst.children = nil
+		dst.fieldIDs = nil
+		dst.fieldSources = nil
+		dst.parent = nil
+		dst.childIndex = -1
+		dst.ownerArena = arena
+		return dst
+	}
+
+	newRoot := cloneNode(root)
+	stack := []clonePair{{old: root, new: newRoot}}
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		pair := stack[last]
+		stack = stack[:last]
+
+		oldNode := pair.old
+		newNode := pair.new
+
+		if n := len(oldNode.fieldIDs); n > 0 {
+			fieldIDs := arena.allocFieldIDSlice(n)
+			copy(fieldIDs, oldNode.fieldIDs)
+			newNode.fieldIDs = fieldIDs
+		}
+		if n := len(oldNode.fieldSources); n > 0 {
+			fieldSources := arena.allocFieldSourceSlice(n)
+			copy(fieldSources, oldNode.fieldSources)
+			newNode.fieldSources = fieldSources
+		}
+
+		if n := len(oldNode.children); n > 0 {
+			children := arena.allocNodeSlice(n)
+			newNode.children = children
+			for i, oldChild := range oldNode.children {
+				if oldChild == nil {
+					continue
+				}
+				newChild := cloneNode(oldChild)
+				newChild.parent = newNode
+				newChild.childIndex = i
+				children[i] = newChild
+				stack = append(stack, clonePair{old: oldChild, new: newChild})
+			}
+		}
+	}
+
+	return newRoot
+}
+
+func cloneTreeNodesWithOffset(root *Node, offsetBytes uint32, offsetExtent Point) *Node {
+	if root == nil {
+		return nil
+	}
+
+	type clonePair struct {
+		old *Node
+		new *Node
+	}
+
+	baseRow := root.startPoint.Row
+	offsetPoint := func(p Point) Point {
+		originalRow := p.Row
+		p.Row = addUint32Delta(p.Row, int64(offsetExtent.Row))
+		// When adding a multi-line prefix, only nodes on the original first row
+		// of this tree receive the column offset. Rows after that keep columns.
+		if offsetExtent.Row == 0 || originalRow == baseRow {
+			p.Column = addUint32Delta(p.Column, int64(offsetExtent.Column))
+		}
+		return p
+	}
+
+	cloneNode := func(src *Node) *Node {
+		dst := &Node{}
+		*dst = *src
+		dst.startByte = addUint32Delta(src.startByte, int64(offsetBytes))
+		dst.endByte = addUint32Delta(src.endByte, int64(offsetBytes))
+		dst.startPoint = offsetPoint(src.startPoint)
+		dst.endPoint = offsetPoint(src.endPoint)
+		dst.children = nil
+		dst.fieldIDs = nil
+		dst.fieldSources = nil
+		dst.parent = nil
+		dst.childIndex = -1
+		dst.ownerArena = nil
+		return dst
+	}
+
+	newRoot := cloneNode(root)
+	stack := []clonePair{{old: root, new: newRoot}}
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		pair := stack[last]
+		stack = stack[:last]
+
+		oldNode := pair.old
+		newNode := pair.new
+
+		if n := len(oldNode.fieldIDs); n > 0 {
+			newNode.fieldIDs = make([]FieldID, n)
+			copy(newNode.fieldIDs, oldNode.fieldIDs)
+		}
+		if n := len(oldNode.fieldSources); n > 0 {
+			newNode.fieldSources = make([]uint8, n)
+			copy(newNode.fieldSources, oldNode.fieldSources)
+		}
+
+		if n := len(oldNode.children); n > 0 {
+			newNode.children = make([]*Node, n)
+			for i, oldChild := range oldNode.children {
+				if oldChild == nil {
+					continue
+				}
+				newChild := cloneNode(oldChild)
+				newChild.parent = newNode
+				newChild.childIndex = i
+				newNode.children[i] = newChild
+				stack = append(stack, clonePair{old: oldChild, new: newChild})
+			}
+		}
+	}
+
+	return newRoot
+}
 
 // ParseStopReason reports why parsing terminated.
 func (t *Tree) ParseStopReason() ParseStopReason {
@@ -714,7 +1086,7 @@ func (t *Tree) ParseStopReason() ParseStopReason {
 // ParseStoppedEarly reports whether parsing hit an early-stop condition.
 func (t *Tree) ParseStoppedEarly() bool {
 	switch t.ParseStopReason() {
-	case ParseStopIterationLimit, ParseStopStackDepthLimit, ParseStopNodeLimit, ParseStopTokenSourceEOF:
+	case ParseStopIterationLimit, ParseStopStackDepthLimit, ParseStopNodeLimit, ParseStopMemoryBudget, ParseStopTokenSourceEOF, ParseStopTimeout, ParseStopCancelled:
 		return true
 	default:
 		return false
@@ -755,14 +1127,36 @@ type InputEdit struct {
 	NewEndPoint Point
 }
 
+// Edit adjusts this node's byte/point span for a source edit.
+//
+// If the node belongs to a larger tree, the edit is applied from the
+// containing root so sibling and ancestor spans remain consistent.
+// Unlike Tree.Edit, this method does not record edit history on a Tree.
+func (n *Node) Edit(edit InputEdit) {
+	if n == nil {
+		return
+	}
+	root := n
+	for root.parent != nil {
+		root = root.parent
+	}
+	editNode(root, edit)
+}
+
 // Edit records an edit on this tree. Call this before ParseIncremental to
 // inform the parser which regions changed. The edit adjusts byte offsets
 // and marks overlapping nodes as dirty so the incremental parser knows
 // what to re-parse.
 func (t *Tree) Edit(edit InputEdit) {
 	t.edits = append(t.edits, edit)
+	t.lastEditedLeaf = nil
 	if t.root != nil {
-		editNode(t.root, edit)
+		byteDelta := int64(edit.NewEndByte) - int64(edit.OldEndByte)
+		rowDelta := int64(edit.NewEndPoint.Row) - int64(edit.OldEndPoint.Row)
+		colDelta := int64(edit.NewEndPoint.Column) - int64(edit.OldEndPoint.Column)
+		hasTailShift := byteDelta != 0 || edit.NewEndPoint != edit.OldEndPoint
+		var shiftScratch []*Node
+		editNodeWithDelta(t.root, edit, byteDelta, rowDelta, colDelta, hasTailShift, &shiftScratch, &t.lastEditedLeaf)
 	}
 }
 
@@ -831,7 +1225,7 @@ func editNode(n *Node, edit InputEdit) {
 	colDelta := int64(edit.NewEndPoint.Column) - int64(edit.OldEndPoint.Column)
 	hasTailShift := byteDelta != 0 || edit.NewEndPoint != edit.OldEndPoint
 	var shiftScratch []*Node
-	editNodeWithDelta(n, edit, byteDelta, rowDelta, colDelta, hasTailShift, &shiftScratch)
+	editNodeWithDelta(n, edit, byteDelta, rowDelta, colDelta, hasTailShift, &shiftScratch, nil)
 }
 
 func addUint32Delta(value uint32, delta int64) uint32 {
@@ -845,7 +1239,7 @@ func addUint32Delta(value uint32, delta int64) uint32 {
 	return uint32(next)
 }
 
-func editNodeWithDelta(n *Node, edit InputEdit, byteDelta, rowDelta, colDelta int64, hasTailShift bool, shiftScratch *[]*Node) {
+func editNodeWithDelta(n *Node, edit InputEdit, byteDelta, rowDelta, colDelta int64, hasTailShift bool, shiftScratch *[]*Node, leafHint **Node) {
 	// If the node ends before the edit starts, it's completely unaffected.
 	if n.endByte <= edit.StartByte {
 		return
@@ -887,6 +1281,7 @@ func editNodeWithDelta(n *Node, edit InputEdit, byteDelta, rowDelta, colDelta in
 	}
 
 	// Recurse only into children that can be affected.
+	descended := false
 	for _, c := range n.children {
 		if c.endByte <= edit.StartByte {
 			continue
@@ -898,7 +1293,11 @@ func editNodeWithDelta(n *Node, edit InputEdit, byteDelta, rowDelta, colDelta in
 			shiftSubtreeNodeAfterEdit(c, edit, byteDelta, rowDelta, colDelta, shiftScratch)
 			continue
 		}
-		editNodeWithDelta(c, edit, byteDelta, rowDelta, colDelta, hasTailShift, shiftScratch)
+		descended = true
+		editNodeWithDelta(c, edit, byteDelta, rowDelta, colDelta, hasTailShift, shiftScratch, leafHint)
+	}
+	if leafHint != nil && !descended && len(n.children) == 0 {
+		*leafHint = n
 	}
 }
 

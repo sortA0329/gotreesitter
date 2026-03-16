@@ -1,6 +1,7 @@
 package grammars
 
 import (
+	"sync"
 	"unicode"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
@@ -19,17 +20,34 @@ const (
 	bladeTokComment                = 8
 )
 
-const (
-	bladeSymStartTagName        gotreesitter.Symbol = 171
-	bladeSymScriptStartTagName  gotreesitter.Symbol = 172
-	bladeSymStyleStartTagName   gotreesitter.Symbol = 173
-	bladeSymEndTagName          gotreesitter.Symbol = 174
-	bladeSymErroneousEndTagName gotreesitter.Symbol = 175
-	bladeSymSelfClosingTagDelim gotreesitter.Symbol = 6
-	bladeSymImplicitEndTag      gotreesitter.Symbol = 176
-	bladeSymRawText             gotreesitter.Symbol = 177
-	bladeSymComment             gotreesitter.Symbol = 12
-)
+// bladeSyms caches resolved external symbol IDs for the blade grammar.
+var bladeSyms struct {
+	once                sync.Once
+	startTagName        gotreesitter.Symbol
+	scriptStartTagName  gotreesitter.Symbol
+	styleStartTagName   gotreesitter.Symbol
+	endTagName          gotreesitter.Symbol
+	erroneousEndTagName gotreesitter.Symbol
+	selfClosingTagDelim gotreesitter.Symbol
+	implicitEndTag      gotreesitter.Symbol
+	rawText             gotreesitter.Symbol
+	comment             gotreesitter.Symbol
+}
+
+func resolveBladeSyms() {
+	bladeSyms.once.Do(func() {
+		lang := BladeLanguage()
+		bladeSyms.startTagName = lang.ExternalSymbols[bladeTokStartTagName]
+		bladeSyms.scriptStartTagName = lang.ExternalSymbols[bladeTokScriptStartTagName]
+		bladeSyms.styleStartTagName = lang.ExternalSymbols[bladeTokStyleStartTagName]
+		bladeSyms.endTagName = lang.ExternalSymbols[bladeTokEndTagName]
+		bladeSyms.erroneousEndTagName = lang.ExternalSymbols[bladeTokErroneousEndTagName]
+		bladeSyms.selfClosingTagDelim = lang.ExternalSymbols[bladeTokSelfClosingTagDelim]
+		bladeSyms.implicitEndTag = lang.ExternalSymbols[bladeTokImplicitEndTag]
+		bladeSyms.rawText = lang.ExternalSymbols[bladeTokRawText]
+		bladeSyms.comment = lang.ExternalSymbols[bladeTokComment]
+	})
+}
 
 type bladeState struct {
 	tags []htmlTag
@@ -54,11 +72,12 @@ func (BladeExternalScanner) Deserialize(payload any, buf []byte) {
 func (BladeExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, validSymbols []bool) bool {
 	s := payload.(*bladeState)
 	lx := &goLexerAdapter{lexer}
+	resolveBladeSyms()
 
 	// Raw text in script/style tags
 	if bladeValid(validSymbols, bladeTokRawText) && !bladeValid(validSymbols, bladeTokStartTagName) &&
 		!bladeValid(validSymbols, bladeTokEndTagName) {
-		return htmlScanRawText(lx, s.tags, bladeSymRawText, lexer)
+		return htmlScanRawText(lx, s.tags, bladeSyms.rawText, lexer)
 	}
 
 	// Skip whitespace
@@ -73,30 +92,30 @@ func (BladeExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer,
 
 		if lexer.Lookahead() == '!' {
 			lexer.Advance(false)
-			return htmlScanComment(lx, bladeSymComment, lexer)
+			return htmlScanComment(lx, bladeSyms.comment, lexer)
 		}
 
 		if bladeValid(validSymbols, bladeTokImplicitEndTag) {
-			return htmlScanImplicitEndTag(lx, &s.tags, bladeSymImplicitEndTag, lexer)
+			return htmlScanImplicitEndTag(lx, &s.tags, bladeSyms.implicitEndTag, lexer)
 		}
 
 	case 0:
 		if bladeValid(validSymbols, bladeTokImplicitEndTag) {
-			return htmlScanImplicitEndTag(lx, &s.tags, bladeSymImplicitEndTag, lexer)
+			return htmlScanImplicitEndTag(lx, &s.tags, bladeSyms.implicitEndTag, lexer)
 		}
 
 	case '/':
 		if bladeValid(validSymbols, bladeTokSelfClosingTagDelim) {
-			return htmlScanSelfClosingDelim(lx, &s.tags, bladeSymSelfClosingTagDelim, lexer)
+			return htmlScanSelfClosingDelim(lx, &s.tags, bladeSyms.selfClosingTagDelim, lexer)
 		}
 
 	default:
 		if (bladeValid(validSymbols, bladeTokStartTagName) || bladeValid(validSymbols, bladeTokEndTagName)) &&
 			!bladeValid(validSymbols, bladeTokRawText) {
 			if bladeValid(validSymbols, bladeTokStartTagName) {
-				return htmlScanStartTagName(lx, &s.tags, bladeSymStartTagName, bladeSymScriptStartTagName, bladeSymStyleStartTagName, 0, lexer)
+				return htmlScanStartTagName(lx, &s.tags, bladeSyms.startTagName, bladeSyms.scriptStartTagName, bladeSyms.styleStartTagName, 0, lexer)
 			}
-			return htmlScanEndTagName(lx, &s.tags, bladeSymEndTagName, bladeSymErroneousEndTagName, lexer)
+			return htmlScanEndTagName(lx, &s.tags, bladeSyms.endTagName, bladeSyms.erroneousEndTagName, lexer)
 		}
 	}
 

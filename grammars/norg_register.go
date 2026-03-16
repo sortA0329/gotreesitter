@@ -12,4 +12,4 @@ func init() {
 	})
 }
 
-const norgHighlightQuery = ""
+const norgHighlightQuery = "(heading1_prefix) @punctuation.special\n\n(heading1\n  (paragraph_segment) @markup.heading)\n\n(paragraph\n  (paragraph_segment) @markup)\n"

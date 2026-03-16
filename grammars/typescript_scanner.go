@@ -37,6 +37,7 @@ func (TypeScriptExternalScanner) Create() any                           { return
 func (TypeScriptExternalScanner) Destroy(payload any)                   {}
 func (TypeScriptExternalScanner) Serialize(payload any, buf []byte) int { return 0 }
 func (TypeScriptExternalScanner) Deserialize(payload any, buf []byte)   {}
+func (TypeScriptExternalScanner) SupportsIncrementalReuse() bool        { return true }
 
 func (TypeScriptExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, validSymbols []bool) bool {
 	if tsValid(validSymbols, tsTokTemplateChars) {

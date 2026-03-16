@@ -10,22 +10,26 @@ import (
 // It focuses on practical coverage for common editor workflows and
 // incremental parsing.
 type TomlTokenSource struct {
-	src  []byte
-	lang *gotreesitter.Language
-	cur  sourceCursor
+	src     []byte
+	lang    *gotreesitter.Language
+	cur     sourceCursor
 	pending []gotreesitter.Token
 
 	done bool
 
 	eofSymbol gotreesitter.Symbol
 
-	docStartSym gotreesitter.Symbol
-	commentSym  gotreesitter.Symbol
-	bareKeySym  gotreesitter.Symbol
-	booleanSym  gotreesitter.Symbol
-	intSym      gotreesitter.Symbol
-	floatSym    gotreesitter.Symbol
-	lineEndSym  gotreesitter.Symbol
+	docStartSym       gotreesitter.Symbol
+	commentSym        gotreesitter.Symbol
+	bareKeySym        gotreesitter.Symbol
+	booleanSym        gotreesitter.Symbol
+	intSym            gotreesitter.Symbol
+	floatSym          gotreesitter.Symbol
+	offsetDateTimeSym gotreesitter.Symbol
+	localDateTimeSym  gotreesitter.Symbol
+	localDateSym      gotreesitter.Symbol
+	localTimeSym      gotreesitter.Symbol
+	lineEndSym        gotreesitter.Symbol
 
 	eqSym      gotreesitter.Symbol
 	dotSym     gotreesitter.Symbol
@@ -37,12 +41,12 @@ type TomlTokenSource struct {
 	lbraceSym  gotreesitter.Symbol
 	rbraceSym  gotreesitter.Symbol
 
-	basicStringSym   gotreesitter.Symbol
-	basicQuoteOpen   gotreesitter.Symbol
-	basicQuoteClose  gotreesitter.Symbol
-	basicEscapeSym   gotreesitter.Symbol
-	literalStringSym gotreesitter.Symbol
-	literalQuoteOpen gotreesitter.Symbol
+	basicStringSym    gotreesitter.Symbol
+	basicQuoteOpen    gotreesitter.Symbol
+	basicQuoteClose   gotreesitter.Symbol
+	basicEscapeSym    gotreesitter.Symbol
+	literalStringSym  gotreesitter.Symbol
+	literalQuoteOpen  gotreesitter.Symbol
 	literalQuoteClose gotreesitter.Symbol
 
 	emittedEOFLineEnd bool
@@ -61,6 +65,10 @@ func NewTomlTokenSource(src []byte, lang *gotreesitter.Language) (*TomlTokenSour
 		src:  src,
 		lang: lang,
 		cur:  newSourceCursor(src),
+		// The DFA path does not surface a standalone document-start token in
+		// successful TOML parses. Emitting it unconditionally from the custom
+		// token source steers valid files onto an error-heavy fallback branch.
+		emittedDocStart: true,
 	}
 
 	ts.eofSymbol, _ = lang.SymbolByName("end")
@@ -70,6 +78,10 @@ func NewTomlTokenSource(src []byte, lang *gotreesitter.Language) (*TomlTokenSour
 	ts.booleanSym = lookup.optional("boolean")
 	ts.intSym = lookup.optional("integer_token1", "integer_token2", "integer_token3", "integer_token4")
 	ts.floatSym = lookup.optional("float_token1", "float_token2")
+	ts.offsetDateTimeSym = lookup.optional("offset_date_time")
+	ts.localDateTimeSym = lookup.optional("local_date_time")
+	ts.localDateSym = lookup.optional("local_date")
+	ts.localTimeSym = lookup.optional("local_time")
 	ts.lineEndSym = lookup.optional("_line_ending_or_eof")
 
 	ts.eqSym = lookup.optional("=")
@@ -120,6 +132,22 @@ func NewTomlTokenSourceOrEOF(src []byte, lang *gotreesitter.Language) gotreesitt
 		return tokenSourceInitError{sourceLen: uint32(len(src))}
 	}
 	return ts
+}
+
+// Reset reinitializes this token source for a new source buffer.
+func (ts *TomlTokenSource) Reset(src []byte) {
+	ts.src = src
+	ts.cur = newSourceCursor(src)
+	ts.pending = ts.pending[:0]
+	ts.done = false
+	ts.emittedEOFLineEnd = false
+	ts.emittedDocStart = true
+}
+
+// SupportsIncrementalReuse reports that TomlTokenSource preserves stable token
+// boundaries across edits and supports deterministic SkipToByte behavior.
+func (ts *TomlTokenSource) SupportsIncrementalReuse() bool {
+	return true
 }
 
 func (ts *TomlTokenSource) Next() gotreesitter.Token {
@@ -176,15 +204,7 @@ func (ts *TomlTokenSource) Next() gotreesitter.Token {
 				if ts.cur.eof() {
 					ts.emittedEOFLineEnd = true
 				}
-				// Match C scanner behavior: line-ending external token is a
-				// marker at the boundary, not a token spanning the newline byte.
-				return gotreesitter.Token{
-					Symbol:     ts.lineEndSym,
-					StartByte:  uint32(start),
-					EndByte:    uint32(start),
-					StartPoint: startPt,
-					EndPoint:   startPt,
-				}
+				return makeToken(ts.lineEndSym, ts.src, start, ts.cur.offset, startPt, ts.cur.point())
 			}
 			continue
 		}
@@ -216,6 +236,10 @@ func (ts *TomlTokenSource) Next() gotreesitter.Token {
 			return tok
 		}
 
+		if tok, ok := ts.dateOrTimeToken(); ok {
+			return tok
+		}
+
 		if isASCIIDigit(ch) || ch == '+' || ch == '-' {
 			return ts.numberToken()
 		}
@@ -240,7 +264,7 @@ func (ts *TomlTokenSource) SkipToByte(offset uint32) gotreesitter.Token {
 
 	ts.done = false
 	ts.emittedEOFLineEnd = false
-	ts.emittedDocStart = ts.docStartSym == 0 || target > 0
+	ts.emittedDocStart = true
 
 	if target < ts.cur.offset {
 		ts.cur = newSourceCursor(ts.src)
@@ -423,6 +447,72 @@ func (ts *TomlTokenSource) numberToken() gotreesitter.Token {
 	return makeToken(sym, ts.src, start, ts.cur.offset, startPt, ts.cur.point())
 }
 
+func (ts *TomlTokenSource) dateOrTimeToken() (gotreesitter.Token, bool) {
+	start := ts.cur.offset
+	startPt := ts.cur.point()
+
+	if end, sym, ok := ts.scanTomlDateOrTime(start); ok && sym != 0 {
+		for ts.cur.offset < end {
+			ts.cur.advanceByte()
+		}
+		return makeToken(sym, ts.src, start, end, startPt, ts.cur.point()), true
+	}
+	return gotreesitter.Token{}, false
+}
+
+func (ts *TomlTokenSource) scanTomlDateOrTime(start int) (int, gotreesitter.Symbol, bool) {
+	if start >= len(ts.src) {
+		return 0, 0, false
+	}
+
+	if end, ok := scanTomlLocalTime(ts.src, start); ok && ts.localTimeSym != 0 && tomlValueBoundary(ts.src, end) {
+		return end, ts.localTimeSym, true
+	}
+
+	if end, ok := scanTomlLocalDate(ts.src, start); ok {
+		if tomlValueBoundary(ts.src, end) && ts.localDateSym != 0 {
+			return end, ts.localDateSym, true
+		}
+		if endDT, sym, ok := ts.scanTomlDateTimeFromDateEnd(start, end); ok {
+			return endDT, sym, true
+		}
+	}
+
+	return 0, 0, false
+}
+
+func (ts *TomlTokenSource) scanTomlDateTimeFromDateEnd(start, dateEnd int) (int, gotreesitter.Symbol, bool) {
+	if dateEnd >= len(ts.src) {
+		return 0, 0, false
+	}
+	sep := ts.src[dateEnd]
+	if sep != 'T' && sep != 't' && sep != ' ' {
+		return 0, 0, false
+	}
+
+	timeStart := dateEnd + 1
+	end, ok := scanTomlLocalTime(ts.src, timeStart)
+	if !ok {
+		return 0, 0, false
+	}
+
+	if tomlValueBoundary(ts.src, end) {
+		if ts.localDateTimeSym == 0 {
+			return 0, 0, false
+		}
+		return end, ts.localDateTimeSym, true
+	}
+
+	if endOffset, ok := scanTomlOffset(ts.src, end); ok && tomlValueBoundary(ts.src, endOffset) {
+		if ts.offsetDateTimeSym == 0 {
+			return 0, 0, false
+		}
+		return endOffset, ts.offsetDateTimeSym, true
+	}
+
+	return 0, 0, false
+}
+
 func (ts *TomlTokenSource) eofToken() gotreesitter.Token {
 	n := uint32(len(ts.src))
 	pt := ts.cur.point()
@@ -441,4 +531,106 @@ func isTomlBareKeyStart(b byte) bool {
 
 func isTomlBareKeyPart(b byte) bool {
 	return isTomlBareKeyStart(b)
+}
+
+func tomlValueBoundary(src []byte, offset int) bool {
+	if offset >= len(src) {
+		return true
+	}
+	switch src[offset] {
+	case ' ', '\t', '\r', '\n', '#', ',', ']', '}':
+		return true
+	default:
+		return false
+	}
+}
+
+func scanTomlLocalDate(src []byte, start int) (int, bool) {
+	end, ok := scanFixedDigits(src, start, 4)
+	if !ok || !matchByte(src, end, '-') {
+		return 0, false
+	}
+	end++
+	end, ok = scanFixedDigits(src, end, 2)
+	if !ok || !matchByte(src, end, '-') {
+		return 0, false
+	}
+	end++
+	end, ok = scanFixedDigits(src, end, 2)
+	if !ok {
+		return 0, false
+	}
+	return end, true
+}
+
+func scanTomlLocalTime(src []byte, start int) (int, bool) {
+	end, ok := scanFixedDigits(src, start, 2)
+	if !ok || !matchByte(src, end, ':') {
+		return 0, false
+	}
+	end++
+	end, ok = scanFixedDigits(src, end, 2)
+	if !ok || !matchByte(src, end, ':') {
+		return 0, false
+	}
+	end++
+	end, ok = scanFixedDigits(src, end, 2)
+	if !ok {
+		return 0, false
+	}
+	if matchByte(src, end, '.') {
+		end++
+		fracEnd, ok := scanAtLeastOneDigit(src, end)
+		if !ok {
+			return 0, false
+		}
+		end = fracEnd
+	}
+	return end, true
+}
+
+func scanTomlOffset(src []byte, start int) (int, bool) {
+	if start >= len(src) {
+		return 0, false
+	}
+	switch src[start] {
+	case 'Z', 'z':
+		return start + 1, true
+	case '+', '-':
+		end, ok := scanFixedDigits(src, start+1, 2)
+		if !ok || !matchByte(src, end, ':') {
+			return 0, false
+		}
+		end++
+		end, ok = scanFixedDigits(src, end, 2)
+		if !ok {
+			return 0, false
+		}
+		return end, true
+	default:
+		return 0, false
+	}
+}
+
+func scanFixedDigits(src []byte, start, n int) (int, bool) {
+	end := start
+	for i := 0; i < n; i++ {
+		if end >= len(src) || !isASCIIDigit(src[end]) {
+			return 0, false
+		}
+		end++
+	}
+	return end, true
+}
+
+func scanAtLeastOneDigit(src []byte, start int) (int, bool) {
+	end := start
+	for end < len(src) && isASCIIDigit(src[end]) {
+		end++
+	}
+	return end, end > start
+}
+
+func matchByte(src []byte, offset int, want byte) bool {
+	return offset < len(src) && src[offset] == want
 }

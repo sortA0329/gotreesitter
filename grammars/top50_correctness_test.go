@@ -1,6 +1,8 @@
 package grammars
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/odvcencio/gotreesitter"
@@ -61,7 +63,31 @@ var top50CorrectnessLanguages = []string{
 	"d",
 }
 
+// top50SmokeKnownErrorNodes tracks languages whose current smoke fixtures
+// still produce parser error nodes. Keep this list small and temporary.
+var top50SmokeKnownErrorNodes = map[string]string{}
+
 func TestTop50ParseSmokeNoErrors(t *testing.T) {
+	testParseSmokeNoErrors(t, top50CorrectnessLanguages, top50SmokeKnownErrorNodes)
+}
+
+func TestCore100ParseSmokeNoErrors(t *testing.T) {
+	if !includeCore100StrictSmoke() {
+		t.Skip("set GTS_CORE100_STRICT_SMOKE=1 to run strict no-error smoke on Core100")
+	}
+	testParseSmokeNoErrors(t, Core100LanguageNames(), nil)
+}
+
+func includeCore100StrictSmoke() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GTS_CORE100_STRICT_SMOKE"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func testParseSmokeNoErrors(t *testing.T, names []string, knownErrorNodes map[string]string) {
 	entries := AllLanguages()
 	entryByName := make(map[string]LangEntry, len(entries))
 	for _, entry := range entries {
@@ -69,7 +95,7 @@ func TestTop50ParseSmokeNoErrors(t *testing.T) {
 	}
 	t.Cleanup(func() { PurgeEmbeddedLanguageCache() })
 
-	for _, name := range top50CorrectnessLanguages {
+	for _, name := range names {
 		name := name
 		t.Run(name, func(t *testing.T) {
 			entry, ok := entryByName[name]
@@ -109,6 +135,9 @@ func TestTop50ParseSmokeNoErrors(t *testing.T) {
 				t.Fatalf("%s parse truncated: root.EndByte=%d sourceLen=%d", name, root.EndByte(), len(src))
 			}
 			if root.HasError() {
+				if reason, ok := knownErrorNodes[name]; ok {
+					t.Skipf("%s known degraded smoke fixture: %s", name, reason)
+				}
 				t.Fatalf("%s smoke sample produced error nodes", name)
 			}
 		})

@@ -1,5 +1,7 @@
 package gotreesitter
 
+import "unsafe"
+
 // glrStack is one version of the parse stack in a GLR parser.
 // When the parse table has multiple actions for a (state, symbol) pair,
 // the parser forks: one glrStack per alternative. Stacks that hit errors
@@ -45,18 +47,23 @@ const (
 	// headroom while avoiding very large retained scratch slabs.
 	maxRetainedStackEntryCap = 512 * 1024
 	// Hard cap on concurrently retained GLR stacks in parseInternal.
-	// Match tree-sitter C's MAX_VERSION_COUNT (6) to constrain GLR fan-out
-	// while retaining a small set of alternatives for ambiguous inputs.
-	maxGLRStacks = 6
+	// Kept intentionally tight for parse speed. Full parses that stop with no
+	// live stacks can retry once at a higher cap.
+	maxGLRStacks = 8
 	// Per-merge-key survivor cap. Tuned below 8 to reduce full-parse GLR churn
 	// while keeping corpus parity and correctness gates green.
 	maxStacksPerMergeKey = 6
+	// Retry parses can temporarily widen the merge fanout beyond the default
+	// survivor cap without changing the steady-state parser behavior.
+	maxStacksPerMergeKeyCeiling = 256
 )
 
 type glrMergeScratch struct {
 	result    []glrStack
 	slots     []glrMergeSlot
 	perKeyCap int
+	language  *Language
+	audit     *runtimeAudit
 }
 
 type glrMergeKey struct {
@@ -66,18 +73,19 @@ type glrMergeKey struct {
 
 type glrMergeSlot struct {
 	key        glrMergeKey
-	indices    [maxStacksPerMergeKey]int
-	hashes     [maxStacksPerMergeKey]uint64
+	indices    [maxStacksPerMergeKeyCeiling]int
+	hashes     [maxStacksPerMergeKeyCeiling]uint64
 	hashMask   uint64
 	count      int
 	worstIndex int
 }
 
 type glrEntryScratch struct {
-	slabs      []stackEntrySlab
-	slabCursor int
-	usedTotal  int
-	peakUsed   int
+	slabs          []stackEntrySlab
+	slabCursor     int
+	usedTotal      int
+	peakUsed       int
+	allocatedBytes int64
 }
 
 type stackEntrySlab struct {
@@ -94,6 +102,7 @@ func (s *glrEntryScratch) ensureInitialCap(minEntries int) {
 		capacity = minEntries
 	}
 	s.slabs = append(s.slabs, stackEntrySlab{data: make([]stackEntry, capacity)})
+	s.allocatedBytes += stackEntryBytesForCap(capacity)
 	s.slabCursor = 0
 }
 
@@ -307,7 +316,7 @@ func mergeKeyForStack(s glrStack) glrMergeKey {
 
 func stackHash(s glrStack) uint64 {
 	if s.gss.head != nil {
-		return s.gss.head.hash
+		return gssNodeHash(s.gss.head)
 	}
 	if len(s.entries) == 0 {
 		if perfCountersEnabled {
@@ -325,11 +334,15 @@ func stackHash(s glrStack) uint64 {
 }
 
 func stackEntriesEqual(a, b []stackEntry) bool {
+	return stackEntriesEqualForLanguage(nil, a, b)
+}
+
+func stackEntriesEqualForLanguage(lang *Language, a, b []stackEntry) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for i := range a {
-		if a[i].state != b[i].state || !stackEntryNodesEquivalent(a[i].node, b[i].node) {
+		if a[i].state != b[i].state || !stackEntryNodesEquivalentForLanguage(lang, a[i].node, b[i].node) {
 			return false
 		}
 	}
@@ -337,6 +350,10 @@ func stackEntriesEqual(a, b []stackEntry) bool {
 }
 
 func gssStacksEqual(a, b gssStack) bool {
+	return gssStacksEqualForLanguage(nil, a, b)
+}
+
+func gssStacksEqualForLanguage(lang *Language, a, b gssStack) bool {
 	if a.head == b.head {
 		return true
 	}
@@ -346,14 +363,14 @@ func gssStacksEqual(a, b gssStack) bool {
 	if a.head.depth != b.head.depth {
 		return false
 	}
-	if a.head.hash != b.head.hash {
+	if gssNodeHash(a.head) != gssNodeHash(b.head) {
 		return false
 	}
 	for an, bn := a.head, b.head; an != nil && bn != nil; an, bn = an.prev, bn.prev {
 		if an == bn {
 			return true
 		}
-		if an.entry.state != bn.entry.state || !stackEntryNodesEquivalent(an.entry.node, bn.entry.node) {
+		if an.entry.state != bn.entry.state || !stackEntryNodesEquivalentForLanguage(lang, an.entry.node, bn.entry.node) {
 			return false
 		}
 	}
@@ -361,6 +378,10 @@ func gssStacksEqual(a, b gssStack) bool {
 }
 
 func stackEquivalent(a, b glrStack) bool {
+	return stackEquivalentForLanguage(nil, a, b)
+}
+
+func stackEquivalentForLanguage(lang *Language, a, b glrStack) bool {
 	if perfCountersEnabled {
 		perfRecordStackEquivalentCall()
 	}
@@ -368,27 +389,27 @@ func stackEquivalent(a, b glrStack) bool {
 		return false
 	}
 	if a.gss.head != nil && b.gss.head != nil {
-		eq := gssStacksEqual(a.gss, b.gss)
+		eq := gssStacksEqualForLanguage(lang, a.gss, b.gss)
 		if eq && perfCountersEnabled {
 			perfRecordStackEquivalentTrue()
 		}
 		return eq
 	}
 	if a.gss.head != nil {
-		eq := gssStackEntriesEqual(a.gss, b.entries)
+		eq := gssStackEntriesEqualForLanguage(lang, a.gss, b.entries)
 		if eq && perfCountersEnabled {
 			perfRecordStackEquivalentTrue()
 		}
 		return eq
 	}
 	if b.gss.head != nil {
-		eq := gssStackEntriesEqual(b.gss, a.entries)
+		eq := gssStackEntriesEqualForLanguage(lang, b.gss, a.entries)
 		if eq && perfCountersEnabled {
 			perfRecordStackEquivalentTrue()
 		}
 		return eq
 	}
-	eq := stackEntriesEqual(a.entries, b.entries)
+	eq := stackEntriesEqualForLanguage(lang, a.entries, b.entries)
 	if eq && perfCountersEnabled {
 		perfRecordStackEquivalentTrue()
 	}
@@ -396,6 +417,10 @@ func stackEquivalent(a, b glrStack) bool {
 }
 
 func gssStackEntriesEqual(gss gssStack, entries []stackEntry) bool {
+	return gssStackEntriesEqualForLanguage(nil, gss, entries)
+}
+
+func gssStackEntriesEqualForLanguage(lang *Language, gss gssStack, entries []stackEntry) bool {
 	if gss.head == nil {
 		return len(entries) == 0
 	}
@@ -408,7 +433,7 @@ func gssStackEntriesEqual(gss gssStack, entries []stackEntry) bool {
 			return false
 		}
 		e := entries[i]
-		if n.entry.state != e.state || !stackEntryNodesEquivalent(n.entry.node, e.node) {
+		if n.entry.state != e.state || !stackEntryNodesEquivalentForLanguage(lang, n.entry.node, e.node) {
 			return false
 		}
 		i--
@@ -416,10 +441,9 @@ func gssStackEntriesEqual(gss gssStack, entries []stackEntry) bool {
 	return i == -1
 }
 
+const stackEquivalentFrontierDepthLimit = 8
+
 func stackEntryNodesEquivalent(a, b *Node) bool {
-	// Keep this comparator shallow-ish by design: full recursive tree equality in
-	// merge hot paths is too expensive, and GSS hash/state/offset bucketing already
-	// narrows candidates before this check runs.
 	if a == b {
 		return true
 	}
@@ -465,6 +489,171 @@ func stackEntryNodesEquivalent(a, b *Node) bool {
 	return true
 }
 
+func stackEntryNodesEquivalentForLanguage(lang *Language, a, b *Node) bool {
+	if lang != nil && (lang.Name == "c_sharp" || lang.Name == "bash") {
+		depthLimit := stackEquivalentFrontierDepthLimit
+		if lang.Name == "bash" {
+			if depthLimit < 32 {
+				depthLimit = 32
+			}
+		} else if depthLimit < 10 {
+			depthLimit = 10
+		}
+		if !stackEntryNodesEquivalentFrontier(a, b, depthLimit) {
+			return false
+		}
+		if lang.Name == "bash" {
+			return true
+		}
+		if a == nil || b == nil {
+			return a == b
+		}
+		if a.Type(lang) == "block" && len(a.children) > 3 {
+			compared := 0
+			for i := len(a.children) - 1; i >= 0 && compared < 3; i-- {
+				child := a.children[i]
+				if child == nil || child.isExtra || (!child.isNamed && len(child.children) == 0) {
+					continue
+				}
+				if !stackEntryNodesEquivalentFrontier(child, b.children[i], depthLimit-1) {
+					return false
+				}
+				compared++
+			}
+		}
+		if a.Type(lang) == "compilation_unit" && len(a.children) > 2 {
+			compared := 0
+			for i := len(a.children) - 1; i >= 0 && compared < 2; i-- {
+				child := a.children[i]
+				if child == nil || child.isExtra || (!child.isNamed && len(child.children) == 0) {
+					continue
+				}
+				if !stackEntryNodesEquivalentFrontier(child, b.children[i], depthLimit-1) {
+					return false
+				}
+				compared++
+			}
+		}
+		return true
+	}
+	return stackEntryNodesEquivalent(a, b)
+}
+
+func stackEntryNodesEquivalentFrontier(a, b *Node, depth int) bool {
+	if a == b {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	if a.symbol != b.symbol {
+		return false
+	}
+	if a.startByte != b.startByte ||
+		a.endByte != b.endByte ||
+		a.isExtra != b.isExtra ||
+		a.isNamed != b.isNamed ||
+		a.isMissing != b.isMissing ||
+		a.hasError != b.hasError ||
+		a.parseState != b.parseState ||
+		a.preGotoState != b.preGotoState ||
+		a.productionID != b.productionID ||
+		len(a.children) != len(b.children) {
+		return false
+	}
+	if a.hasError && b.hasError {
+		return true
+	}
+	if len(a.fieldIDs) != len(b.fieldIDs) {
+		return false
+	}
+	for i := range a.fieldIDs {
+		if a.fieldIDs[i] != b.fieldIDs[i] {
+			return false
+		}
+	}
+
+	frontier := -1
+	for i := range a.children {
+		ca := a.children[i]
+		cb := b.children[i]
+		if ca == cb {
+			if ca != nil && !ca.isExtra && (ca.isNamed || len(ca.children) > 0) {
+				frontier = i
+			}
+			continue
+		}
+		if ca == nil || cb == nil {
+			return false
+		}
+		if ca.symbol != cb.symbol ||
+			ca.startByte != cb.startByte ||
+			ca.endByte != cb.endByte ||
+			ca.isExtra != cb.isExtra ||
+			ca.isNamed != cb.isNamed ||
+			ca.isMissing != cb.isMissing ||
+			ca.hasError != cb.hasError ||
+			ca.parseState != cb.parseState ||
+			ca.preGotoState != cb.preGotoState ||
+			ca.productionID != cb.productionID ||
+			len(ca.children) != len(cb.children) ||
+			len(ca.fieldIDs) != len(cb.fieldIDs) {
+			return false
+		}
+		for j := range ca.fieldIDs {
+			if ca.fieldIDs[j] != cb.fieldIDs[j] {
+				return false
+			}
+		}
+		if !ca.isExtra && (ca.isNamed || len(ca.children) > 0) {
+			frontier = i
+		}
+	}
+	if depth == 0 {
+		return true
+	}
+
+	candidates := [8]int{}
+	candidateCount := 0
+	addCandidate := func(idx int) {
+		if idx < 0 {
+			return
+		}
+		for i := 0; i < candidateCount; i++ {
+			if candidates[i] == idx {
+				return
+			}
+		}
+		if candidateCount < len(candidates) {
+			candidates[candidateCount] = idx
+			candidateCount++
+		}
+	}
+	if len(a.children) <= 3 {
+		for i := range a.fieldIDs {
+			if a.fieldIDs[i] == 0 {
+				continue
+			}
+			child := a.children[i]
+			if child == nil || child.isExtra || (!child.isNamed && len(child.children) == 0) {
+				continue
+			}
+			addCandidate(i)
+		}
+	}
+	addCandidate(frontier)
+	if candidateCount == 0 {
+		return true
+	}
+	for i := 0; i < candidateCount; i++ {
+		idx := candidates[i]
+		if !stackEntryNodesEquivalentFrontier(a.children[idx], b.children[idx], depth-1) {
+			return false
+		}
+	}
+	return true
+}
+
 func stackComparePtr(a, b *glrStack) int {
 	if perfCountersEnabled {
 		perfRecordStackCompare()
@@ -481,8 +670,23 @@ func stackComparePtr(a, b *glrStack) int {
 		}
 		return -1
 	}
+	if aErr, bErr := stackErrorRank(a), stackErrorRank(b); aErr != bErr {
+		if aErr < bErr {
+			return 1
+		}
+		return -1
+	}
 	if a.score != b.score {
 		if a.score > b.score {
+			return 1
+		}
+		return -1
+	}
+	// When re-processing the current token after GLR reductions, unshifted
+	// stacks are the only branches that can still make progress on that
+	// lookahead. Prefer keeping them before depth/offset tie-breakers.
+	if a.shifted != b.shifted {
+		if !a.shifted {
 			return 1
 		}
 		return -1
@@ -491,12 +695,6 @@ func stackComparePtr(a, b *glrStack) int {
 	bDepth := b.depth()
 	if aDepth != bDepth {
 		if aDepth > bDepth {
-			return 1
-		}
-		return -1
-	}
-	if a.shifted != b.shifted {
-		if !a.shifted {
 			return 1
 		}
 		return -1
@@ -521,8 +719,22 @@ func stackCompareMerge(a, b *glrStack) int {
 		}
 		return -1
 	}
+	if aErr, bErr := stackErrorRank(a), stackErrorRank(b); aErr != bErr {
+		if aErr < bErr {
+			return 1
+		}
+		return -1
+	}
 	if a.score != b.score {
 		if a.score > b.score {
+			return 1
+		}
+		return -1
+	}
+	// See stackComparePtr: keep current-token work alive before preferring
+	// deeper stacks that already shifted the lookahead.
+	if a.shifted != b.shifted {
+		if !a.shifted {
 			return 1
 		}
 		return -1
@@ -531,12 +743,6 @@ func stackCompareMerge(a, b *glrStack) int {
 	bDepth := b.depth()
 	if aDepth != bDepth {
 		if aDepth > bDepth {
-			return 1
-		}
-		return -1
-	}
-	if a.shifted != b.shifted {
-		if !a.shifted {
 			return 1
 		}
 		return -1
@@ -550,6 +756,20 @@ func stackCompareMerge(a, b *glrStack) int {
 	return 0
 }
 
+func stackErrorRank(s *glrStack) int {
+	if s == nil {
+		return 2
+	}
+	top := s.top()
+	if top.node == nil {
+		return 0
+	}
+	if top.node.hasError {
+		return 1
+	}
+	return 0
+}
+
 func preferOverflowCandidate(candidate, incumbent *glrStack, candidateHash, incumbentHash uint64) bool {
 	cmp := stackCompareMerge(candidate, incumbent)
 	if cmp != 0 {
@@ -558,6 +778,35 @@ func preferOverflowCandidate(candidate, incumbent *glrStack, candidateHash, incu
 	// Equal-ranked candidates should not depend on insertion order.
 	// Deterministically keep the higher hash to preserve diversity.
 	return candidateHash > incumbentHash
+}
+
+func mergeStacksSmallForLanguage(alive []glrStack, lang *Language) []glrStack {
+	if len(alive) <= 1 {
+		return alive
+	}
+	result := alive[:0]
+	for i := range alive {
+		stack := alive[i]
+		key := mergeKeyForStack(stack)
+		duplicateIndex := -1
+		for j := range result {
+			if mergeKeyForStack(result[j]) != key {
+				continue
+			}
+			if stackEquivalentForLanguage(lang, result[j], stack) {
+				duplicateIndex = j
+				break
+			}
+		}
+		if duplicateIndex < 0 {
+			result = append(result, stack)
+			continue
+		}
+		if stackCompareMerge(&stack, &result[duplicateIndex]) >= 0 {
+			result[duplicateIndex] = stack
+		}
+	}
+	return result
 }
 
 // mergeStacksWithScratch performs bounded merge/pruning in three phases:
@@ -593,10 +842,23 @@ func mergeStacksWithScratch(stacks []glrStack, scratch *glrMergeScratch) []glrSt
 		local := glrMergeScratch{}
 		scratch = &local
 	}
+	if len(alive) <= 4 {
+		result := mergeStacksSmallForLanguage(alive, scratch.language)
+		if perfCountersEnabled {
+			perfRecordMergeOut(len(result))
+		}
+		return result
+	}
 
 	perKeyCap := maxStacksPerMergeKey
-	if scratch.perKeyCap > 0 && scratch.perKeyCap < perKeyCap {
+	if scratch.perKeyCap > 0 {
 		perKeyCap = scratch.perKeyCap
+	}
+	if perKeyCap < 1 {
+		perKeyCap = 1
+	}
+	if perKeyCap > maxStacksPerMergeKeyCeiling {
+		perKeyCap = maxStacksPerMergeKeyCeiling
 	}
 
 	// Merge exact duplicates and keep a bounded number of distinct
@@ -637,7 +899,7 @@ func mergeStacksWithScratch(stacks []glrStack, scratch *glrMergeScratch) []glrSt
 				hashMatched = true
 				idx := slot.indices[j]
 				existing := &result[idx]
-				if stackEquivalent(*existing, stack) {
+				if stackEquivalentForLanguage(scratch.language, *existing, stack) {
 					duplicateIndex = idx
 					break
 				}
@@ -647,7 +909,10 @@ func mergeStacksWithScratch(stacks []glrStack, scratch *glrMergeScratch) []glrSt
 			perfRecordStackEquivalentHashMissSkip()
 		}
 		if duplicateIndex >= 0 {
-			if stackCompareMerge(&stack, &result[duplicateIndex]) > 0 {
+			// Equal-ranked duplicates should not preserve the first-inserted
+			// branch by accident. Let later survivors replace ties so
+			// post-reduce reprocessing can keep the branch that stayed viable.
+			if stackCompareMerge(&stack, &result[duplicateIndex]) >= 0 {
 				result[duplicateIndex] = stack
 				for j := 0; j < slot.count; j++ {
 					if slot.indices[j] == duplicateIndex {
@@ -708,6 +973,9 @@ func mergeStacksWithScratch(stacks []glrStack, scratch *glrMergeScratch) []glrSt
 	}
 	if perfCountersEnabled {
 		perfRecordMergeOut(len(result))
+	}
+	if scratch.audit != nil {
+		scratch.audit.recordMerge(len(alive), len(result), slotCount)
 	}
 	scratch.result = result
 	scratch.slots = slots[:slotCount]
@@ -783,6 +1051,7 @@ func (s *glrEntryScratch) allocWithCap(length, capacity int) []stackEntry {
 			capacity = n
 		}
 		s.slabs = append(s.slabs, stackEntrySlab{data: make([]stackEntry, capacity)})
+		s.allocatedBytes += stackEntryBytesForCap(capacity)
 		s.slabCursor = 0
 	}
 	if s.slabCursor < 0 || s.slabCursor >= len(s.slabs) {
@@ -802,6 +1071,7 @@ func (s *glrEntryScratch) allocWithCap(length, capacity int) []stackEntry {
 				capacity = n
 			}
 			s.slabs = append(s.slabs, stackEntrySlab{data: make([]stackEntry, capacity)})
+			s.allocatedBytes += stackEntryBytesForCap(capacity)
 		}
 		slab := &s.slabs[i]
 		if len(slab.data)-slab.used < n {
@@ -846,6 +1116,7 @@ func (s *glrEntryScratch) reset() {
 	if len(s.slabs) == 0 {
 		s.usedTotal = 0
 		s.peakUsed = 0
+		s.allocatedBytes = 0
 		return
 	}
 
@@ -878,6 +1149,7 @@ func (s *glrEntryScratch) reset() {
 		s.slabCursor = 0
 		s.usedTotal = 0
 		s.peakUsed = 0
+		s.recomputeAllocatedBytes()
 		return
 	}
 
@@ -889,6 +1161,7 @@ func (s *glrEntryScratch) reset() {
 	s.slabCursor = 0
 	s.usedTotal = 0
 	s.peakUsed = 0
+	s.recomputeAllocatedBytes()
 }
 
 func (s *glrEntryScratch) peakEntriesUsed() int {
@@ -896,4 +1169,22 @@ func (s *glrEntryScratch) peakEntriesUsed() int {
 		return 0
 	}
 	return s.peakUsed
+}
+
+func stackEntryBytesForCap(n int) int64 {
+	if n <= 0 {
+		return 0
+	}
+	return int64(n) * int64(unsafe.Sizeof(stackEntry{}))
+}
+
+func (s *glrEntryScratch) recomputeAllocatedBytes() {
+	if s == nil {
+		return
+	}
+	var total int64
+	for i := range s.slabs {
+		total += stackEntryBytesForCap(len(s.slabs[i].data))
+	}
+	s.allocatedBytes = total
 }

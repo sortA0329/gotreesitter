@@ -6,16 +6,16 @@ import (
 
 // External token indexes for the Mojo grammar (Python-like).
 const (
-	mojoTokNewline      = 0
-	mojoTokIndent       = 1
-	mojoTokDedent       = 2
-	mojoTokStringStart  = 3
+	mojoTokNewline       = 0
+	mojoTokIndent        = 1
+	mojoTokDedent        = 2
+	mojoTokStringStart   = 3
 	mojoTokStringContent = 4
-	mojoTokStringEnd    = 5
-	mojoTokComment      = 6
-	mojoTokCloseParen   = 7
-	mojoTokCloseBracket = 8
-	mojoTokCloseBrace   = 9
+	mojoTokStringEnd     = 5
+	mojoTokComment       = 6
+	mojoTokCloseParen    = 7
+	mojoTokCloseBracket  = 8
+	mojoTokCloseBrace    = 9
 )
 
 const (
@@ -44,6 +44,8 @@ func (MojoExternalScanner) Serialize(payload any, buf []byte) int {
 func (MojoExternalScanner) Deserialize(payload any, buf []byte) {
 	PythonExternalScanner{}.Deserialize(payload, buf)
 }
+
+func (MojoExternalScanner) SupportsIncrementalReuse() bool { return true }
 
 func (MojoExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, validSymbols []bool) bool {
 	s := payload.(*pythonScannerState)
