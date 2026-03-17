@@ -175,27 +175,11 @@ func compareTreesDeepRec(
 			// Scale endByte tolerance for block-level nodes. External
 			// scanner grammars (Python, Haskell, etc.) use INDENT/DEDENT
 			// to demarcate blocks; boundary differences cause end offsets
-			// to shift by up to a full line at each nesting level.
-			// For deeply nested paths (depth > 3), use generous scaling
-			// (span/2, min 16, max 128) since INDENT/DEDENT boundary
-			// differences cascade at each nesting level.
-			// For shallower paths, use span/8 with min 6.
+			// to shift by up to a full line at each nesting level. For
+			// nodes spanning >100 bytes, allow proportional tolerance
+			// (span/8, min 6, max 128) to accommodate these shifts.
 			refSpan := refNode.EndByte() - refNode.StartByte()
-			pathDepth := strings.Count(path, "/")
-			if pathDepth > 3 && refSpan > 10 {
-				// Deeply nested: INDENT/DEDENT can shift block ends
-				// by up to half the block span at each nesting level.
-				scaled := refSpan / 2
-				if scaled < 16 {
-					scaled = 16
-				}
-				if scaled > endTolerance {
-					endTolerance = scaled
-				}
-				if endTolerance > 128 {
-					endTolerance = 128
-				}
-			} else if refSpan > 100 {
+			if refSpan > 100 {
 				scaled := refSpan / 8
 				if scaled > endTolerance {
 					endTolerance = scaled
