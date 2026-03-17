@@ -64,7 +64,7 @@ func TestDiagScalaRootRuntime(t *testing.T) {
 	for _, ks := range ng.KeywordSymbols {
 		keywordSet[ks] = true
 	}
-	diagLexModes, diagStateToMode := computeLexModes(
+	diagLexModes, diagStateToMode, _ := computeLexModes(
 		tables.StateCount,
 		ng.TokenCount(),
 		func(state, sym int) bool {

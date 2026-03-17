@@ -727,7 +727,7 @@ func computeLexModes(
 	keywordSymbols map[int]bool,
 	terminalPatternSyms map[int]bool, // symbols that have DFA terminal patterns
 	followTokens func(state int) []int, // additional tokens from reduce-follow expansion (may be nil)
-) ([]lexModeSpec, []int) {
+) ([]lexModeSpec, []int, []afterWSModeEntry) {
 	extraSet := make(map[int]bool)
 	hasTerminalExtras := false
 	for _, e := range extraSymbols {
@@ -754,6 +754,7 @@ func computeLexModes(
 	modeMap := make(map[string]int) // key → mode index
 	var modes []lexModeSpec
 	stateToMode := make([]int, stateCount)
+	var afterWSModeMap []afterWSModeEntry
 
 	for state := 0; state < stateCount; state++ {
 		isExtraChainState := extraChainStateStart >= 0 && state >= extraChainStateStart
@@ -845,9 +846,52 @@ func computeLexModes(
 			})
 			stateToMode[state] = modeIdx
 		}
+
+		// For states with both immediate tokens and non-immediate STRING tokens
+		// that overlap (same first character), create an after-whitespace variant
+		// that excludes immediate tokens. This lets STRING keywords win after
+		// whitespace where immediate continuation tokens would otherwise dominate.
+		if hasImmediate && !isExtraChainState {
+			hasNonImmString := false
+			for sym := range validSyms {
+				if !immediateTokens[sym] && sym > 0 && sym < tokenCount {
+					hasNonImmString = true
+					break
+				}
+			}
+			if hasNonImmString {
+				awsSyms := make(map[int]bool)
+				for sym := range validSyms {
+					if !immediateTokens[sym] {
+						awsSyms[sym] = true
+					}
+				}
+				if len(awsSyms) > 0 && len(awsSyms) < len(validSyms) {
+					awsKey := buildModeKey(awsSyms, skipWS)
+					if awsModeIdx, ok := modeMap[awsKey]; ok {
+						afterWSModeMap = append(afterWSModeMap, afterWSModeEntry{state, awsModeIdx})
+					} else {
+						awsModeIdx := len(modes)
+						modeMap[awsKey] = awsModeIdx
+						modes = append(modes, lexModeSpec{
+							validSymbols:   awsSyms,
+							skipWhitespace: skipWS,
+						})
+						afterWSModeMap = append(afterWSModeMap, afterWSModeEntry{state, awsModeIdx})
+					}
+				}
+			}
+		}
 	}
 
-	return modes, stateToMode
+	return modes, stateToMode, afterWSModeMap
+}
+
+// afterWSModeEntry maps a parser state to its after-whitespace lex mode index.
+// Only populated for states that have both immediate and non-immediate STRING tokens.
+type afterWSModeEntry struct {
+	stateIdx int
+	modeIdx  int
 }
 
 func countImmediate(syms map[int]bool, imm map[int]bool) int {

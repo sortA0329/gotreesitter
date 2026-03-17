@@ -547,7 +547,7 @@ func generateWithReport(g *Grammar, opts reportBuildOptions) (*GenerateReport, e
 	}
 	stringPrefixExtensions := computeStringPrefixExtensions(ng.Terminals)
 	termPatSyms := terminalPatternSymSet(ng)
-	lexModes, stateToMode := computeLexModes(
+	lexModes, stateToMode, afterWSModes := computeLexModes(
 		tables.StateCount,
 		tokenCount,
 		func(state, sym int) bool {
@@ -592,6 +592,13 @@ func generateWithReport(g *Grammar, opts reportBuildOptions) (*GenerateReport, e
 		return nil, fmt.Errorf("assemble: %w", err)
 	}
 	lang.Name = g.Name
+
+	// Set after-whitespace lex states for states that need IMMTOKEN exclusion.
+	for _, entry := range afterWSModes {
+		if entry.stateIdx < len(lang.LexModes) && entry.modeIdx < len(lexModeOffsets) {
+			lang.LexModes[entry.stateIdx].AfterWhitespaceLexState = uint16(lexModeOffsets[entry.modeIdx])
+		}
+	}
 
 	if len(keywordLexStates) > 0 {
 		lang.KeywordLexStates = keywordLexStates
@@ -729,7 +736,7 @@ func generateWithReportCtx(bgCtx context.Context, g *Grammar, opts reportBuildOp
 	}
 	stringPrefixExtensions := computeStringPrefixExtensions(ng.Terminals)
 	termPatSyms := terminalPatternSymSet(ng)
-	lexModes, stateToMode := computeLexModes(
+	lexModes, stateToMode, afterWSModes := computeLexModes(
 		tables.StateCount,
 		tokenCount,
 		func(state, sym int) bool {
@@ -774,6 +781,13 @@ func generateWithReportCtx(bgCtx context.Context, g *Grammar, opts reportBuildOp
 		return nil, fmt.Errorf("assemble: %w", err)
 	}
 	lang.Name = g.Name
+
+	// Set after-whitespace lex states for states that need IMMTOKEN exclusion.
+	for _, entry := range afterWSModes {
+		if entry.stateIdx < len(lang.LexModes) && entry.modeIdx < len(lexModeOffsets) {
+			lang.LexModes[entry.stateIdx].AfterWhitespaceLexState = uint16(lexModeOffsets[entry.modeIdx])
+		}
+	}
 
 	if len(keywordLexStates) > 0 {
 		lang.KeywordLexStates = keywordLexStates
