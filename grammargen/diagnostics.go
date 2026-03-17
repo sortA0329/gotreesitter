@@ -567,6 +567,7 @@ func generateWithReport(g *Grammar, opts reportBuildOptions) (*GenerateReport, e
 		keywordSet,
 		termPatSyms,
 		buildFollowTokensFunc(tables, tokenCount),
+		patternImmediateTokenSet(ng),
 	)
 
 	skipExtras := computeSkipExtras(ng)
@@ -756,6 +757,7 @@ func generateWithReportCtx(bgCtx context.Context, g *Grammar, opts reportBuildOp
 		keywordSet,
 		termPatSyms,
 		buildFollowTokensFunc(tables, tokenCount),
+		patternImmediateTokenSet(ng),
 	)
 
 	skipExtras := computeSkipExtras(ng)
