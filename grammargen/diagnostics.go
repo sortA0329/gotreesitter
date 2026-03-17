@@ -563,28 +563,51 @@ func generateWithReport(g *Grammar, opts reportBuildOptions) (*GenerateReport, e
 	}
 	stringPrefixExtensions := computeStringPrefixExtensions(ng.Terminals)
 	termPatSyms := terminalPatternSymSet(ng)
-	lexModes, stateToMode, afterWSModes := computeLexModes(
-		tables.StateCount,
-		tokenCount,
-		func(state, sym int) bool {
-			if acts, ok := tables.ActionTable[state]; ok {
-				if entry, ok := acts[sym]; ok && len(entry) > 0 {
-					return true
-				}
+
+	var lexModes []lexModeSpec
+	var stateToMode []int
+	var afterWSModes []afterWSModeEntry
+	if tables.StateCount > 50000 {
+		// Large grammars (C# 121K states, TS 42K): use a single broad
+		// DFA with all tokens instead of per-state lex modes. Per-state
+		// mode computation is O(states × tokens) which is prohibitive
+		// for these grammars. The broad DFA loses context-dependent
+		// lexing but makes generation complete in minutes.
+		allSyms := make(map[int]bool)
+		for _, t := range ng.Terminals {
+			allSyms[t.SymbolID] = true
+		}
+		for _, e := range ng.ExtraSymbols {
+			if e > 0 && e < tokenCount {
+				allSyms[e] = true
 			}
-			return false
-		},
-		stringPrefixExtensions,
-		ng.ExtraSymbols,
-		tables.ExtraChainStateStart,
-		immediateTokens,
-		ng.ExternalSymbols,
-		ng.WordSymbolID,
-		keywordSet,
-		termPatSyms,
-		buildFollowTokensFunc(tables, tokenCount),
-		patternImmediateTokenSet(ng),
-	)
+		}
+		lexModes = []lexModeSpec{{validSymbols: allSyms, skipWhitespace: true}}
+		stateToMode = make([]int, tables.StateCount)
+	} else {
+		lexModes, stateToMode, afterWSModes = computeLexModes(
+			tables.StateCount,
+			tokenCount,
+			func(state, sym int) bool {
+				if acts, ok := tables.ActionTable[state]; ok {
+					if entry, ok := acts[sym]; ok && len(entry) > 0 {
+						return true
+					}
+				}
+				return false
+			},
+			stringPrefixExtensions,
+			ng.ExtraSymbols,
+			tables.ExtraChainStateStart,
+			immediateTokens,
+			ng.ExternalSymbols,
+			ng.WordSymbolID,
+			keywordSet,
+			termPatSyms,
+			buildFollowTokensFunc(tables, tokenCount),
+			patternImmediateTokenSet(ng),
+		)
+	}
 
 	skipExtras := computeSkipExtras(ng)
 	lexStates, lexModeOffsets, err := buildLexDFA(context.Background(), ng.Terminals, ng.ExtraSymbols, skipExtras, lexModes)
@@ -753,28 +776,51 @@ func generateWithReportCtx(bgCtx context.Context, g *Grammar, opts reportBuildOp
 	}
 	stringPrefixExtensions := computeStringPrefixExtensions(ng.Terminals)
 	termPatSyms := terminalPatternSymSet(ng)
-	lexModes, stateToMode, afterWSModes := computeLexModes(
-		tables.StateCount,
-		tokenCount,
-		func(state, sym int) bool {
-			if acts, ok := tables.ActionTable[state]; ok {
-				if entry, ok := acts[sym]; ok && len(entry) > 0 {
-					return true
-				}
+
+	var lexModes []lexModeSpec
+	var stateToMode []int
+	var afterWSModes []afterWSModeEntry
+	if tables.StateCount > 50000 {
+		// Large grammars (C# 121K states, TS 42K): use a single broad
+		// DFA with all tokens instead of per-state lex modes. Per-state
+		// mode computation is O(states × tokens) which is prohibitive
+		// for these grammars. The broad DFA loses context-dependent
+		// lexing but makes generation complete in minutes.
+		allSyms := make(map[int]bool)
+		for _, t := range ng.Terminals {
+			allSyms[t.SymbolID] = true
+		}
+		for _, e := range ng.ExtraSymbols {
+			if e > 0 && e < tokenCount {
+				allSyms[e] = true
 			}
-			return false
-		},
-		stringPrefixExtensions,
-		ng.ExtraSymbols,
-		tables.ExtraChainStateStart,
-		immediateTokens,
-		ng.ExternalSymbols,
-		ng.WordSymbolID,
-		keywordSet,
-		termPatSyms,
-		buildFollowTokensFunc(tables, tokenCount),
-		patternImmediateTokenSet(ng),
-	)
+		}
+		lexModes = []lexModeSpec{{validSymbols: allSyms, skipWhitespace: true}}
+		stateToMode = make([]int, tables.StateCount)
+	} else {
+		lexModes, stateToMode, afterWSModes = computeLexModes(
+			tables.StateCount,
+			tokenCount,
+			func(state, sym int) bool {
+				if acts, ok := tables.ActionTable[state]; ok {
+					if entry, ok := acts[sym]; ok && len(entry) > 0 {
+						return true
+					}
+				}
+				return false
+			},
+			stringPrefixExtensions,
+			ng.ExtraSymbols,
+			tables.ExtraChainStateStart,
+			immediateTokens,
+			ng.ExternalSymbols,
+			ng.WordSymbolID,
+			keywordSet,
+			termPatSyms,
+			buildFollowTokensFunc(tables, tokenCount),
+			patternImmediateTokenSet(ng),
+		)
+	}
 
 	skipExtras := computeSkipExtras(ng)
 	lexStates, lexModeOffsets, err := buildLexDFA(bgCtx, ng.Terminals, ng.ExtraSymbols, skipExtras, lexModes)
