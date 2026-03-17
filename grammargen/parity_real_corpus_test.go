@@ -288,6 +288,13 @@ func TestMultiGrammarImportRealCorpusParity(t *testing.T) {
 						t.Logf("sample %d (%s:%s) gen ERROR on clean ref: %s",
 							i, cand.Source, cand.Path,
 							genSexp[:min(len(genSexp), 200)])
+						// Dump source text for ERROR diagnosis (truncated).
+						srcDump := cand.Text
+						if len(srcDump) > 500 {
+							srcDump = srcDump[:500] + "..."
+						}
+						t.Logf("  error-src[%d bytes]: %q", len(cand.Text), srcDump)
+						t.Logf("  ref-sexpr: %s", refSexp[:min(len(refSexp), 400)])
 					}
 					continue
 				}
@@ -354,6 +361,32 @@ func TestMultiGrammarImportRealCorpusParity(t *testing.T) {
 						}
 						if divs[0].Category == "childCount" {
 							logChildCountDiag(t, divs[0], genRoot, refRoot, genLang, refLang)
+						}
+						// Dump all divergences with source text for type mismatches
+						for di, dv := range divs {
+							if di >= 10 {
+								break
+							}
+							t.Logf("  div[%d]: %s", di, dv.String())
+							// Walk the path to find the divergent nodes and dump source
+							genN := findNodeByPath(genRoot, genLang, dv.Path)
+							refN := findNodeByPath(refRoot, refLang, dv.Path)
+							if genN != nil {
+								start := genN.StartByte()
+								end := genN.EndByte()
+								if int(end) <= len(cand.Text) && (end-start) < 200 {
+									t.Logf("  gen-src[%d:%d]: %q", start, end, cand.Text[start:end])
+								}
+								t.Logf("  gen-sexpr: %s", safeSExpr(genN, genLang, 100))
+							}
+							if refN != nil {
+								start := refN.StartByte()
+								end := refN.EndByte()
+								if int(end) <= len(cand.Text) && (end-start) < 200 {
+									t.Logf("  ref-src[%d:%d]: %q", start, end, cand.Text[start:end])
+								}
+								t.Logf("  ref-sexpr: %s", safeSExpr(refN, refLang, 100))
+							}
 						}
 					}
 				}
@@ -1243,4 +1276,56 @@ func getenvBool(key string) bool {
 	default:
 		return false
 	}
+}
+
+// findNodeByPath walks a parse tree following a breadcrumb path like
+// "root/expression_statement/call_expression/arguments[2]".
+func findNodeByPath(root *gotreesitter.Node, lang *gotreesitter.Language, path string) *gotreesitter.Node {
+	parts := strings.Split(path, "/")
+	if len(parts) == 0 {
+		return nil
+	}
+	cur := root
+	// Skip "root" prefix
+	start := 0
+	if parts[0] == "root" {
+		start = 1
+	}
+	for _, part := range parts[start:] {
+		if cur == nil {
+			return nil
+		}
+		// Parse "type[N]" or just "type"
+		name := part
+		idx := 0
+		if bi := strings.LastIndex(part, "["); bi >= 0 && strings.HasSuffix(part, "]") {
+			name = part[:bi]
+			n, err := strconv.Atoi(part[bi+1 : len(part)-1])
+			if err == nil {
+				idx = n
+			}
+		}
+		// Find the idx-th named child with matching type
+		found := false
+		seen := 0
+		for ci := 0; ci < cur.ChildCount(); ci++ {
+			ch := cur.Child(ci)
+			if ch == nil {
+				continue
+			}
+			chType := ch.Type(lang)
+			if chType == name && ch.IsNamed() {
+				if seen == idx {
+					cur = ch
+					found = true
+					break
+				}
+				seen++
+			}
+		}
+		if !found {
+			return nil
+		}
+	}
+	return cur
 }
