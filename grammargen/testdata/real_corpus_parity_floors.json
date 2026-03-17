@@ -243,8 +243,8 @@
     "regex": {
       "eligible": 25,
       "no_error": 25,
-      "sexpr_parity": 23,
-      "deep_parity": 23
+      "sexpr_parity": 25,
+      "deep_parity": 25
     },
     "requirements": {
       "eligible": 10,

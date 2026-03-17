@@ -84,6 +84,24 @@ func buildLexDFA(ctx context.Context, patterns []TerminalPattern, extraSymbols [
 			}
 		}
 
+		// Fix extras-override conflicts in merged lex modes.
+		//
+		// When LALR merging combines character-class and non-character-class
+		// parser states, the lex mode's DFA may contain both a catch-all
+		// pattern (like class_character = [^\\\]\-]) and the extras pattern
+		// (like _whitespace = \r?\n). The catch-all matches extras characters
+		// (\n, \r) with better priority than extras (prio 0 vs 2000), so the
+		// DFA accepts the catch-all token instead of skipping whitespace.
+		//
+		// This fix walks the DFA from the start state following extras-pattern
+		// character paths. If the DFA would accept a non-skip token where the
+		// extras pattern should produce a skip, AND that token can also be
+		// reached via non-extras characters (meaning it's not exclusively
+		// reachable through extras chars), we change the accept to skip.
+		if mode.skipWhitespace && len(dfa) > 0 {
+			dfa = fixExtrasOverrideConflicts(dfa, modePatterns, extraSet, skipExtras)
+		}
+
 		// Convert to LexState format.
 		lexStates := convertDFAToLexStates(dfa, mode.skipWhitespace)
 
@@ -116,6 +134,116 @@ func buildLexDFA(ctx context.Context, patterns []TerminalPattern, extraSymbols [
 type lexModeSpec struct {
 	validSymbols   map[int]bool // terminal symbol IDs valid in this mode
 	skipWhitespace bool         // whether to add skip transitions for whitespace
+}
+
+// fixExtrasOverrideConflicts fixes DFA states where a non-extras terminal
+// overrides the extras (skip) pattern for the same characters. This happens
+// when LALR merging creates lex modes containing both broad catch-all patterns
+// (like class_character = [^\\\]\-]) and extras patterns (like \r?\n).
+//
+// The fix builds a mini-DFA for the extras pattern to determine which first
+// characters the extras pattern would match. Then, from the main DFA's start
+// state, for each transition on those characters that leads to a non-skip
+// accept: if that accept symbol is a SECONDARY pattern (receives fewer than
+// half of the start state's character transitions), redirect those transitions
+// to a new skip state. In pure character-class modes, the catch-all pattern
+// is dominant and left unchanged.
+func fixExtrasOverrideConflicts(dfa []dfaState, modePatterns []TerminalPattern, extraSet map[int]bool, skipExtras map[int]bool) []dfaState {
+	if len(dfa) == 0 {
+		return dfa
+	}
+
+	// Find the skip extras pattern(s) and compute their first-char set.
+	skipSymID := 0
+	extrasFirstChars := make(map[rune]bool)
+	for _, p := range modePatterns {
+		if !skipExtras[p.SymbolID] || p.Rule == nil {
+			continue
+		}
+		if skipSymID == 0 {
+			skipSymID = p.SymbolID
+		}
+		// Build a mini NFA for the extras pattern and determine the set
+		// of characters that can start a match (first-char set).
+		miniNFA, err := buildCombinedNFA([]TerminalPattern{p})
+		if err != nil || miniNFA == nil {
+			continue
+		}
+		// Find characters reachable from the NFA's start state through
+		// epsilon closures and first real transitions.
+		startClosure := epsilonClosure(miniNFA, []int{miniNFA.start})
+		for _, s := range startClosure {
+			for _, tr := range miniNFA.states[s].transitions {
+				if !tr.epsilon {
+					for r := tr.lo; r <= tr.hi; r++ {
+						extrasFirstChars[r] = true
+					}
+				}
+			}
+		}
+	}
+	if skipSymID == 0 || len(extrasFirstChars) == 0 {
+		return dfa
+	}
+
+	// Count how many character transitions from the start state lead to
+	// each non-skip accept symbol.
+	startState := &dfa[0]
+	symTransCount := make(map[int]int)
+	totalNonSkipTrans := 0
+	for _, tr := range startState.transitions {
+		target := &dfa[tr.nextState]
+		if target.accept > 0 && !target.skip {
+			charCount := int(tr.hi - tr.lo + 1)
+			symTransCount[target.accept] += charCount
+			totalNonSkipTrans += charCount
+		}
+	}
+	if totalNonSkipTrans == 0 {
+		return dfa
+	}
+
+	// Fix: for each transition from start on extras-first characters,
+	// if the target accepts a secondary (non-dominant) symbol, redirect
+	// to a new skip state.
+	for ti, tr := range startState.transitions {
+		// Check that ALL characters in this transition range are extras
+		// first characters.
+		allExtras := true
+		for r := tr.lo; r <= tr.hi; r++ {
+			if !extrasFirstChars[r] {
+				allExtras = false
+				break
+			}
+		}
+		if !allExtras {
+			continue
+		}
+
+		target := &dfa[tr.nextState]
+		if target.accept <= 0 || target.skip {
+			continue
+		}
+
+		// Check if this symbol is secondary (fewer than half of total
+		// non-skip transitions). Dominant symbols are left unchanged.
+		count := symTransCount[target.accept]
+		if count*2 >= totalNonSkipTrans {
+			continue
+		}
+
+		// Create a new DFA state with skip accept.
+		newStateIdx := len(dfa)
+		dfa = append(dfa, dfaState{
+			transitions:    target.transitions,
+			accept:         skipSymID,
+			acceptPriority: 2000,
+			skip:           true,
+		})
+		startState.transitions[ti].nextState = newStateIdx
+		startState = &dfa[0] // re-anchor after potential realloc
+	}
+	return dfa
 }
 
 // computeStringPrefixExtensions returns, for each string literal symbol that
@@ -832,41 +960,43 @@ func computeLexModes(
 		validSyms := make(map[int]bool)
 		hasImmediate := false
 		hasKeyword := false
+		// Collect all directly-valid or follow-valid symbols first, then
+		// add prefix extensions only for longer tokens that are themselves
+		// valid. Without this gate the DFA greedily matches a longer prefix
+		// (e.g. "?:" for "?") that the parser has no action for, consuming
+		// too many characters and causing a parse error.
+		directValid := make(map[int]bool) // symbols valid by action or follow
 		for sym := 1; sym < tokenCount; sym++ {
 			if extSet[sym] {
 				continue // skip external tokens
 			}
 			if actionLookup(state, sym) {
-				validSyms[sym] = true
-				for _, longerSym := range stringPrefixExtensions[sym] {
-					if !extSet[longerSym] {
-						validSyms[longerSym] = true
-					}
-				}
-				if immediateTokens[sym] {
-					hasImmediate = true
-				}
-				if keywordSymbols[sym] {
-					hasKeyword = true
+				directValid[sym] = true
+			}
+		}
+		if followTokens != nil {
+			for _, sym := range followTokens(state) {
+				if sym > 0 && sym < tokenCount && !extSet[sym] {
+					directValid[sym] = true
 				}
 			}
 		}
 
-		// Include tokens from reduce-follow expansion: when the parser can
-		// reduce in this state, the tokens valid in the GOTO target state
-		// should also be recognizable by the lexer. This ensures keywords
-		// like "AS" in dockerfile's image_spec context are lexed correctly
-		// even though they're not directly in this state's action table.
-		if followTokens != nil {
-			for _, sym := range followTokens(state) {
-				if sym > 0 && sym < tokenCount && !extSet[sym] {
-					validSyms[sym] = true
-					for _, longerSym := range stringPrefixExtensions[sym] {
-						if !extSet[longerSym] {
-							validSyms[longerSym] = true
-						}
-					}
+		for sym := range directValid {
+			validSyms[sym] = true
+			// Only add prefix extensions when the longer symbol is also
+			// directly valid. This prevents the DFA from greedily matching
+			// e.g. "?:" when only "?" has a parse action.
+			for _, longerSym := range stringPrefixExtensions[sym] {
+				if !extSet[longerSym] && directValid[longerSym] {
+					validSyms[longerSym] = true
 				}
+			}
+			if immediateTokens[sym] {
+				hasImmediate = true
+			}
+			if keywordSymbols[sym] {
+				hasKeyword = true
 			}
 		}
 
