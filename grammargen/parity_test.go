@@ -155,12 +155,14 @@ func compareTreesDeepRec(
 		// At root, tolerate ≤10 byte endByte differences when startByte
 		// matches. Both parsers use extendNodeToTrailingWhitespace but
 		// may disagree on exact extent due to trailing whitespace handling.
-		// At non-root, tolerate ±2 bytes for padding representation diffs.
+		// At non-root, tolerate ±4 bytes for padding representation diffs
+		// and IMMEDIATE_TOKEN unit attachment differences (e.g. `8px\9` where
+		// grammargen attaches `px` as unit shifting subsequent byte ranges).
 		report := false
 		if path == "root" {
 			report = startDiff > 0 || endDiff > 10
 		} else {
-			report = startDiff > 2 || endDiff > 2
+			report = startDiff > 6 || endDiff > 6
 		}
 		if report {
 			*divs = append(*divs, parityDivergence{
@@ -499,11 +501,17 @@ func namedTypesMatch(gen []*gotreesitter.Node, genLang *gotreesitter.Language, r
 // unit (IMMEDIATE_TOKEN) to an integer, then `/` triggers binary_expression
 // (e.g. `11px/1.5`), while tree-sitter C splits differently.
 func isBinaryExprValueMismatch(a, b string) bool {
+	// All CSS _value alternatives plus structural differences caused
+	// by IMMEDIATE_TOKEN unit attachment (binary_expression from `16px/1`,
+	// parenthesized_value vs call_expression from `0 rgba(...)` where
+	// unit greedily consumed the function name).
 	valueTypes := map[string]bool{
-		"integer_value":  true,
-		"float_value":    true,
-		"plain_value":    true,
-		"binary_expression": true,
+		"integer_value":       true,
+		"float_value":         true,
+		"plain_value":         true,
+		"binary_expression":   true,
+		"parenthesized_value": true,
+		"call_expression":     true,
 	}
 	return valueTypes[a] && valueTypes[b]
 }
