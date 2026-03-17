@@ -1705,7 +1705,6 @@ func identifyKeywords(g *Grammar, st *symbolTable, stringLits []string) (map[int
 	keywordSet := make(map[int]bool)
 	var keywordSyms []int
 	var keywordEntries []TerminalPattern
-	priority := 0
 
 	for _, s := range stringLits {
 		id, ok := st.lookup(s)
@@ -1718,12 +1717,16 @@ func identifyKeywords(g *Grammar, st *symbolTable, stringLits []string) (map[int
 		if matchesDFA(dfa, s) && isIdentifierLikeKeywordLiteral(s) {
 			keywordSet[id] = true
 			keywordSyms = append(keywordSyms, id)
+			// All keyword entries use the same priority (0) so the DFA
+			// lexer's greedy longest-match tiebreaker selects correctly.
+			// Sequential priorities would cause shorter prefix keywords
+			// (e.g. "as") to beat longer ones (e.g. "assert") because the
+			// lexer prefers lower priority numbers.
 			keywordEntries = append(keywordEntries, TerminalPattern{
 				SymbolID: id,
 				Rule:     Str(s),
-				Priority: priority,
+				Priority: 0,
 			})
-			priority++
 		}
 	}
 
