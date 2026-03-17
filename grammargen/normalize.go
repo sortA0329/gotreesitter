@@ -2361,6 +2361,59 @@ func flattenHiddenChoiceAlts(g *Grammar) *Grammar {
 			continue
 		}
 
+		// When some compounds are self-recursive and the non-self-recursive
+		// compounds do NOT share symbols with the pass-through alternatives,
+		// the base cases are qualitatively different from the pass-throughs.
+		// Stripping the pass-throughs leaves the self-recursive productions
+		// reachable only through the non-self-recursive base (e.g. parens),
+		// not through the pass-through paths (e.g. variable_expr).
+		//
+		// Example: HCL's _expr_term has pass-through alts (variable_expr,
+		// literal_value, ...) and compounds (_expr_term get_attr,
+		// _expr_term index, "(" expression ")"). The non-self-recursive
+		// compound "(" expression ")" doesn't share symbols with the
+		// pass-throughs, so stripping them means `var.field` can never
+		// parse — variable_expr no longer reduces to _expr_term.
+		//
+		// Contrast with repeat helpers like _items -> item | item item |
+		// _items item where the non-self-recursive compound (item item)
+		// shares `item` with the pass-through, making flattening safe.
+		if !allCompoundsAreSelfRecursive {
+			hasSelfRecursiveCompound := false
+			for _, c := range compound {
+				if ruleReferencesSym(c, name) {
+					hasSelfRecursiveCompound = true
+					break
+				}
+			}
+			if hasSelfRecursiveCompound {
+				ptSyms := make(map[string]bool)
+				for _, p := range pt {
+					for _, ref := range collectSymbolRefs(p) {
+						ptSyms[ref] = true
+					}
+				}
+				nonRecSharesPassthrough := false
+				for _, c := range compound {
+					if ruleReferencesSym(c, name) {
+						continue
+					}
+					for _, ref := range collectSymbolRefs(c) {
+						if ptSyms[ref] {
+							nonRecSharesPassthrough = true
+							break
+						}
+					}
+					if nonRecSharesPassthrough {
+						break
+					}
+				}
+				if !nonRecSharesPassthrough {
+					continue
+				}
+			}
+		}
+
 		flattenMap[name] = &flattenInfo{
 			passThrough: pt,
 			compound:    compound,
