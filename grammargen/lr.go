@@ -2536,32 +2536,84 @@ func shiftReduceInConflictGroup(shifts, reduces []lrAction, ng *NormalizedGramma
 		return false
 	}
 
-	// Collect all shift LHS symbols.
+	// Collect all shift LHS symbols, resolving auxiliary symbols to parents.
 	shiftLHSSet := make(map[int]bool)
 	for _, s := range shifts {
 		if s.lhsSym != 0 {
-			shiftLHSSet[s.lhsSym] = true
+			for _, parent := range resolveAuxToParents(s.lhsSym, ng) {
+				shiftLHSSet[parent] = true
+			}
 		}
 		for _, lhs := range s.lhsSyms {
-			shiftLHSSet[lhs] = true
+			for _, parent := range resolveAuxToParents(lhs, ng) {
+				shiftLHSSet[parent] = true
+			}
 		}
 	}
 
-	// For each reduce, check if its LHS and any shift LHS are in the same group.
+	// For each reduce, resolve LHS to parents, then check conflict groups.
 	for _, r := range reduces {
 		reduceLHS := ng.Productions[r.prodIdx].LHS
-		if reduceLHS < 0 || reduceLHS >= len(cache.groupsBySymbol) {
-			continue
-		}
-		for _, groupIdx := range cache.groupsBySymbol[reduceLHS] {
-			for _, sym := range cache.groups[groupIdx] {
-				if shiftLHSSet[sym] {
-					return true
+		for _, parent := range resolveAuxToParents(reduceLHS, ng) {
+			if parent < 0 || parent >= len(cache.groupsBySymbol) {
+				continue
+			}
+			for _, groupIdx := range cache.groupsBySymbol[parent] {
+				for _, sym := range cache.groups[groupIdx] {
+					if shiftLHSSet[sym] {
+						return true
+					}
 				}
 			}
 		}
 	}
 	return false
+}
+
+// resolveAuxToParents maps a symbol to its "parent" symbols for conflict
+// group matching. Auxiliary symbols (repeat helpers, inline expansions)
+// are traced back to the grammar symbols that reference them. Non-auxiliary
+// symbols return themselves.
+func resolveAuxToParents(sym int, ng *NormalizedGrammar) []int {
+	if sym < 0 || sym >= len(ng.Symbols) {
+		return []int{sym}
+	}
+	name := ng.Symbols[sym].Name
+	if !strings.Contains(name, "_repeat") && !strings.Contains(name, "_token") {
+		return []int{sym}
+	}
+	visited := make(map[int]bool)
+	var parents []int
+	resolveAuxToParentsRec(sym, ng, visited, &parents)
+	if len(parents) == 0 {
+		return []int{sym}
+	}
+	return parents
+}
+
+func resolveAuxToParentsRec(sym int, ng *NormalizedGrammar, visited map[int]bool, parents *[]int) {
+	if visited[sym] {
+		return
+	}
+	visited[sym] = true
+	isAux := sym >= 0 && sym < len(ng.Symbols) &&
+		(strings.Contains(ng.Symbols[sym].Name, "_repeat") || strings.Contains(ng.Symbols[sym].Name, "_token"))
+	if !isAux {
+		*parents = append(*parents, sym)
+		return
+	}
+	found := false
+	for _, prod := range ng.Productions {
+		for _, rhsSym := range prod.RHS {
+			if rhsSym == sym {
+				found = true
+				resolveAuxToParentsRec(prod.LHS, ng, visited, parents)
+			}
+		}
+	}
+	if !found {
+		*parents = append(*parents, sym)
+	}
 }
 
 // reduceLHSInAnyConflictGroup checks whether the primary reduce's LHS symbol
@@ -2575,7 +2627,12 @@ func reduceLHSInAnyConflictGroup(reduces []lrAction, ng *NormalizedGrammar, cach
 		return false
 	}
 	lhs := ng.Productions[reduces[0].prodIdx].LHS
-	return lhs >= 0 && lhs < len(cache.groupsBySymbol) && len(cache.groupsBySymbol[lhs]) > 0
+	for _, parent := range resolveAuxToParents(lhs, ng) {
+		if parent >= 0 && parent < len(cache.groupsBySymbol) && len(cache.groupsBySymbol[parent]) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func allInDeclaredConflict(reduces []lrAction, ng *NormalizedGrammar, cache *conflictResolutionCache) bool {
