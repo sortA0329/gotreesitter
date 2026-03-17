@@ -263,6 +263,32 @@ func compareTreesDeepRec(
 				return
 			}
 		}
+		// Repeat flattening tolerance: repeat helpers (e.g. module_repeat1)
+		// are unnamed nodes that group named children. When one parser
+		// wraps named children in an unnamed repeat node and the other
+		// keeps them flat, the direct named children differ but the
+		// flattened named children (recursing through unnamed intermediaries)
+		// may match. This is common at the root level for large files.
+		genFlat := flattenNamedChildren(genNode, genLang)
+		refFlat := flattenNamedChildren(refNode, refLang)
+		if len(genFlat) == len(refFlat) && len(genFlat) > 0 && namedTypesMatch(genFlat, genLang, refFlat, refLang) {
+			for i, gn := range genFlat {
+				rn := refFlat[i]
+				childType := gn.Type(genLang)
+				childPath := fmt.Sprintf("%s/%s", path, childType)
+				sameTypeBefore := 0
+				for j := 0; j < i; j++ {
+					if genFlat[j].Type(genLang) == childType {
+						sameTypeBefore++
+					}
+				}
+				if sameTypeBefore > 0 {
+					childPath = fmt.Sprintf("%s/%s[%d]", path, childType, sameTypeBefore)
+				}
+				compareTreesDeepRec(gn, genLang, rn, refLang, childPath, maxDivergences, depth+1, divs)
+			}
+			return
+		}
 		*divs = append(*divs, parityDivergence{
 			Path: path, Category: "childCount",
 			GenValue: fmt.Sprintf("%d", genCC),
@@ -316,6 +342,29 @@ func namedChildren(n *gotreesitter.Node) []*gotreesitter.Node {
 		}
 	}
 	return named
+}
+
+// flattenNamedChildren extracts named children by recursing through unnamed
+// intermediary nodes (like repeat helpers). This handles the case where one
+// parser wraps named children in unnamed repeat nodes while the other keeps
+// them flat. Only recurses into unnamed, non-error children to avoid
+// pulling in error recovery artifacts.
+func flattenNamedChildren(n *gotreesitter.Node, lang *gotreesitter.Language) []*gotreesitter.Node {
+	var result []*gotreesitter.Node
+	for i := 0; i < n.ChildCount(); i++ {
+		c := n.Child(i)
+		if c == nil {
+			continue
+		}
+		if c.IsNamed() {
+			result = append(result, c)
+		} else if !c.IsError() && c.ChildCount() > 0 {
+			// Unnamed non-error node with children (e.g., repeat helper).
+			// Recurse to find named children inside.
+			result = append(result, flattenNamedChildren(c, lang)...)
+		}
+	}
+	return result
 }
 
 func namedTypesMatch(gen []*gotreesitter.Node, genLang *gotreesitter.Language, ref []*gotreesitter.Node, refLang *gotreesitter.Language) bool {
