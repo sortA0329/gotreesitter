@@ -43,6 +43,14 @@ type TestCase struct {
 	ExpectError bool   // if true, expect ERROR nodes in the tree
 }
 
+// PrecEntry is an entry in a precedences level. It is either a named
+// precedence (STRING type, Name is the prec name) or a rule reference
+// (SYMBOL type, Name is the rule name).
+type PrecEntry struct {
+	IsSymbol bool   // true for SYMBOL entries, false for STRING entries
+	Name     string // prec name or rule name
+}
+
 // Grammar is the top-level grammar definition.
 type Grammar struct {
 	Name              string
@@ -57,6 +65,7 @@ type Grammar struct {
 	Tests             []TestCase // embedded test cases
 	EnableLRSplitting bool       // opt-in: attempt LR(1) state splitting for merge pathology
 	BinaryRepeatMode  bool       // use tree-sitter's binary repeat helper shape (aux→seq(aux,aux)|inner)
+	Precedences       [][]PrecEntry // ordered precedence levels (each level: earlier = higher prec)
 }
 
 // NewGrammar creates a new grammar with the given name.

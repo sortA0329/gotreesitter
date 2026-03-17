@@ -23,9 +23,14 @@ func ImportGrammarJSON(data []byte) (*Grammar, error) {
 
 	// Build named precedence → numeric value mapping from the precedences array.
 	// Each level is an ordered list from highest to lowest precedence.
-	// STRING entries define named precedence values; SYMBOL entries just declare
-	// ordering but the rule's own numeric prec is what matters.
+	// STRING entries define named precedence values.
 	namedPrecs := buildNamedPrecMap(raw.Precedences)
+
+	// Store the full precedences table (including SYMBOL entries) for use
+	// during LR conflict resolution. SYMBOL entries define rule-level
+	// precedence ordering (e.g. update_expression > logical_and) that
+	// cannot be captured by numeric prec values alone.
+	g.Precedences = importPrecedenceLevels(raw.Precedences)
 
 	conv := &jsonConverter{namedPrecs: namedPrecs}
 
@@ -81,6 +86,12 @@ func ImportGrammarJSON(data []byte) (*Grammar, error) {
 	return g, nil
 }
 
+// buildPrecMaps builds two precedence maps from the precedences array:
+//   - namedPrecs: STRING entry name → numeric value (for resolving named precs
+//     like "logical_and" used in PREC_LEFT("logical_and", ...))
+//   - symbolPrecs: SYMBOL entry name → numeric value (for overriding the outer
+//     PREC value of entire rules like update_expression)
+//
 // buildNamedPrecMap builds a mapping from named precedence strings to numeric
 // values. Levels are ordered from highest to lowest precedence; within each
 // level, earlier entries have higher precedence. Values are assigned globally
@@ -115,6 +126,31 @@ func buildNamedPrecMap(rawLevels []json.RawMessage) map[string]int {
 		}
 	}
 	return m
+}
+
+// importPrecedenceLevels converts raw JSON precedence levels into the Grammar
+// IR's PrecEntry format.
+func importPrecedenceLevels(rawLevels []json.RawMessage) [][]PrecEntry {
+	var levels [][]PrecEntry
+	for _, rawLevel := range rawLevels {
+		var entries []jsonPrecEntry
+		if err := json.Unmarshal(rawLevel, &entries); err != nil {
+			continue
+		}
+		var level []PrecEntry
+		for _, e := range entries {
+			switch {
+			case e.Type == "STRING" && e.Value != "":
+				level = append(level, PrecEntry{Name: e.Value})
+			case e.Type == "SYMBOL" && e.Name != "":
+				level = append(level, PrecEntry{IsSymbol: true, Name: e.Name})
+			}
+		}
+		if len(level) > 0 {
+			levels = append(levels, level)
+		}
+	}
+	return levels
 }
 
 // jsonGrammar is the top-level structure of a grammar.json file.

@@ -159,8 +159,8 @@
     "javascript": {
       "eligible": 25,
       "no_error": 24,
-      "sexpr_parity": 23,
-      "deep_parity": 23
+      "sexpr_parity": 24,
+      "deep_parity": 24
     },
     "jsdoc": {
       "eligible": 16,

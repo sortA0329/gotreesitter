@@ -2372,9 +2372,37 @@ func resolveActionConflict(lookaheadSym int, actions []lrAction, ng *NormalizedG
 		// for grammars like Swift where many symbols appear in conflict
 		// groups but have unambiguous precedence relationships.
 		if reduceLHSInAnyConflictGroup(reduces, ng, cache) {
-			// Check if precedence can resolve this definitively.
 			shiftP := shift.prec
 			reduceP := prod.Prec
+			// Consult precedences table for SYMBOL-level ordering before
+			// falling through to numeric prec comparison. This ensures
+			// that SYMBOL entries like update_expression can resolve
+			// conflicts even within conflict group contexts.
+			if ng.PrecedenceOrder != nil {
+				// Case 1: reduce LHS is SYMBOL (prec 0), shift prec is named (> 0).
+				if reduceP == 0 && shiftP > 0 && prod.LHS < len(ng.Symbols) {
+					lhsName := ng.Symbols[prod.LHS].Name
+					cmp := ng.PrecedenceOrder.resolveSymbolVsNamedPrec(lhsName, shiftP)
+					if cmp > 0 {
+						return []lrAction{reduce}, nil
+					}
+					if cmp < 0 {
+						return []lrAction{shift}, nil
+					}
+				}
+				// Case 2: shift LHS is SYMBOL (prec 0), reduce prec is named (> 0).
+				if shiftP == 0 && reduceP > 0 && shift.lhsSym < len(ng.Symbols) {
+					shiftLHSName := ng.Symbols[shift.lhsSym].Name
+					cmp := ng.PrecedenceOrder.resolveSymbolVsNamedPrec(shiftLHSName, reduceP)
+					if cmp > 0 {
+						return []lrAction{shift}, nil
+					}
+					if cmp < 0 {
+						return []lrAction{reduce}, nil
+					}
+				}
+			}
+			// Check if precedence can resolve this definitively.
 			if (shiftP != 0 || reduceP != 0) && shiftP != reduceP {
 				// Clear precedence difference — resolve deterministically.
 				if reduceP > shiftP {
@@ -2397,6 +2425,36 @@ func resolveActionConflict(lookaheadSym int, actions []lrAction, ng *NormalizedG
 
 		shiftPrec := shift.prec
 		reducePrec := prod.Prec
+
+		// Consult the precedences table for SYMBOL-level ordering.
+		// Only apply when:
+		// 1. The reduce production's LHS is a SYMBOL entry in the table
+		// 2. The reduce prec is 0 (from the grammar's PREC(0) wrapper)
+		// 3. The shift prec is non-zero (from a named STRING prec like "logical_and")
+		// Guard: shiftPrec must be > 0 because value 0 is ambiguous (could be
+		// the default/unset value or a named prec like "object" that happens
+		// to map to 0). Only named precs with positive values are unambiguous.
+		if ng.PrecedenceOrder != nil && reducePrec == 0 && shiftPrec > 0 && prod.LHS < len(ng.Symbols) {
+			lhsName := ng.Symbols[prod.LHS].Name
+			cmp := ng.PrecedenceOrder.resolveSymbolVsNamedPrec(lhsName, shiftPrec)
+			if cmp > 0 {
+				return []lrAction{reduce}, nil
+			}
+			if cmp < 0 {
+				return []lrAction{shift}, nil
+			}
+		}
+		// Case 2: shift LHS is SYMBOL (prec 0), reduce prec is named STRING (> 0).
+		if ng.PrecedenceOrder != nil && shiftPrec == 0 && reducePrec > 0 && shift.lhsSym < len(ng.Symbols) {
+			shiftLHSName := ng.Symbols[shift.lhsSym].Name
+			cmp := ng.PrecedenceOrder.resolveSymbolVsNamedPrec(shiftLHSName, reducePrec)
+			if cmp > 0 {
+				return []lrAction{shift}, nil
+			}
+			if cmp < 0 {
+				return []lrAction{reduce}, nil
+			}
+		}
 
 		// Apply precedence/associativity resolution when either side has a
 		// non-zero precedence OR the production declares explicit associativity.

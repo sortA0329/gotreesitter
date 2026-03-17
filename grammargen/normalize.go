@@ -92,6 +92,13 @@ type NormalizedGrammar struct {
 	// External scanner support (populated when Grammar.Externals is set).
 	ExternalSymbols []int // external token index → symbol ID
 
+	// PrecedenceOrder stores the symbol-level precedence ordering from the
+	// grammar's precedences table. Maps a rule name to its numeric position
+	// (higher = higher priority) and whether it's a SYMBOL or STRING entry.
+	// Used during conflict resolution to compare a reduce production's LHS
+	// against the named precedence of a competing shift action.
+	PrecedenceOrder *precOrderTable
+
 	// conflictCache is built lazily by LR conflict resolution so repeated
 	// resolveActionConflict calls can reuse the same reverse indexes.
 	conflictCache *conflictResolutionCache
@@ -602,6 +609,7 @@ func Normalize(g *Grammar) (*NormalizedGrammar, error) {
 	ng.WordSymbolID = wordSymbolID
 	ng.KeywordEntries = keywordEntries
 	ng.ExternalSymbols = externalSymbols
+	ng.PrecedenceOrder = buildPrecOrderTable(g.Precedences, buildNamedPrecMapFromLevels(g.Precedences))
 
 	// Set tokenCount boundary on symbols so assembly knows where terminals end.
 	_ = tokenCount
@@ -2890,6 +2898,7 @@ func expandInlineRules(g *Grammar) *Grammar {
 	}
 	out.Word = g.Word
 	out.Supertypes = g.Supertypes
+	out.Precedences = g.Precedences
 	// Don't propagate Inline — they've been expanded.
 
 	return out
