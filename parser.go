@@ -445,6 +445,111 @@ func (p *Parser) tryRelexBroadDFA(tok Token, parserState StateID, ts TokenSource
 	return Token{}, false
 }
 
+// tryRelexImmtokenReducePreference checks whether re-lexing with the
+// after-whitespace lex mode produces a non-IMMTOKEN alternative whose actions
+// include at least one reduce, while the current IMMTOKEN's actions are all
+// shifts. This implements reduce-over-shift preference for IMMTOKEN conflicts:
+// when a catch-all anonymous IMMTOKEN (like _image_name_token1) would shift
+// (continuing a production), but a keyword (like AS) would reduce (ending a
+// production), the keyword should win.
+//
+// The after-whitespace lex mode (AfterWhitespaceLexState) is the DFA that
+// excludes IMMTOKEN patterns, matching tree-sitter C behavior where immediate
+// tokens are not valid after whitespace. When the lexer's own IMMTOKEN
+// rejection fails (because whitespace is consumed as a skip-token in Next()
+// rather than via skip transitions within scan()), this function provides the
+// correct fallback.
+func (p *Parser) tryRelexImmtokenReducePreference(tok Token, actions []ParseAction, parserState StateID, ts TokenSource) (Token, []ParseAction, bool) {
+	if p == nil || p.language == nil || ts == nil {
+		return Token{}, nil, false
+	}
+	// Only applies to IMMTOKEN tokens
+	if int(tok.Symbol) >= len(p.language.ImmediateTokens) || !p.language.ImmediateTokens[tok.Symbol] {
+		return Token{}, nil, false
+	}
+	// Only override anonymous (hidden) IMMTOKEN symbols — these are catch-all
+	// content tokens like _image_name_token1. Named IMMTOKEN symbols like
+	// "unit" in CSS are legitimate tokens that should shift normally.
+	if int(tok.Symbol) < len(p.language.SymbolMetadata) && p.language.SymbolMetadata[tok.Symbol].Named {
+		return Token{}, nil, false
+	}
+	// Check that all current actions are shifts (non-extra)
+	for _, a := range actions {
+		if a.Type != ParseActionShift || a.Extra {
+			return Token{}, nil, false
+		}
+	}
+	dts, ok := ts.(*dfaTokenSource)
+	if !ok || dts == nil || dts.lexer == nil {
+		return Token{}, nil, false
+	}
+	if int(parserState) >= len(p.language.LexModes) {
+		return Token{}, nil, false
+	}
+
+	// Use the after-whitespace lex state for the current parser state.
+	// This DFA excludes IMMTOKEN patterns, so it will produce the correct
+	// non-IMMTOKEN alternative (e.g., AS keyword instead of _image_name_token1).
+	awLS := p.language.LexModes[parserState].AfterWhitespaceLexState
+	if awLS == 0 {
+		// No after-whitespace lex state configured; fall back to broad DFA.
+		if len(p.language.LexModes) == 0 {
+			return Token{}, nil, false
+		}
+		awLS = p.language.LexModes[0].LexState
+	}
+
+	// The after-whitespace lex state must differ from the primary lex state;
+	// otherwise there are no IMMTOKEN exclusions to exploit.
+	primaryLS := p.language.LexModes[parserState].LexState
+	if awLS == primaryLS {
+		return Token{}, nil, false
+	}
+
+	// Save lexer state
+	savedPos, savedRow, savedCol := dts.lexer.pos, dts.lexer.row, dts.lexer.col
+
+	// Re-lex from token start with the after-whitespace DFA
+	dts.lexer.pos = int(tok.StartByte)
+	tok2 := dts.lexer.Next(awLS)
+
+	if tok2.Symbol > 0 && tok2.Symbol != tok.Symbol {
+		// The alternative must NOT be an IMMTOKEN itself
+		if int(tok2.Symbol) < len(p.language.ImmediateTokens) && p.language.ImmediateTokens[tok2.Symbol] {
+			dts.lexer.pos, dts.lexer.row, dts.lexer.col = savedPos, savedRow, savedCol
+			return Token{}, nil, false
+		}
+		// Check if the alternative has actions in the current parser state
+		actionIdx2 := p.lookupActionIndex(parserState, tok2.Symbol)
+		if actionIdx2 != 0 && int(actionIdx2) < len(p.language.ParseActions) {
+			altActions := p.language.ParseActions[actionIdx2].Actions
+			if len(altActions) > 0 {
+				// Check if at least one alternative action is a reduce
+				hasReduce := false
+				for _, a := range altActions {
+					if a.Type == ParseActionReduce {
+						hasReduce = true
+						break
+					}
+				}
+				if hasReduce {
+					if p.glrTrace {
+						fmt.Printf("  IMMTOKEN-REDUCE-PREF: %s(%d) → %s(%d) in state=%d (shift→reduce)\n",
+							p.language.SymbolNames[tok.Symbol], tok.Symbol,
+							p.language.SymbolNames[tok2.Symbol], tok2.Symbol,
+							parserState)
+					}
+					return tok2, altActions, true
+				}
+			}
+		}
+	}
+
+	// Restore lexer state
+	dts.lexer.pos, dts.lexer.row, dts.lexer.col = savedPos, savedRow, savedCol
+	return Token{}, nil, false
+}
+
 func (p *Parser) canFinalizeNoActionEOF(s *glrStack) bool {
 	if s == nil || s.dead {
 		return false
@@ -1688,6 +1793,20 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 				for ai, a := range actions {
 					fmt.Printf("    action[%d]: type=%d state=%d sym=%d cnt=%d prec=%d\n",
 						ai, a.Type, a.State, a.Symbol, a.ChildCount, a.DynamicPrecedence)
+				}
+			}
+
+			// --- IMMTOKEN reduce-over-shift preference ---
+			// When an anonymous IMMTOKEN (e.g. _image_name_token1) has only shift
+			// actions but the after-whitespace DFA produces a non-IMMTOKEN
+			// keyword (e.g. AS) with reduce actions, prefer the keyword.
+			// This ends productions correctly instead of continuing to
+			// shift catch-all content tokens.
+			if len(actions) > 0 {
+				if altTok, altActions, ok := p.tryRelexImmtokenReducePreference(tok, actions, currentState, ts); ok {
+					tok = altTok
+					actions = altActions
+					actionIdx = p.lookupActionIndex(currentState, tok.Symbol)
 				}
 			}
 
