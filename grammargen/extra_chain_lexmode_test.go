@@ -49,7 +49,7 @@ func TestNonterminalExtraChainLexModesDoNotInheritTerminalExtras(t *testing.T) {
 		t.Fatalf("expected synthetic state >= %d, got %d", tables.ExtraChainStateStart, target)
 	}
 
-	lexModes, stateToMode := computeLexModes(
+	lexModes, stateToMode, _ := computeLexModes(
 		tables.StateCount,
 		ng.TokenCount(),
 		func(state, sym int) bool {
@@ -68,7 +68,7 @@ func TestNonterminalExtraChainLexModesDoNotInheritTerminalExtras(t *testing.T) {
 		ng.WordSymbolID,
 		map[int]bool{},
 		terminalPatternSymSet(ng),
-		nil, // no follow-token expansion in unit test
+		nil, nil,
 	)
 
 	initialMode := lexModes[stateToMode[0]]

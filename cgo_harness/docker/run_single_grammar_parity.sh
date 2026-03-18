@@ -35,6 +35,10 @@ ALL_GRAMMARS=(
   swift todotxt toml yaml
   # Large grammars (previously skipped):
   rust c_sharp java ruby cpp kotlin
+  # TypeScript family:
+  typescript tsx
+  # Legacy/enterprise languages:
+  cobol fortran perl erlang d
 )
 
 # Grammars with known parity gaps (from floor file v14).
@@ -271,6 +275,13 @@ make_clone_block() {
     [ruby]="https://github.com/tree-sitter/tree-sitter-ruby.git"
     [cpp]="https://github.com/tree-sitter/tree-sitter-cpp.git"
     [kotlin]="https://github.com/fwcd/tree-sitter-kotlin.git"
+    [typescript]="https://github.com/tree-sitter/tree-sitter-typescript.git"
+    [tsx]="https://github.com/tree-sitter/tree-sitter-typescript.git"
+    [cobol]="https://github.com/yutaro-sakamoto/tree-sitter-cobol.git"
+    [fortran]="https://github.com/stadelmanma/tree-sitter-fortran.git"
+    [perl]="https://github.com/tree-sitter-perl/tree-sitter-perl.git"
+    [erlang]="https://github.com/WhatsApp/tree-sitter-erlang.git"
+    [d]="https://github.com/CyberShadow/tree-sitter-d.git"
   )
 
   # Map grammar names to repo directory names (some differ).
@@ -279,6 +290,8 @@ make_clone_block() {
     [go_lang]="go"
     [gitcommit]="gitcommit_gbprod"
     [c_sharp]="c_sharp"
+    [typescript]="typescript"
+    [tsx]="typescript"
   )
 
   local repo_name="${REPO_NAMES[$grammar]:-$grammar}"

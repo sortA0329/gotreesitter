@@ -1,6 +1,8 @@
 package grammargen
 
 import (
+	"context"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -28,7 +30,7 @@ type dfaTransition struct {
 // whitespace). Visible extras like `comment` should NOT be in skipExtras — they
 // produce tree nodes via shift-extra parse actions.
 // Returns the concatenated LexStates and per-mode start offsets.
-func buildLexDFA(patterns []TerminalPattern, extraSymbols []int, skipExtras map[int]bool, lexModes []lexModeSpec) ([]gotreesitter.LexState, []int, error) {
+func buildLexDFA(ctx context.Context, patterns []TerminalPattern, extraSymbols []int, skipExtras map[int]bool, lexModes []lexModeSpec) ([]gotreesitter.LexState, []int, error) {
 	extraSet := make(map[int]bool)
 	for _, e := range extraSymbols {
 		extraSet[e] = true
@@ -53,19 +55,22 @@ func buildLexDFA(patterns []TerminalPattern, extraSymbols []int, skipExtras map[
 			return nil, nil, err
 		}
 
-		// Convert NFA to DFA via subset construction.
-		dfa := subsetConstruction(combined)
-
-		// Prune transitions from immediate-accepting DFA states that can
-		// only reach non-immediate (catch-all) patterns. This prevents
-		// greedy patterns like [^\r\n]+ from defeating immediate tokens
-		// like "-", "---", "+", "+++" in diff-style grammars.
+		// Build immediate symbol set for this mode.
 		immediateSyms := make(map[int]bool)
 		for _, p := range modePatterns {
 			if p.Immediate {
 				immediateSyms[p.SymbolID] = true
 			}
 		}
+
+		// Convert NFA to DFA via subset construction. Pass immediateSyms
+		// so the accept logic prefers non-immediate tokens over immediate
+		// ones when both accept in the same DFA state.
+		dfa, err := subsetConstruction(ctx, combined, immediateSyms)
+		if err != nil {
+			return nil, nil, fmt.Errorf("lex mode %d: %w", mi, err)
+		}
+
 		if len(immediateSyms) > 0 {
 			pruneImmediateTransitions(dfa, immediateSyms)
 		}
@@ -77,6 +82,24 @@ func buildLexDFA(patterns []TerminalPattern, extraSymbols []int, skipExtras map[
 			if dfa[i].accept > 0 && skipExtras[dfa[i].accept] {
 				dfa[i].skip = true
 			}
+		}
+
+		// Fix extras-override conflicts in merged lex modes.
+		//
+		// When LALR merging combines character-class and non-character-class
+		// parser states, the lex mode's DFA may contain both a catch-all
+		// pattern (like class_character = [^\\\]\-]) and the extras pattern
+		// (like _whitespace = \r?\n). The catch-all matches extras characters
+		// (\n, \r) with better priority than extras (prio 0 vs 2000), so the
+		// DFA accepts the catch-all token instead of skipping whitespace.
+		//
+		// This fix walks the DFA from the start state following extras-pattern
+		// character paths. If the DFA would accept a non-skip token where the
+		// extras pattern should produce a skip, AND that token can also be
+		// reached via non-extras characters (meaning it's not exclusively
+		// reachable through extras chars), we change the accept to skip.
+		if mode.skipWhitespace && len(dfa) > 0 {
+			dfa = fixExtrasOverrideConflicts(dfa, modePatterns, extraSet, skipExtras)
 		}
 
 		// Convert to LexState format.
@@ -111,6 +134,140 @@ func buildLexDFA(patterns []TerminalPattern, extraSymbols []int, skipExtras map[
 type lexModeSpec struct {
 	validSymbols   map[int]bool // terminal symbol IDs valid in this mode
 	skipWhitespace bool         // whether to add skip transitions for whitespace
+}
+
+// fixExtrasOverrideConflicts fixes DFA states where a non-extras terminal
+// overrides the extras (skip) pattern for the same characters. This happens
+// when LALR merging creates lex modes containing both broad catch-all patterns
+// (like class_character = [^\\\]\-]) and extras patterns (like \r?\n).
+//
+// The fix builds a mini-DFA for the extras pattern to determine which first
+// characters the extras pattern would match. Then, from the main DFA's start
+// state, for each transition on those characters that leads to a non-skip
+// accept: if that accept symbol is a SECONDARY pattern (receives fewer than
+// half of the start state's character transitions), redirect those transitions
+// to a new skip state. In pure character-class modes, the catch-all pattern
+// is dominant and left unchanged.
+func fixExtrasOverrideConflicts(dfa []dfaState, modePatterns []TerminalPattern, extraSet map[int]bool, skipExtras map[int]bool) []dfaState {
+	if len(dfa) == 0 {
+		return dfa
+	}
+
+	// Build set of symbol IDs that must never be overridden to skip:
+	// 1. Immediate tokens (e.g. IMMTOKEN(\r?\n) at end of C #define)
+	// 2. String tokens (e.g. STRING("\n") in C preproc_if after condition)
+	// These are explicit grammar-authored tokens that share characters with
+	// extras patterns but must be preserved for the parser to shift them.
+	protectedSyms := make(map[int]bool)
+	for _, p := range modePatterns {
+		if p.Immediate {
+			protectedSyms[p.SymbolID] = true
+		}
+		if p.Rule != nil && p.Rule.Kind == RuleString {
+			protectedSyms[p.SymbolID] = true
+		}
+	}
+
+	// Find the skip extras pattern(s) and compute their first-char set.
+	skipSymID := 0
+	extrasFirstChars := make(map[rune]bool)
+	for _, p := range modePatterns {
+		if !skipExtras[p.SymbolID] || p.Rule == nil {
+			continue
+		}
+		if skipSymID == 0 {
+			skipSymID = p.SymbolID
+		}
+		// Build a mini NFA for the extras pattern and determine the set
+		// of characters that can start a match (first-char set).
+		miniNFA, err := buildCombinedNFA([]TerminalPattern{p})
+		if err != nil || miniNFA == nil {
+			continue
+		}
+		// Find characters reachable from the NFA's start state through
+		// epsilon closures and first real transitions.
+		startClosure := epsilonClosure(miniNFA, []int{miniNFA.start})
+		for _, s := range startClosure {
+			for _, tr := range miniNFA.states[s].transitions {
+				if !tr.epsilon {
+					for r := tr.lo; r <= tr.hi; r++ {
+						extrasFirstChars[r] = true
+					}
+				}
+			}
+		}
+	}
+	if skipSymID == 0 || len(extrasFirstChars) == 0 {
+		return dfa
+	}
+
+	// Count how many character transitions from the start state lead to
+	// each non-skip accept symbol.
+	startState := &dfa[0]
+	symTransCount := make(map[int]int)
+	totalNonSkipTrans := 0
+	for _, tr := range startState.transitions {
+		target := &dfa[tr.nextState]
+		if target.accept > 0 && !target.skip {
+			charCount := int(tr.hi - tr.lo + 1)
+			symTransCount[target.accept] += charCount
+			totalNonSkipTrans += charCount
+		}
+	}
+	if totalNonSkipTrans == 0 {
+		return dfa
+	}
+
+	// Fix: for each transition from start on extras-first characters,
+	// if the target accepts a secondary (non-dominant) symbol, redirect
+	// to a new skip state.
+	for ti, tr := range startState.transitions {
+		// Check that ALL characters in this transition range are extras
+		// first characters.
+		allExtras := true
+		for r := tr.lo; r <= tr.hi; r++ {
+			if !extrasFirstChars[r] {
+				allExtras = false
+				break
+			}
+		}
+		if !allExtras {
+			continue
+		}
+
+		target := &dfa[tr.nextState]
+		if target.accept <= 0 || target.skip {
+			continue
+		}
+
+		// Never override protected tokens (immediate or string) to skip.
+		// These are significant grammar tokens: immediate tokens like the
+		// terminating \r?\n in C preprocessor directives, or string tokens
+		// like "\n" in C preproc_if. They share characters with extras
+		// (\s matches \n) but must be preserved for the parser to shift.
+		if protectedSyms[target.accept] {
+			continue
+		}
+
+		// Check if this symbol is secondary (fewer than half of total
+		// non-skip transitions). Dominant symbols are left unchanged.
+		count := symTransCount[target.accept]
+		if count*2 >= totalNonSkipTrans {
+			continue
+		}
+
+		// Create a new DFA state with skip accept.
+		newStateIdx := len(dfa)
+		dfa = append(dfa, dfaState{
+			transitions:    target.transitions,
+			accept:         skipSymID,
+			acceptPriority: 2000,
+			skip:           true,
+		})
+		startState.transitions[ti].nextState = newStateIdx
+		startState = &dfa[0] // re-anchor after potential realloc
+	}
+	return dfa
 }
 
 // computeStringPrefixExtensions returns, for each string literal symbol that
@@ -244,7 +401,7 @@ func hashIntSlice(vals []int) uint64 {
 }
 
 // subsetConstruction converts an NFA to a DFA using the subset construction algorithm.
-func subsetConstruction(n *nfa) []dfaState {
+func subsetConstruction(ctx context.Context, n *nfa, _ ...map[int]bool) ([]dfaState, error) {
 	scratch := newDFASubsetScratch(len(n.states))
 
 	// Compute epsilon closure of start state.
@@ -291,10 +448,21 @@ func subsetConstruction(n *nfa) []dfaState {
 
 	addState(startClosure)
 
+	worklistIter := 0
 	for len(worklist) > 0 {
 		current := worklist[0]
 		worklist = worklist[1:]
 		curID := current.id
+
+		// Check for cancellation every 64 iterations.
+		worklistIter++
+		if worklistIter&63 == 0 {
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("subset construction cancelled after %d DFA states: %w", len(dfaStates), ctx.Err())
+			default:
+			}
+		}
 
 		// Collect all character ranges from transitions of current NFA states.
 		ranges := collectTransitionRanges(n, current.states)
@@ -327,7 +495,7 @@ func subsetConstruction(n *nfa) []dfaState {
 		}
 	}
 
-	return dfaStates
+	return dfaStates, nil
 }
 
 // epsilonClosure computes the epsilon closure of a set of NFA states.
@@ -651,6 +819,12 @@ func addWhitespaceSkip(state *gotreesitter.LexState) {
 // lexer matches an immediate token like "-", it can only continue to other
 // immediate tokens like "--" or "---", but never fall through to a catch-all
 // like "context". This function replicates that behavior in our combined DFA.
+//
+// Exception: transitions leading to non-immediate tokens with BETTER priority
+// than the current immediate accept are kept. This handles cases like C's
+// char_literal where the character IMMTOKEN [^\n'] (prio -500) accepts at '\'
+// but escape_sequence TOKEN(PREC(1,...)) (prio -1000) accepts at '\0'. The
+// escape_sequence has better priority and should be reachable.
 func pruneImmediateTransitions(dfa []dfaState, immediateSyms map[int]bool) {
 	n := len(dfa)
 	if n == 0 {
@@ -684,15 +858,48 @@ func pruneImmediateTransitions(dfa []dfaState, immediateSyms map[int]bool) {
 		}
 	}
 
+	// Step 1b: Compute bestReachablePriority[i] = lowest (best) accept
+	// priority reachable from state i. Used to preserve transitions to
+	// non-immediate tokens that have better priority than the current accept.
+	const maxPrio = int(^uint(0) >> 1) // max int
+	bestReachablePriority := make([]int, n)
+	for i := range bestReachablePriority {
+		bestReachablePriority[i] = maxPrio
+	}
+	for i, s := range dfa {
+		if s.accept > 0 && s.acceptPriority < bestReachablePriority[i] {
+			bestReachablePriority[i] = s.acceptPriority
+		}
+	}
+	// Propagate backwards.
+	for changed := true; changed; {
+		changed = false
+		for i, s := range dfa {
+			for _, t := range s.transitions {
+				if bestReachablePriority[t.nextState] < bestReachablePriority[i] {
+					bestReachablePriority[i] = bestReachablePriority[t.nextState]
+					changed = true
+				}
+			}
+		}
+	}
+
 	// Step 2: For each state that accepts an immediate token, keep only
-	// transitions whose targets can reach another immediate token accept.
+	// transitions whose targets can reach another immediate token accept
+	// OR can reach a non-immediate token with better priority.
 	for i := range dfa {
 		if dfa[i].accept == 0 || !immediateSyms[dfa[i].accept] {
 			continue
 		}
+		curPrio := dfa[i].acceptPriority
 		var kept []dfaTransition
 		for _, t := range dfa[i].transitions {
 			if canReachImmediate[t.nextState] {
+				kept = append(kept, t)
+			} else if bestReachablePriority[t.nextState] < curPrio {
+				// Keep transition to non-immediate token with better priority.
+				// This preserves paths like '\' (character IMMTOKEN prio -500)
+				// continuing to '\0' (escape_sequence TOKEN prio -1000).
 				kept = append(kept, t)
 			}
 		}
@@ -706,6 +913,59 @@ func pruneImmediateTransitions(dfa []dfaState, immediateSyms map[int]bool) {
 // terminalPatternSymSet returns the set of symbol IDs that have DFA terminal
 // patterns. Used to distinguish dual-role external tokens (which have both a
 // scanner entry and a DFA pattern) from pure-external tokens.
+// patternImmediateTokenSet returns symbol IDs of immediate tokens that are
+// PATTERN-based (catch-all regex patterns like [^@:\s\$]+). String-based
+// IMMTOKENs like ":", "=", "mount" are excluded — they're legitimate tokens
+// even after whitespace.
+func patternImmediateTokenSet(ng *NormalizedGrammar) map[int]bool {
+	m := make(map[int]bool)
+	for _, t := range ng.Terminals {
+		if !t.Immediate {
+			continue
+		}
+		// A terminal is pattern-based if its rule is a RulePattern or contains
+		// patterns (via RuleSeq/RuleChoice wrapping patterns).
+		if ruleContainsPattern(t.Rule) && !isStringOnlyRule(t.Rule) {
+			m[t.SymbolID] = true
+		}
+	}
+	return m
+}
+
+func ruleContainsPattern(r *Rule) bool {
+	if r == nil {
+		return false
+	}
+	if r.Kind == RulePattern {
+		return true
+	}
+	for _, c := range r.Children {
+		if ruleContainsPattern(c) {
+			return true
+		}
+	}
+	return false
+}
+
+func isStringOnlyRule(r *Rule) bool {
+	if r == nil {
+		return false
+	}
+	switch r.Kind {
+	case RuleString:
+		return true
+	case RuleSeq, RuleChoice:
+		for _, c := range r.Children {
+			if !isStringOnlyRule(c) {
+				return false
+			}
+		}
+		return len(r.Children) > 0
+	default:
+		return false
+	}
+}
+
 func terminalPatternSymSet(ng *NormalizedGrammar) map[int]bool {
 	m := make(map[int]bool, len(ng.Terminals))
 	for _, t := range ng.Terminals {
@@ -727,7 +987,8 @@ func computeLexModes(
 	keywordSymbols map[int]bool,
 	terminalPatternSyms map[int]bool, // symbols that have DFA terminal patterns
 	followTokens func(state int) []int, // additional tokens from reduce-follow expansion (may be nil)
-) ([]lexModeSpec, []int) {
+	patternImmediateTokens map[int]bool, // immediate tokens that are PATTERN-based (catch-all)
+) ([]lexModeSpec, []int, []afterWSModeEntry) {
 	extraSet := make(map[int]bool)
 	hasTerminalExtras := false
 	for _, e := range extraSymbols {
@@ -754,6 +1015,7 @@ func computeLexModes(
 	modeMap := make(map[string]int) // key → mode index
 	var modes []lexModeSpec
 	stateToMode := make([]int, stateCount)
+	var afterWSModeMap []afterWSModeEntry
 
 	for state := 0; state < stateCount; state++ {
 		isExtraChainState := extraChainStateStart >= 0 && state >= extraChainStateStart
@@ -761,41 +1023,43 @@ func computeLexModes(
 		validSyms := make(map[int]bool)
 		hasImmediate := false
 		hasKeyword := false
+		// Collect all directly-valid or follow-valid symbols first, then
+		// add prefix extensions only for longer tokens that are themselves
+		// valid. Without this gate the DFA greedily matches a longer prefix
+		// (e.g. "?:" for "?") that the parser has no action for, consuming
+		// too many characters and causing a parse error.
+		directValid := make(map[int]bool) // symbols valid by action or follow
 		for sym := 1; sym < tokenCount; sym++ {
 			if extSet[sym] {
 				continue // skip external tokens
 			}
 			if actionLookup(state, sym) {
-				validSyms[sym] = true
-				for _, longerSym := range stringPrefixExtensions[sym] {
-					if !extSet[longerSym] {
-						validSyms[longerSym] = true
-					}
-				}
-				if immediateTokens[sym] {
-					hasImmediate = true
-				}
-				if keywordSymbols[sym] {
-					hasKeyword = true
+				directValid[sym] = true
+			}
+		}
+		if followTokens != nil {
+			for _, sym := range followTokens(state) {
+				if sym > 0 && sym < tokenCount && !extSet[sym] {
+					directValid[sym] = true
 				}
 			}
 		}
 
-		// Include tokens from reduce-follow expansion: when the parser can
-		// reduce in this state, the tokens valid in the GOTO target state
-		// should also be recognizable by the lexer. This ensures keywords
-		// like "AS" in dockerfile's image_spec context are lexed correctly
-		// even though they're not directly in this state's action table.
-		if followTokens != nil {
-			for _, sym := range followTokens(state) {
-				if sym > 0 && sym < tokenCount && !extSet[sym] {
-					validSyms[sym] = true
-					for _, longerSym := range stringPrefixExtensions[sym] {
-						if !extSet[longerSym] {
-							validSyms[longerSym] = true
-						}
-					}
+		for sym := range directValid {
+			validSyms[sym] = true
+			// Only add prefix extensions when the longer symbol is also
+			// directly valid. This prevents the DFA from greedily matching
+			// e.g. "?:" when only "?" has a parse action.
+			for _, longerSym := range stringPrefixExtensions[sym] {
+				if !extSet[longerSym] && directValid[longerSym] {
+					validSyms[longerSym] = true
 				}
+			}
+			if immediateTokens[sym] {
+				hasImmediate = true
+			}
+			if keywordSymbols[sym] {
+				hasKeyword = true
 			}
 		}
 
@@ -845,9 +1109,55 @@ func computeLexModes(
 			})
 			stateToMode[state] = modeIdx
 		}
+
+		// For states with both immediate tokens and non-immediate STRING tokens
+		// that overlap (same first character), create an after-whitespace variant
+		// that excludes immediate tokens. This lets STRING keywords win after
+		// whitespace where immediate continuation tokens would otherwise dominate.
+		if hasImmediate && !isExtraChainState {
+			hasNonImmString := false
+			for sym := range validSyms {
+				if !immediateTokens[sym] && sym > 0 && sym < tokenCount {
+					hasNonImmString = true
+					break
+				}
+			}
+			if hasNonImmString {
+				awsSyms := make(map[int]bool)
+				for sym := range validSyms {
+					// Only exclude pattern-based immediate tokens (catch-alls).
+					// String-based IMMTOKENs like ":", "=", "}" are kept
+					// because they're legitimate after whitespace.
+					if !patternImmediateTokens[sym] {
+						awsSyms[sym] = true
+					}
+				}
+				if len(awsSyms) > 0 && len(awsSyms) < len(validSyms) {
+					awsKey := buildModeKey(awsSyms, skipWS)
+					if awsModeIdx, ok := modeMap[awsKey]; ok {
+						afterWSModeMap = append(afterWSModeMap, afterWSModeEntry{state, awsModeIdx})
+					} else {
+						awsModeIdx := len(modes)
+						modeMap[awsKey] = awsModeIdx
+						modes = append(modes, lexModeSpec{
+							validSymbols:   awsSyms,
+							skipWhitespace: skipWS,
+						})
+						afterWSModeMap = append(afterWSModeMap, afterWSModeEntry{state, awsModeIdx})
+					}
+				}
+			}
+		}
 	}
 
-	return modes, stateToMode
+	return modes, stateToMode, afterWSModeMap
+}
+
+// afterWSModeEntry maps a parser state to its after-whitespace lex mode index.
+// Only populated for states that have both immediate and non-immediate STRING tokens.
+type afterWSModeEntry struct {
+	stateIdx int
+	modeIdx  int
 }
 
 func countImmediate(syms map[int]bool, imm map[int]bool) int {

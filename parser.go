@@ -395,6 +395,56 @@ func (p *Parser) preferRootSymbol(candidate, current Symbol) bool {
 	return candidate < current
 }
 
+// tryRelexBroadDFA attempts to re-lex the current token position using the
+// layout fallback lex state (state 0's DFA), which includes ALL terminal
+// symbols. If it produces a different token that has valid actions in the
+// current parser state, return it. This handles cases where the per-state
+// lex mode's IMMTOKEN catch-all consumed input meant for a keyword.
+func (p *Parser) tryRelexBroadDFA(tok Token, parserState StateID, ts TokenSource) (Token, bool) {
+	if p == nil || p.language == nil || ts == nil {
+		return Token{}, false
+	}
+	dts, ok := ts.(*dfaTokenSource)
+	if !ok || dts == nil || dts.lexer == nil {
+		return Token{}, false
+	}
+	// Only try if the token is an immediate token
+	if int(tok.Symbol) >= len(p.language.ImmediateTokens) || !p.language.ImmediateTokens[tok.Symbol] {
+		return Token{}, false
+	}
+	// Get the broad lex state (state 0's lex mode)
+	if len(p.language.LexModes) == 0 {
+		return Token{}, false
+	}
+	broadLS := p.language.LexModes[0].LexState
+
+	// Save lexer state
+	savedPos, savedRow, savedCol := dts.lexer.pos, dts.lexer.row, dts.lexer.col
+
+	// Re-lex from token start with broad DFA
+	dts.lexer.pos = int(tok.StartByte)
+	tok2 := dts.lexer.Next(broadLS)
+
+	if tok2.Symbol > 0 && tok2.Symbol != tok.Symbol {
+		// Check if the new token has actions in the current parser state
+		actionIdx := p.lookupActionIndex(parserState, tok2.Symbol)
+		if actionIdx != 0 && int(actionIdx) < len(p.language.ParseActions) &&
+			len(p.language.ParseActions[actionIdx].Actions) > 0 {
+			if p.glrTrace {
+				fmt.Printf("  RELEX: %s(%d) → %s(%d) in state=%d\n",
+					p.language.SymbolNames[tok.Symbol], tok.Symbol,
+					p.language.SymbolNames[tok2.Symbol], tok2.Symbol,
+					parserState)
+			}
+			return tok2, true
+		}
+	}
+
+	// Restore lexer state
+	dts.lexer.pos, dts.lexer.row, dts.lexer.col = savedPos, savedRow, savedCol
+	return Token{}, false
+}
+
 func (p *Parser) canFinalizeNoActionEOF(s *glrStack) bool {
 	if s == nil || s.dead {
 		return false
@@ -1627,6 +1677,7 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 			}
 
 			currentState := s.top().state
+		retryAction:
 			actionIdx := p.lookupActionIndex(currentState, tok.Symbol)
 			var actions []ParseAction
 			if actionIdx != 0 && int(actionIdx) < len(parseActions) {
@@ -1693,6 +1744,19 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 					// later corrupt reduce-child counting.
 					needToken = true
 					continue
+				}
+
+				// Before killing a stack, try re-lexing with the broad
+				// (state-0) lex mode. If the current lex mode's DFA
+				// produced a token that's not valid in this state (e.g.,
+				// an IMMTOKEN catch-all consumed a keyword), the broad
+				// DFA may produce the correct token.
+				if len(stacks) <= 1 {
+					if reTok, ok := p.tryRelexBroadDFA(tok, currentState, ts); ok {
+						tok = reTok
+						needToken = false
+						goto retryAction
+					}
 				}
 
 				// When multiple alternatives exist, drop no-action stacks

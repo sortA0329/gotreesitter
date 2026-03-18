@@ -29,8 +29,8 @@ func GenerateLanguage(g *Grammar) (*gotreesitter.Language, error) {
 	return GenerateLanguageWithContext(context.Background(), g)
 }
 
-// GenerateLanguageAndBlob compiles a Grammar into both a Language struct and
-// its serialized blob form in a single generation pass.
+// GenerateLanguageAndBlob compiles a Grammar into both a Language and its
+// serialized blob representation in a single generation pass.
 func GenerateLanguageAndBlob(g *Grammar) (*gotreesitter.Language, []byte, error) {
 	return GenerateLanguageAndBlobWithContext(context.Background(), g)
 }
@@ -50,10 +50,7 @@ func GenerateLanguageWithContext(ctx context.Context, g *Grammar) (*gotreesitter
 // GenerateLanguageAndBlobWithContext is like GenerateLanguageAndBlob but
 // accepts a context for cancellation.
 func GenerateLanguageAndBlobWithContext(ctx context.Context, g *Grammar) (*gotreesitter.Language, []byte, error) {
-	report, err := generateWithReportCtx(ctx, g, reportBuildOptions{
-		includeLanguage: true,
-		includeBlob:     true,
-	})
+	report, err := generateWithReportCtx(ctx, g, reportBuildOptions{includeLanguage: true, includeBlob: true})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -109,10 +106,4 @@ func decodeLanguageBlob(data []byte) (*gotreesitter.Language, error) {
 		return nil, fmt.Errorf("decode language blob: %w", err)
 	}
 	return &lang, nil
-}
-
-// LoadLanguageBlob deserializes a compressed language blob back into a Language.
-// This is the inverse of the blob encoding used by GenerateLanguage.
-func LoadLanguageBlob(data []byte) (*gotreesitter.Language, error) {
-	return decodeLanguageBlob(data)
 }

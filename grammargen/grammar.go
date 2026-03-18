@@ -43,6 +43,14 @@ type TestCase struct {
 	ExpectError bool   // if true, expect ERROR nodes in the tree
 }
 
+// PrecEntry is an entry in a precedences level. It is either a named
+// precedence (STRING type, Name is the prec name) or a rule reference
+// (SYMBOL type, Name is the rule name).
+type PrecEntry struct {
+	IsSymbol bool   // true for SYMBOL entries, false for STRING entries
+	Name     string // prec name or rule name
+}
+
 // Grammar is the top-level grammar definition.
 type Grammar struct {
 	Name              string
@@ -55,9 +63,10 @@ type Grammar struct {
 	Word              string
 	Supertypes        []string
 	Tests             []TestCase // embedded test cases
-	EnableLRSplitting   bool       // opt-in: attempt LR(1) state splitting for merge pathology
-	BinaryRepeatMode    bool       // use tree-sitter's binary repeat helper shape (aux→seq(aux,aux)|inner)
-	NonKeywordStrings   map[string]bool // strings that should NOT be promoted via keyword DFA (extension keywords that coexist as identifiers)
+	EnableLRSplitting  bool       // opt-in: attempt LR(1) state splitting for merge pathology
+	BinaryRepeatMode   bool       // use tree-sitter's binary repeat helper shape (aux→seq(aux,aux)|inner)
+	Precedences        [][]PrecEntry // ordered precedence levels (each level: earlier = higher prec)
+	ChoiceLiftThreshold int       // if >0, lift inline CHOICE nodes with more alternatives than this into auxiliary nonterminals to prevent production explosion
 }
 
 // NewGrammar creates a new grammar with the given name.
@@ -302,29 +311,3 @@ func ExtendGrammar(name string, base *Grammar, customize func(g *Grammar)) *Gram
 }
 
 // cloneRule is defined in regex.go — reused here for grammar composition.
-
-// AppendChoice appends new alternatives to an existing Choice rule.
-// If the named rule is already a Choice, the new alternatives are appended
-// to its children. Otherwise the existing rule and the new alternatives are
-// wrapped in a new Choice.
-func AppendChoice(g *Grammar, ruleName string, newAlts ...*Rule) {
-	existing, ok := g.Rules[ruleName]
-	if !ok {
-		// Rule doesn't exist yet — define it as a choice of the new alternatives.
-		g.Define(ruleName, Choice(newAlts...))
-		return
-	}
-	if existing.Kind == RuleChoice {
-		existing.Children = append(existing.Children, newAlts...)
-	} else {
-		all := make([]*Rule, 0, 1+len(newAlts))
-		all = append(all, existing)
-		all = append(all, newAlts...)
-		g.Rules[ruleName] = Choice(all...)
-	}
-}
-
-// AddConflict adds a GLR conflict group to the grammar.
-func AddConflict(g *Grammar, symbols ...string) {
-	g.Conflicts = append(g.Conflicts, symbols)
-}

@@ -1,6 +1,11 @@
 package grammargen
 
-import "sort"
+import (
+	"fmt"
+	"os"
+	"sort"
+	"time"
+)
 
 // DeRemer/Pennello LALR(1) lookahead computation.
 //
@@ -25,11 +30,22 @@ type ntTransition struct {
 // buildItemSetsLALR constructs LALR(1) item sets using the DeRemer/Pennello algorithm.
 // Returns the item sets with lookaheads attached only to reduce items.
 func (ctx *lrContext) buildItemSetsLALR() []lrItemSet {
+	debugLALR := os.Getenv("GOT_DEBUG_LALR") == "1"
+
 	// Phase 1: Build LR(0) automaton.
+	t0 := time.Now()
 	ctx.buildLR0()
+	if debugLALR {
+		fmt.Fprintf(os.Stderr, "[LALR] buildLR0: %v, %d states, %d productions\n",
+			time.Since(t0), len(ctx.itemSets), len(ctx.ng.Productions))
+	}
 
 	// Phase 2: Compute LALR(1) lookaheads via DeRemer/Pennello.
+	t1 := time.Now()
 	ctx.computeLALRLookaheads()
+	if debugLALR {
+		fmt.Fprintf(os.Stderr, "[LALR] computeLALRLookaheads: %v\n", time.Since(t1))
+	}
 
 	return ctx.itemSets
 }
@@ -332,19 +348,63 @@ func (ctx *lrContext) computeLALRLookaheads() {
 
 	includes := make([][]int, numTrans)
 
+	// Build inverted index: prodIdx → list of states that contain (prodIdx, dot=0).
+	// This avoids the O(productions × states) scan of the original loop; instead we
+	// do a single O(total_core_entries) pass and then iterate only over the relevant
+	// (production, state) pairs.
+	prodDot0States := make(map[int][]int, len(ng.Productions))
+	for stateIdx := range ctx.itemSets {
+		itemSet := &ctx.itemSets[stateIdx]
+		for _, ce := range itemSet.cores {
+			if ce.dot == 0 {
+				prodDot0States[ce.prodIdx] = append(prodDot0States[ce.prodIdx], stateIdx)
+			}
+		}
+	}
+
 	for pi := range ng.Productions {
+		// Check for cancellation every 256 productions.
+		if pi&255 == 0 {
+			select {
+			case <-ctx.bgCtx.Done():
+				return
+			default:
+			}
+		}
+
 		prod := &ng.Productions[pi]
 		lhs := prod.LHS
 		rhs := prod.RHS
 
-		// Find all states that have [B → .X₁...Xₙ] (dot=0 for this production).
-		// These are all states p' where production pi appears with dot=0.
-		for stateIdx := range ctx.itemSets {
-			itemSet := &ctx.itemSets[stateIdx]
-			if _, ok := itemSet.coreLookup(pi, 0); !ok {
-				continue
-			}
+		statesWithProd := prodDot0States[pi]
+		if len(statesWithProd) == 0 {
+			continue
+		}
 
+		// Pre-compute suffix nullability for each RHS position.
+		// suffixNullableFrom[dot] = true iff rhs[dot+1:] are all nullable nonterminals.
+		var suffixNullableFrom []bool
+		hasNTInRHS := false
+		if len(rhs) > 0 {
+			suffixNullableFrom = make([]bool, len(rhs))
+			suffixNullableFrom[len(rhs)-1] = true // empty suffix is nullable
+			for i := len(rhs) - 2; i >= 0; i-- {
+				s := rhs[i+1]
+				if s < tokenCount || !ctx.nullables[s] {
+					suffixNullableFrom[i] = false
+				} else {
+					suffixNullableFrom[i] = suffixNullableFrom[i+1]
+				}
+			}
+			for _, s := range rhs {
+				if s >= tokenCount {
+					hasNTInRHS = true
+					break
+				}
+			}
+		}
+
+		for _, stateIdx := range statesWithProd {
 			// Trace path p' → p₁ → ... → pₙ through the automaton.
 			curState := stateIdx
 			valid := true
@@ -354,21 +414,12 @@ func (ctx *lrContext) computeLALRLookaheads() {
 				// Before moving past sym, check if this position contributes.
 				// If sym is a nonterminal A and the suffix rhs[dot+1:] is nullable,
 				// then (curState, A) includes (stateIdx, lhs).
-				if sym >= tokenCount {
-					suffixNullable := true
-					for _, s := range rhs[dot+1:] {
-						if s < tokenCount || !ctx.nullables[s] {
-							suffixNullable = false
-							break
-						}
-					}
-					if suffixNullable {
-						srcKey := [2]int{stateIdx, lhs}
-						tgtKey := [2]int{curState, sym}
-						if srcIdx, ok := ntTransIndex[srcKey]; ok {
-							if tgtIdx, ok := ntTransIndex[tgtKey]; ok {
-								includes[tgtIdx] = append(includes[tgtIdx], srcIdx)
-							}
+				if hasNTInRHS && sym >= tokenCount && suffixNullableFrom[dot] {
+					srcKey := [2]int{stateIdx, lhs}
+					tgtKey := [2]int{curState, sym}
+					if srcIdx, ok := ntTransIndex[srcKey]; ok {
+						if tgtIdx, ok := ntTransIndex[tgtKey]; ok {
+							includes[tgtIdx] = append(includes[tgtIdx], srcIdx)
 						}
 					}
 				}

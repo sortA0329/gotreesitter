@@ -348,6 +348,13 @@ func buildLRTablesInternal(bgCtx context.Context, ng *NormalizedGrammar, trackPr
 	if len(ng.ExternalSymbols) >= 24 {
 		usePreciseExternalBuilder = false
 	}
+	// Very large grammars (>5000 productions) are intractable for the LR(1)
+	// builder even with the precise-state budget: each BFS state expands
+	// hundreds of core items through closureToSet, and reaching the 20K
+	// budget limit takes minutes. Route them directly to LALR.
+	if len(ng.Productions) > 5000 {
+		usePreciseExternalBuilder = false
+	}
 	if os.Getenv("GOT_LR_FORCE_EXTERNAL_LALR") == "1" {
 		usePreciseExternalBuilder = false
 	}
@@ -371,7 +378,9 @@ func buildLRTablesInternal(bgCtx context.Context, ng *NormalizedGrammar, trackPr
 		return nil, ctx, fmt.Errorf("build LR tables: %w", err)
 	}
 
-	const maxRuntimeStateID = int(^uint16(0))
+	// StateID is uint32 in the runtime (expanded from uint16 to support large
+	// grammars like COBOL with 67K states). Cap at uint32 max.
+	const maxRuntimeStateID = int(^uint32(0))
 	if len(itemSets) > maxRuntimeStateID {
 		return nil, ctx, fmt.Errorf("parser state count %d exceeds max representable state id %d", len(itemSets), maxRuntimeStateID)
 	}
@@ -403,12 +412,27 @@ func buildLRTablesInternal(bgCtx context.Context, ng *NormalizedGrammar, trackPr
 				}
 
 				if nextSym < tokenCount {
-					// Terminal → shift action
+					// Terminal → shift action.
+					// For closure-derived items (dot == 0), suppress the production's
+					// own precedence. Tree-sitter's conflict resolver only considers
+					// shift precedence from items whose dot has advanced past position 0
+					// (step_index > 0). Without this, a high-precedence closure item
+					// (e.g. unary_expression prec=14 within sizeof's operand) can
+					// dominate the shift's precedence and incorrectly win S/R conflicts
+					// against the enclosing reduce (e.g. sizeof_expression prec=13).
+					// The enclosing kernel item's precedence is propagated afterward
+					// by propagateEntryShiftMetadata.
+					shiftPrec := prod.Prec
+					shiftAssoc := prod.Assoc
+					if ce.dot == 0 {
+						shiftPrec = 0
+						shiftAssoc = AssocNone
+					}
 					tables.addAction(stateIdx, nextSym, lrAction{
 						kind:    lrShift,
 						state:   targetState,
-						prec:    prod.Prec,
-						assoc:   prod.Assoc,
+						prec:    shiftPrec,
+						assoc:   shiftAssoc,
 						lhsSym:  prod.LHS,
 						isExtra: prod.IsExtra,
 						repeat:  ctx.isRepetitionShift(stateIdx, nextSym, targetState),
@@ -2336,29 +2360,176 @@ func resolveActionConflict(lookaheadSym int, actions []lrAction, ng *NormalizedG
 		// Tree-sitter keeps S/R as GLR when the reduce LHS and a shift LHS
 		// are both in the same declared conflict group.
 		if shiftReduceInConflictGroup(shifts, reduces, ng, cache) {
+			// When the shift and reduce share the same LHS symbol (intra-
+			// symbol conflict, e.g. binary_expression && vs ||), explicit
+			// precedence/associativity should still resolve the conflict.
+			// Without this, all binary operators with different precedences
+			// would be kept as GLR, causing wrong associativity at runtime.
+			// Inter-symbol conflicts (different LHS) stay as GLR — those
+			// represent genuine ambiguities declared by the grammar author.
+			sameLHS := shift.lhsSym == prod.LHS
+			if sameLHS {
+				shiftP := shift.prec
+				reduceP := prod.Prec
+				if (shiftP != 0 || reduceP != 0) && shiftP != reduceP {
+					if reduceP > shiftP {
+						return []lrAction{reduce}, nil
+					}
+					return []lrAction{shift}, nil
+				}
+				if shiftP == reduceP && prod.Assoc != AssocNone {
+					switch prod.Assoc {
+					case AssocLeft:
+						return []lrAction{reduce}, nil
+					case AssocRight:
+						return []lrAction{shift}, nil
+					}
+				}
+			}
 			return actions, nil
 		}
-		// Fallback: if the reduce LHS is in ANY conflict group, keep GLR.
-		// This is broader than tree-sitter C but necessary because grammargen's
-		// LALR merging can create S/R conflicts where the shift LHS doesn't
-		// appear directly in the conflict group but the ambiguity is real.
+		// Fallback: if the reduce LHS is in ANY conflict group, keep GLR —
+		// UNLESS explicit precedence clearly resolves the conflict.
+		// Tree-sitter C resolves S/R conflicts via precedence even when
+		// symbols are in conflict groups. The original all-GLR fallback
+		// was too broad, generating thousands of unnecessary GLR entries
+		// for grammars like Swift where many symbols appear in conflict
+		// groups but have unambiguous precedence relationships.
 		if reduceLHSInAnyConflictGroup(reduces, ng, cache) {
+			shiftP := shift.prec
+			reduceP := prod.Prec
+			// Consult precedences table for SYMBOL-level ordering before
+			// falling through to numeric prec comparison. This ensures
+			// that SYMBOL entries like update_expression can resolve
+			// conflicts even within conflict group contexts.
+			if ng.PrecedenceOrder != nil {
+				// Case 1: reduce LHS is SYMBOL (prec 0), shift prec is named (> 0).
+				if reduceP == 0 && shiftP > 0 && prod.LHS < len(ng.Symbols) {
+					lhsName := ng.Symbols[prod.LHS].Name
+					cmp := ng.PrecedenceOrder.resolveSymbolVsNamedPrec(lhsName, shiftP)
+					if cmp > 0 {
+						return []lrAction{reduce}, nil
+					}
+					if cmp < 0 {
+						return []lrAction{shift}, nil
+					}
+				}
+				// Case 2: shift LHS is SYMBOL (prec 0), reduce prec is named (> 0).
+				if shiftP == 0 && reduceP > 0 && shift.lhsSym < len(ng.Symbols) {
+					shiftLHSName := ng.Symbols[shift.lhsSym].Name
+					cmp := ng.PrecedenceOrder.resolveSymbolVsNamedPrec(shiftLHSName, reduceP)
+					if cmp > 0 {
+						return []lrAction{shift}, nil
+					}
+					if cmp < 0 {
+						return []lrAction{reduce}, nil
+					}
+				}
+			}
+			// Check if precedence can resolve this definitively.
+			if (shiftP != 0 || reduceP != 0) && shiftP != reduceP {
+				// Clear precedence difference — resolve deterministically.
+				if reduceP > shiftP {
+					return []lrAction{reduce}, nil
+				}
+				return []lrAction{shift}, nil
+			}
+			// Before applying associativity, check SYMBOL vs SYMBOL
+			// ordering from the precedences table. When two symbols
+			// in the same precedence level have equal numeric prec,
+			// the ordering determines which binds tighter.
+			if shiftP == reduceP && ng.PrecedenceOrder != nil &&
+				prod.LHS >= 0 && prod.LHS < len(ng.Symbols) &&
+				shift.lhsSym >= 0 && shift.lhsSym < len(ng.Symbols) {
+				reduceLHSName := ng.Symbols[prod.LHS].Name
+				shiftLHSName := ng.Symbols[shift.lhsSym].Name
+				if reduceLHSName != shiftLHSName {
+					cmp := ng.PrecedenceOrder.resolveSymbolVsSymbol(shiftLHSName, reduceLHSName)
+					if cmp > 0 {
+						return []lrAction{shift}, nil
+					}
+					if cmp < 0 {
+						return []lrAction{reduce}, nil
+					}
+				}
+			}
+			// Same precedence or both zero — check associativity.
+			if shiftP == reduceP && prod.Assoc != AssocNone {
+				switch prod.Assoc {
+				case AssocLeft:
+					return []lrAction{reduce}, nil
+				case AssocRight:
+					return []lrAction{shift}, nil
+				}
+			}
+			// No clear resolution — keep as GLR.
 			return actions, nil
 		}
 
 		shiftPrec := shift.prec
 		reducePrec := prod.Prec
 
+		// Consult the precedences table for SYMBOL-level ordering.
+		// Only apply when:
+		// 1. The reduce production's LHS is a SYMBOL entry in the table
+		// 2. The reduce prec is 0 (from the grammar's PREC(0) wrapper)
+		// 3. The shift prec is non-zero (from a named STRING prec like "logical_and")
+		// Guard: shiftPrec must be > 0 because value 0 is ambiguous (could be
+		// the default/unset value or a named prec like "object" that happens
+		// to map to 0). Only named precs with positive values are unambiguous.
+		if ng.PrecedenceOrder != nil && reducePrec == 0 && shiftPrec > 0 && prod.LHS < len(ng.Symbols) {
+			lhsName := ng.Symbols[prod.LHS].Name
+			cmp := ng.PrecedenceOrder.resolveSymbolVsNamedPrec(lhsName, shiftPrec)
+			if cmp > 0 {
+				return []lrAction{reduce}, nil
+			}
+			if cmp < 0 {
+				return []lrAction{shift}, nil
+			}
+		}
+		// Case 2: shift LHS is SYMBOL (prec 0), reduce prec is named STRING (> 0).
+		if ng.PrecedenceOrder != nil && shiftPrec == 0 && reducePrec > 0 && shift.lhsSym < len(ng.Symbols) {
+			shiftLHSName := ng.Symbols[shift.lhsSym].Name
+			cmp := ng.PrecedenceOrder.resolveSymbolVsNamedPrec(shiftLHSName, reducePrec)
+			if cmp > 0 {
+				return []lrAction{shift}, nil
+			}
+			if cmp < 0 {
+				return []lrAction{reduce}, nil
+			}
+		}
 		// Apply precedence/associativity resolution when either side has a
 		// non-zero precedence OR the production declares explicit associativity.
-		// PREC_LEFT(0) sets Assoc=AssocLeft with Prec=0; the associativity must
-		// still be respected even though the precedence value is zero.
 		if reducePrec != 0 || shiftPrec != 0 || prod.Assoc != AssocNone {
 			if reducePrec > shiftPrec {
 				return []lrAction{reduce}, nil
 			}
 			if shiftPrec > reducePrec {
 				return []lrAction{shift}, nil
+			}
+			// Prec values are equal — before applying associativity,
+			// check if the SYMBOL ordering from the precedences table
+			// can break the tie. Two symbols in the same level with
+			// equal numeric prec but different ordering positions should
+			// be resolved by position (higher-ordered binds tighter).
+			// Example: TypeScript [intersection_type, union_type,
+			// conditional_type, function_type] all have PREC_LEFT(0).
+			// For "() => T | U", union_type (higher pos) should bind
+			// tighter than function_type (lower pos), so shift wins.
+			if ng.PrecedenceOrder != nil &&
+				prod.LHS >= 0 && prod.LHS < len(ng.Symbols) &&
+				shift.lhsSym >= 0 && shift.lhsSym < len(ng.Symbols) {
+				reduceLHSName := ng.Symbols[prod.LHS].Name
+				shiftLHSName := ng.Symbols[shift.lhsSym].Name
+				if reduceLHSName != shiftLHSName {
+					cmp := ng.PrecedenceOrder.resolveSymbolVsSymbol(shiftLHSName, reduceLHSName)
+					if cmp > 0 {
+						return []lrAction{shift}, nil
+					}
+					if cmp < 0 {
+						return []lrAction{reduce}, nil
+					}
+				}
 			}
 			switch prod.Assoc {
 			case AssocLeft:
@@ -2431,9 +2602,51 @@ func resolveReduceReduceLegacy(lookaheadSym int, reduces []lrAction, ng *Normali
 		return reduces, nil
 	}
 	if shouldKeepNestedWrapperReduces(reduces, ng) {
+		// Even for nested wrapper reduces, if there is a clear precedence
+		// difference among the competing reductions, resolve deterministically.
+		// This matches tree-sitter C's behavior more closely: precedence
+		// always wins over GLR when the grammar author specified it.
+		if resolvedByPrec := rrPrecResolve(reduces, ng); resolvedByPrec != nil {
+			return resolvedByPrec, nil
+		}
 		return reduces, nil
 	}
 
+	// Keep GLR when competing reduces produce distinct repeat helpers
+	// with the same precedence. These repeat helpers serve different
+	// parent productions (e.g. declaration_repeat17 for `declaration`
+	// requiring ";" vs last_declaration_repeat18 for `last_declaration`
+	// without ";"). Picking one deterministically kills the other
+	// parse path, causing ERROR when the unchosen parent context is
+	// needed. The correct disambiguation happens at the parent level.
+	if shouldKeepDistinctRepeatReduces(reduces, ng) {
+		return reduces, nil
+	}
+
+	return rrPickBest(reduces, ng), nil
+}
+
+// rrPrecResolve tries to resolve R/R conflicts via precedence. Returns nil
+// if all reduces share the same (prec, dynPrec) and no resolution is possible.
+func rrPrecResolve(reduces []lrAction, ng *NormalizedGrammar) []lrAction {
+	// Check if there's a meaningful precedence difference.
+	allSamePrec := true
+	firstProd := &ng.Productions[reduces[0].prodIdx]
+	for _, r := range reduces[1:] {
+		rProd := &ng.Productions[r.prodIdx]
+		if rProd.Prec != firstProd.Prec || rProd.DynPrec != firstProd.DynPrec {
+			allSamePrec = false
+			break
+		}
+	}
+	if allSamePrec {
+		return nil // no precedence difference — can't resolve
+	}
+	return rrPickBest(reduces, ng)
+}
+
+// rrPickBest selects the highest-precedence reduce from a set.
+func rrPickBest(reduces []lrAction, ng *NormalizedGrammar) []lrAction {
 	best := reduces[0]
 	bestProd := &ng.Productions[best.prodIdx]
 	for _, r := range reduces[1:] {
@@ -2453,7 +2666,7 @@ func resolveReduceReduceLegacy(lookaheadSym int, reduces []lrAction, ng *Normali
 			}
 		}
 	}
-	return []lrAction{best}, nil
+	return []lrAction{best}
 }
 
 func shouldKeepRepeatedAnnotationReduces(lookaheadSym int, reduces []lrAction, ng *NormalizedGrammar) bool {
@@ -2527,6 +2740,36 @@ func shouldKeepNestedWrapperReduces(reduces []lrAction, ng *NormalizedGrammar) b
 	return false
 }
 
+// shouldKeepDistinctRepeatReduces returns true when all competing reduces
+// produce distinct repeat helper symbols (names containing "repeat") with the
+// same precedence. These helpers serve different parent contexts — e.g. one
+// parent requires a trailing ";" and the other doesn't — so picking one
+// deterministically kills the other parse path. GLR preserves both paths
+// until the parent production disambiguates.
+func shouldKeepDistinctRepeatReduces(reduces []lrAction, ng *NormalizedGrammar) bool {
+	if len(reduces) < 2 {
+		return false
+	}
+	// All must be repeat helpers and share the same (prec, dynPrec).
+	firstProd := &ng.Productions[reduces[0].prodIdx]
+	lhsSet := make(map[int]bool, len(reduces))
+	for _, r := range reduces {
+		prod := &ng.Productions[r.prodIdx]
+		if prod.Prec != firstProd.Prec || prod.DynPrec != firstProd.DynPrec {
+			return false // precedence differs — let rrPickBest resolve
+		}
+		if prod.LHS < 0 || prod.LHS >= len(ng.Symbols) {
+			return false
+		}
+		if !strings.Contains(ng.Symbols[prod.LHS].Name, "repeat") {
+			return false // not a repeat helper
+		}
+		lhsSet[prod.LHS] = true
+	}
+	// Must produce at least two distinct repeat helpers.
+	return len(lhsSet) >= 2
+}
+
 // shiftReduceInConflictGroup checks whether any (reduce LHS, shift LHS) pair
 // appears together in a declared conflict group. This matches tree-sitter C's
 // conflict resolution: keep S/R as GLR only when the symbols producing the
@@ -2536,32 +2779,84 @@ func shiftReduceInConflictGroup(shifts, reduces []lrAction, ng *NormalizedGramma
 		return false
 	}
 
-	// Collect all shift LHS symbols.
+	// Collect all shift LHS symbols, resolving auxiliary symbols to parents.
 	shiftLHSSet := make(map[int]bool)
 	for _, s := range shifts {
 		if s.lhsSym != 0 {
-			shiftLHSSet[s.lhsSym] = true
+			for _, parent := range resolveAuxToParents(s.lhsSym, ng) {
+				shiftLHSSet[parent] = true
+			}
 		}
 		for _, lhs := range s.lhsSyms {
-			shiftLHSSet[lhs] = true
+			for _, parent := range resolveAuxToParents(lhs, ng) {
+				shiftLHSSet[parent] = true
+			}
 		}
 	}
 
-	// For each reduce, check if its LHS and any shift LHS are in the same group.
+	// For each reduce, resolve LHS to parents, then check conflict groups.
 	for _, r := range reduces {
 		reduceLHS := ng.Productions[r.prodIdx].LHS
-		if reduceLHS < 0 || reduceLHS >= len(cache.groupsBySymbol) {
-			continue
-		}
-		for _, groupIdx := range cache.groupsBySymbol[reduceLHS] {
-			for _, sym := range cache.groups[groupIdx] {
-				if shiftLHSSet[sym] {
-					return true
+		for _, parent := range resolveAuxToParents(reduceLHS, ng) {
+			if parent < 0 || parent >= len(cache.groupsBySymbol) {
+				continue
+			}
+			for _, groupIdx := range cache.groupsBySymbol[parent] {
+				for _, sym := range cache.groups[groupIdx] {
+					if shiftLHSSet[sym] {
+						return true
+					}
 				}
 			}
 		}
 	}
 	return false
+}
+
+// resolveAuxToParents maps a symbol to its "parent" symbols for conflict
+// group matching. Auxiliary symbols (repeat helpers, inline expansions)
+// are traced back to the grammar symbols that reference them. Non-auxiliary
+// symbols return themselves.
+func resolveAuxToParents(sym int, ng *NormalizedGrammar) []int {
+	if sym < 0 || sym >= len(ng.Symbols) {
+		return []int{sym}
+	}
+	name := ng.Symbols[sym].Name
+	if !strings.Contains(name, "_repeat") && !strings.Contains(name, "_token") {
+		return []int{sym}
+	}
+	visited := make(map[int]bool)
+	var parents []int
+	resolveAuxToParentsRec(sym, ng, visited, &parents)
+	if len(parents) == 0 {
+		return []int{sym}
+	}
+	return parents
+}
+
+func resolveAuxToParentsRec(sym int, ng *NormalizedGrammar, visited map[int]bool, parents *[]int) {
+	if visited[sym] {
+		return
+	}
+	visited[sym] = true
+	isAux := sym >= 0 && sym < len(ng.Symbols) &&
+		(strings.Contains(ng.Symbols[sym].Name, "_repeat") || strings.Contains(ng.Symbols[sym].Name, "_token"))
+	if !isAux {
+		*parents = append(*parents, sym)
+		return
+	}
+	found := false
+	for _, prod := range ng.Productions {
+		for _, rhsSym := range prod.RHS {
+			if rhsSym == sym {
+				found = true
+				resolveAuxToParentsRec(prod.LHS, ng, visited, parents)
+			}
+		}
+	}
+	if !found {
+		*parents = append(*parents, sym)
+	}
 }
 
 // reduceLHSInAnyConflictGroup checks whether the primary reduce's LHS symbol
@@ -2575,7 +2870,12 @@ func reduceLHSInAnyConflictGroup(reduces []lrAction, ng *NormalizedGrammar, cach
 		return false
 	}
 	lhs := ng.Productions[reduces[0].prodIdx].LHS
-	return lhs >= 0 && lhs < len(cache.groupsBySymbol) && len(cache.groupsBySymbol[lhs]) > 0
+	for _, parent := range resolveAuxToParents(lhs, ng) {
+		if parent >= 0 && parent < len(cache.groupsBySymbol) && len(cache.groupsBySymbol[parent]) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func allInDeclaredConflict(reduces []lrAction, ng *NormalizedGrammar, cache *conflictResolutionCache) bool {

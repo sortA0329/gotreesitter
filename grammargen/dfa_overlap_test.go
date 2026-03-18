@@ -1,6 +1,7 @@
 package grammargen
 
 import (
+	"context"
 	"testing"
 
 	"github.com/odvcencio/gotreesitter"
@@ -8,6 +9,7 @@ import (
 
 func TestBuildLexDFAPrefersLongerStringOverSingleCharPattern(t *testing.T) {
 	lexStates, modeOffsets, err := buildLexDFA(
+		context.Background(),
 		[]TerminalPattern{
 			{SymbolID: 1, Rule: Pat(`[^\n]`), Priority: 0},
 			{SymbolID: 2, Rule: Str("*/"), Priority: 0},

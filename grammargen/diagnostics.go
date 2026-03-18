@@ -18,7 +18,44 @@ func buildFollowTokensFunc(tables *LRTables, tokenCount int) func(int) []int {
 	if tables == nil {
 		return nil
 	}
-	// Cache per state to avoid recomputation
+	// Pre-build reverse GOTO index: lhsSym → list of GOTO target states.
+	// This avoids the O(stateCount) scan per reduce action that made
+	// computeLexModes unusable for large grammars (C# 121K states, TS 42K).
+	type gotoTarget struct{ targetState int }
+	gotoIndex := make(map[int][]gotoTarget) // lhsSym → targets
+	for state := 0; state < tables.StateCount; state++ {
+		acts, ok := tables.ActionTable[state]
+		if !ok {
+			continue
+		}
+		for sym, actions := range acts {
+			for _, act := range actions {
+				if act.kind == lrShift && sym >= tokenCount {
+					// This is a GOTO entry (nonterminal shift)
+					gotoIndex[sym] = append(gotoIndex[sym], gotoTarget{act.state})
+				}
+			}
+		}
+	}
+
+	// Pre-build terminal sets per state for fast lookup
+	stateTerminals := make(map[int][]int) // state → terminal syms
+	for state := 0; state < tables.StateCount; state++ {
+		acts, ok := tables.ActionTable[state]
+		if !ok {
+			continue
+		}
+		var terms []int
+		for sym := range acts {
+			if sym > 0 && sym < tokenCount {
+				terms = append(terms, sym)
+			}
+		}
+		if len(terms) > 0 {
+			stateTerminals[state] = terms
+		}
+	}
+
 	cache := make(map[int][]int)
 	return func(state int) []int {
 		if cached, ok := cache[state]; ok {
@@ -30,40 +67,19 @@ func buildFollowTokensFunc(tables *LRTables, tokenCount int) func(int) []int {
 			cache[state] = nil
 			return nil
 		}
-		// For each reduce action in this state, find the GOTO target
-		// and collect its valid terminal symbols
 		for _, actions := range acts {
 			for _, act := range actions {
 				if act.kind != lrReduce {
 					continue
 				}
-				// After reducing, the parser pops and does a GOTO.
-				// We can't easily trace the exact GOTO without the full
-				// stack, but we can approximate: collect terminals valid
-				// in ANY state that has a GOTO for this production's LHS.
 				lhsSym := act.lhsSym
 				if lhsSym <= 0 {
 					continue
 				}
-				for targetState := 0; targetState < tables.StateCount; targetState++ {
-					targetActs, ok := tables.ActionTable[targetState]
-					if !ok {
-						continue
-					}
-					// Check if this state has a GOTO for the reduce LHS
-					if gotoActs, ok := targetActs[lhsSym]; ok && len(gotoActs) > 0 {
-						for _, ga := range gotoActs {
-							if ga.kind == lrShift {
-								// The GOTO target state — collect its terminals
-								if gotoStateActs, ok := tables.ActionTable[ga.state]; ok {
-									for sym := range gotoStateActs {
-										if sym > 0 && sym < tokenCount && !seen[sym] {
-											seen[sym] = true
-										}
-									}
-								}
-							}
-						}
+				// Use pre-built GOTO index instead of scanning all states
+				for _, gt := range gotoIndex[lhsSym] {
+					for _, sym := range stateTerminals[gt.targetState] {
+						seen[sym] = true
 					}
 				}
 			}
@@ -449,7 +465,7 @@ func generateWithReport(g *Grammar, opts reportBuildOptions) (*GenerateReport, e
 	report.Conflicts = diags
 
 	// Run split oracle.
-	oracle := newSplitOracle(diags, prov)
+	oracle := newSplitOracle(diags, prov, tables, ng)
 	report.SplitCandidates = oracle.candidates()
 
 	// Apply local LR(1) rebuild only when explicitly opted in. Splitting
@@ -461,6 +477,14 @@ func generateWithReport(g *Grammar, opts reportBuildOptions) (*GenerateReport, e
 		for _, d := range diags {
 			if d.Resolution == "GLR (multiple actions kept)" {
 				glrBefore++
+			}
+		}
+
+		// Count external-token-motivated candidates.
+		extTokenCandidates := 0
+		for _, c := range report.SplitCandidates {
+			if c.reason == "hidden external token in merged LALR state" {
+				extTokenCandidates++
 			}
 		}
 
@@ -486,7 +510,12 @@ func generateWithReport(g *Grammar, opts reportBuildOptions) (*GenerateReport, e
 		sr.GLRBefore = glrBefore
 		sr.GLRAfter = glrAfter
 
-		if glrAfter >= glrBefore && len(diagsAfter) >= len(diags) {
+		// Allow splits that reduce GLR conflicts, reduce total conflicts,
+		// or fix external token contamination (even without GLR improvement).
+		keepSplit := glrAfter < glrBefore || len(diagsAfter) < len(diags) ||
+			(extTokenCandidates > 0 && splitCount > 0)
+
+		if !keepSplit {
 			// Global rollback: splitting did not reduce GLR conflicts or the
 			// total number of raw conflict sites.
 			// Rebuild the original resolved tables instead of retaining a
@@ -506,7 +535,7 @@ func generateWithReport(g *Grammar, opts reportBuildOptions) (*GenerateReport, e
 		} else {
 			report.Conflicts = diagsAfter
 			// Re-run oracle on new conflicts.
-			oracleAfter := newSplitOracle(diagsAfter, prov)
+			oracleAfter := newSplitOracle(diagsAfter, prov, tables, ng)
 			report.SplitCandidates = oracleAfter.candidates()
 		}
 		report.SplitResult = sr
@@ -547,37 +576,61 @@ func generateWithReport(g *Grammar, opts reportBuildOptions) (*GenerateReport, e
 	}
 	stringPrefixExtensions := computeStringPrefixExtensions(ng.Terminals)
 	termPatSyms := terminalPatternSymSet(ng)
-	lexModes, stateToMode := computeLexModes(
-		tables.StateCount,
-		tokenCount,
-		func(state, sym int) bool {
-			if acts, ok := tables.ActionTable[state]; ok {
-				if entry, ok := acts[sym]; ok && len(entry) > 0 {
-					return true
-				}
+
+	var lexModes []lexModeSpec
+	var stateToMode []int
+	var afterWSModes []afterWSModeEntry
+	if tables.StateCount > 50000 {
+		// Large grammars (C# 121K states, TS 42K): use a single broad
+		// DFA with all tokens instead of per-state lex modes. Per-state
+		// mode computation is O(states × tokens) which is prohibitive
+		// for these grammars. The broad DFA loses context-dependent
+		// lexing but makes generation complete in minutes.
+		allSyms := make(map[int]bool)
+		for _, t := range ng.Terminals {
+			allSyms[t.SymbolID] = true
+		}
+		for _, e := range ng.ExtraSymbols {
+			if e > 0 && e < tokenCount {
+				allSyms[e] = true
 			}
-			return false
-		},
-		stringPrefixExtensions,
-		ng.ExtraSymbols,
-		tables.ExtraChainStateStart,
-		immediateTokens,
-		ng.ExternalSymbols,
-		ng.WordSymbolID,
-		keywordSet,
-		termPatSyms,
-		buildFollowTokensFunc(tables, tokenCount),
-	)
+		}
+		lexModes = []lexModeSpec{{validSymbols: allSyms, skipWhitespace: true}}
+		stateToMode = make([]int, tables.StateCount)
+	} else {
+		lexModes, stateToMode, afterWSModes = computeLexModes(
+			tables.StateCount,
+			tokenCount,
+			func(state, sym int) bool {
+				if acts, ok := tables.ActionTable[state]; ok {
+					if entry, ok := acts[sym]; ok && len(entry) > 0 {
+						return true
+					}
+				}
+				return false
+			},
+			stringPrefixExtensions,
+			ng.ExtraSymbols,
+			tables.ExtraChainStateStart,
+			immediateTokens,
+			ng.ExternalSymbols,
+			ng.WordSymbolID,
+			keywordSet,
+			termPatSyms,
+			buildFollowTokensFunc(tables, tokenCount),
+			patternImmediateTokenSet(ng),
+		)
+	}
 
 	skipExtras := computeSkipExtras(ng)
-	lexStates, lexModeOffsets, err := buildLexDFA(ng.Terminals, ng.ExtraSymbols, skipExtras, lexModes)
+	lexStates, lexModeOffsets, err := buildLexDFA(context.Background(), ng.Terminals, ng.ExtraSymbols, skipExtras, lexModes)
 	if err != nil {
 		return nil, fmt.Errorf("build lex DFA: %w", err)
 	}
 
 	var keywordLexStates []gotreesitter.LexState
 	if len(ng.KeywordEntries) > 0 {
-		kls, _, err := buildLexDFA(ng.KeywordEntries, nil, nil, []lexModeSpec{{
+		kls, _, err := buildLexDFA(context.Background(), ng.KeywordEntries, nil, nil, []lexModeSpec{{
 			validSymbols:   allSymbolsSet(ng.KeywordEntries),
 			skipWhitespace: false,
 		}})
@@ -592,6 +645,13 @@ func generateWithReport(g *Grammar, opts reportBuildOptions) (*GenerateReport, e
 		return nil, fmt.Errorf("assemble: %w", err)
 	}
 	lang.Name = g.Name
+
+	// Set after-whitespace lex states for states that need IMMTOKEN exclusion.
+	for _, entry := range afterWSModes {
+		if entry.stateIdx < len(lang.LexModes) && entry.modeIdx < len(lexModeOffsets) {
+			lang.LexModes[entry.stateIdx].AfterWhitespaceLexState = uint16(lexModeOffsets[entry.modeIdx])
+		}
+	}
 
 	if len(keywordLexStates) > 0 {
 		lang.KeywordLexStates = keywordLexStates
@@ -649,7 +709,7 @@ func generateWithReportCtx(bgCtx context.Context, g *Grammar, opts reportBuildOp
 	}
 	report.Conflicts = diags
 
-	oracle := newSplitOracle(diags, prov)
+	oracle := newSplitOracle(diags, prov, tables, ng)
 	report.SplitCandidates = oracle.candidates()
 
 	if len(report.SplitCandidates) > 0 && g.EnableLRSplitting {
@@ -657,6 +717,13 @@ func generateWithReportCtx(bgCtx context.Context, g *Grammar, opts reportBuildOp
 		for _, d := range diags {
 			if d.Resolution == "GLR (multiple actions kept)" {
 				glrBefore++
+			}
+		}
+
+		extTokenCandidates := 0
+		for _, c := range report.SplitCandidates {
+			if c.reason == "hidden external token in merged LALR state" {
+				extTokenCandidates++
 			}
 		}
 
@@ -680,7 +747,10 @@ func generateWithReportCtx(bgCtx context.Context, g *Grammar, opts reportBuildOp
 		sr.GLRBefore = glrBefore
 		sr.GLRAfter = glrAfter
 
-		if glrAfter >= glrBefore && len(diagsAfter) >= len(diags) {
+		keepSplit := glrAfter < glrBefore || len(diagsAfter) < len(diags) ||
+			(extTokenCandidates > 0 && splitCount > 0)
+
+		if !keepSplit {
 			tables, err = buildLRTables(ng)
 			if err != nil {
 				return nil, fmt.Errorf("rebuild LR tables after split rollback: %w", err)
@@ -695,7 +765,7 @@ func generateWithReportCtx(bgCtx context.Context, g *Grammar, opts reportBuildOp
 				len(diags), len(diagsAfter), glrBefore, glrAfter)
 		} else {
 			report.Conflicts = diagsAfter
-			oracleAfter := newSplitOracle(diagsAfter, prov)
+			oracleAfter := newSplitOracle(diagsAfter, prov, tables, ng)
 			report.SplitCandidates = oracleAfter.candidates()
 		}
 		report.SplitResult = sr
@@ -729,37 +799,61 @@ func generateWithReportCtx(bgCtx context.Context, g *Grammar, opts reportBuildOp
 	}
 	stringPrefixExtensions := computeStringPrefixExtensions(ng.Terminals)
 	termPatSyms := terminalPatternSymSet(ng)
-	lexModes, stateToMode := computeLexModes(
-		tables.StateCount,
-		tokenCount,
-		func(state, sym int) bool {
-			if acts, ok := tables.ActionTable[state]; ok {
-				if entry, ok := acts[sym]; ok && len(entry) > 0 {
-					return true
-				}
+
+	var lexModes []lexModeSpec
+	var stateToMode []int
+	var afterWSModes []afterWSModeEntry
+	if tables.StateCount > 50000 {
+		// Large grammars (C# 121K states, TS 42K): use a single broad
+		// DFA with all tokens instead of per-state lex modes. Per-state
+		// mode computation is O(states × tokens) which is prohibitive
+		// for these grammars. The broad DFA loses context-dependent
+		// lexing but makes generation complete in minutes.
+		allSyms := make(map[int]bool)
+		for _, t := range ng.Terminals {
+			allSyms[t.SymbolID] = true
+		}
+		for _, e := range ng.ExtraSymbols {
+			if e > 0 && e < tokenCount {
+				allSyms[e] = true
 			}
-			return false
-		},
-		stringPrefixExtensions,
-		ng.ExtraSymbols,
-		tables.ExtraChainStateStart,
-		immediateTokens,
-		ng.ExternalSymbols,
-		ng.WordSymbolID,
-		keywordSet,
-		termPatSyms,
-		buildFollowTokensFunc(tables, tokenCount),
-	)
+		}
+		lexModes = []lexModeSpec{{validSymbols: allSyms, skipWhitespace: true}}
+		stateToMode = make([]int, tables.StateCount)
+	} else {
+		lexModes, stateToMode, afterWSModes = computeLexModes(
+			tables.StateCount,
+			tokenCount,
+			func(state, sym int) bool {
+				if acts, ok := tables.ActionTable[state]; ok {
+					if entry, ok := acts[sym]; ok && len(entry) > 0 {
+						return true
+					}
+				}
+				return false
+			},
+			stringPrefixExtensions,
+			ng.ExtraSymbols,
+			tables.ExtraChainStateStart,
+			immediateTokens,
+			ng.ExternalSymbols,
+			ng.WordSymbolID,
+			keywordSet,
+			termPatSyms,
+			buildFollowTokensFunc(tables, tokenCount),
+			patternImmediateTokenSet(ng),
+		)
+	}
 
 	skipExtras := computeSkipExtras(ng)
-	lexStates, lexModeOffsets, err := buildLexDFA(ng.Terminals, ng.ExtraSymbols, skipExtras, lexModes)
+	lexStates, lexModeOffsets, err := buildLexDFA(bgCtx, ng.Terminals, ng.ExtraSymbols, skipExtras, lexModes)
 	if err != nil {
 		return nil, fmt.Errorf("build lex DFA: %w", err)
 	}
 
 	var keywordLexStates []gotreesitter.LexState
 	if len(ng.KeywordEntries) > 0 {
-		kls, _, err := buildLexDFA(ng.KeywordEntries, nil, nil, []lexModeSpec{{
+		kls, _, err := buildLexDFA(bgCtx, ng.KeywordEntries, nil, nil, []lexModeSpec{{
 			validSymbols:   allSymbolsSet(ng.KeywordEntries),
 			skipWhitespace: false,
 		}})
@@ -774,6 +868,13 @@ func generateWithReportCtx(bgCtx context.Context, g *Grammar, opts reportBuildOp
 		return nil, fmt.Errorf("assemble: %w", err)
 	}
 	lang.Name = g.Name
+
+	// Set after-whitespace lex states for states that need IMMTOKEN exclusion.
+	for _, entry := range afterWSModes {
+		if entry.stateIdx < len(lang.LexModes) && entry.modeIdx < len(lexModeOffsets) {
+			lang.LexModes[entry.stateIdx].AfterWhitespaceLexState = uint16(lexModeOffsets[entry.modeIdx])
+		}
+	}
 
 	if len(keywordLexStates) > 0 {
 		lang.KeywordLexStates = keywordLexStates

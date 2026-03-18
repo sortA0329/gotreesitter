@@ -526,6 +526,29 @@ func buildExternalLexStates(lang *gotreesitter.Language, tables *LRTables, ng *N
 		}
 	}
 
+	// Build counterpart map: external symbol ID -> non-external terminals
+	// with the same surface token name. Used to detect LALR merging artifacts
+	// where expression contexts (needing external scanner) and type contexts
+	// (needing regular terminal) get conflated into the same LR state.
+	extCp := make(map[int][]int) // external symID -> counterpart symIDs
+	for extSym := range extSymSet {
+		extName := ng.Symbols[extSym].Name
+		if extName == "" {
+			continue
+		}
+		for sym := 1; sym < tokenCount; sym++ {
+			if _, isExt := extSymSet[sym]; isExt {
+				continue
+			}
+			tn := ng.Symbols[sym].Name
+			if tn == extName || tn == "\\"+extName {
+				extCp[extSym] = append(extCp[extSym], sym)
+			}
+		}
+	}
+
+
+
 	// Row 0: all-false (no external tokens valid).
 	rows := [][]bool{make([]bool, extCount)}
 	rowMap := make(map[string]int) // serialized row → row index
@@ -551,7 +574,27 @@ func buildExternalLexStates(lang *gotreesitter.Language, tables *LRTables, ng *N
 		if lrState >= 0 {
 			if acts, ok := tables.ActionTable[lrState]; ok {
 				for symID, extIdx := range extSymSet {
-					if actionList, ok := acts[symID]; ok && len(actionList) > 0 {
+					actionList, ok := acts[symID]
+					if !ok || len(actionList) == 0 {
+						continue
+					}
+					// Suppress external symbol when a non-external terminal
+					// counterpart has the exact same action list. This means
+					// LALR merging conflated contexts where the external
+					// scanner should fire with contexts where only the
+					// regular terminal is valid. Deferring to the DFA is
+					// safe because the parser action is identical either way.
+					suppressed := false
+					if cpSyms, hasCp := extCp[symID]; hasCp {
+						for _, cpSym := range cpSyms {
+							cpActs, cpOk := acts[cpSym]
+							if cpOk && len(cpActs) > 0 && actListsEqual(actionList, cpActs) {
+								suppressed = true
+								break
+							}
+						}
+					}
+					if !suppressed {
 						row[extIdx] = true
 						anyValid = true
 					}
@@ -588,6 +631,209 @@ func serializeBoolRow(row []bool) string {
 	for i, v := range row {
 		if v {
 			buf[i] = 1
+		}
+	}
+	return string(buf)
+}
+
+// stripHiddenExternalsFromPureReduceStates removes hidden external symbol
+// entries from the LR action table in states where every terminal triggers
+// the same reduce. These states arise from LALR merging and the external
+// symbol adds no value—it just causes the external scanner to produce a
+// spurious zero-width token that the parser uses as a lookahead but never
+// shifts. By removing the entry, the external scanner is no longer called
+// and the parser reduces on whichever real token follows instead.
+func stripHiddenExternalsFromPureReduceStates(tables *LRTables, ng *NormalizedGrammar) {
+	if len(ng.ExternalSymbols) == 0 {
+		return
+	}
+
+	extSymSet := make(map[int]bool, len(ng.ExternalSymbols))
+	for _, symID := range ng.ExternalSymbols {
+		extSymSet[symID] = true
+	}
+
+	// Find hidden external symbols (name starts with "_") that have
+	// production-based counterparts.
+	tokenCount := ng.TokenCount()
+	type cpInfo struct {
+		extSym     int
+		cpSyms     []int
+	}
+	var candidates []cpInfo
+	for _, symID := range ng.ExternalSymbols {
+		name := ng.Symbols[symID].Name
+		if name == "" || name[0] != '_' {
+			continue
+		}
+		alts := findProductionAlternativeCounterparts(ng, symID, func() map[int]int {
+			m := make(map[int]int)
+			for i, s := range ng.ExternalSymbols {
+				m[s] = i
+			}
+			return m
+		}(), tokenCount)
+		if len(alts) > 0 {
+			candidates = append(candidates, cpInfo{extSym: symID, cpSyms: alts})
+		}
+	}
+	if len(candidates) == 0 {
+		return
+	}
+
+	for state := 0; state < tables.StateCount; state++ {
+		acts, ok := tables.ActionTable[state]
+		if !ok {
+			continue
+		}
+
+		for _, cand := range candidates {
+			extActs, ok := acts[cand.extSym]
+			if !ok || len(extActs) == 0 {
+				continue
+			}
+			if !actionsAreReduceOnly(extActs) {
+				continue
+			}
+
+			// Check if counterpart has the same reduce-only action.
+			hasSameCp := false
+			for _, cpSym := range cand.cpSyms {
+				cpActs, cpOk := acts[cpSym]
+				if cpOk && len(cpActs) > 0 && actionsAreReduceOnly(cpActs) &&
+					actListsEqual(extActs, cpActs) {
+					hasSameCp = true
+					break
+				}
+			}
+			if !hasSameCp {
+				continue
+			}
+
+			// Verify this is a pure-reduce state: every terminal in the
+			// action table has the same reduce action as the external symbol.
+			isPureReduce := true
+			for sym, symActs := range acts {
+				if sym >= tokenCount {
+					continue // skip nonterminal goto entries
+				}
+				if len(symActs) == 0 {
+					continue
+				}
+				if !actListsEqual(symActs, extActs) {
+					isPureReduce = false
+					break
+				}
+			}
+			if !isPureReduce {
+				continue
+			}
+
+			// Strip the hidden external from this state's action table.
+			delete(acts, cand.extSym)
+		}
+	}
+}
+
+// actionsAreReduceOnly returns true if all actions in the list are reduce
+// actions (no shifts, no accepts).
+func actionsAreReduceOnly(acts []lrAction) bool {
+	if len(acts) == 0 {
+		return false
+	}
+	for _, a := range acts {
+		if a.kind != lrReduce {
+			return false
+		}
+	}
+	return true
+}
+
+// actListsEqual checks if two LR action lists are structurally identical.
+func actListsEqual(a, b []lrAction) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].kind != b[i].kind || a[i].state != b[i].state || a[i].prodIdx != b[i].prodIdx {
+			return false
+		}
+	}
+	return true
+}
+
+// findProductionAlternativeCounterparts finds non-external terminal symbols
+// that appear as positional alternatives to extSym in grammar productions.
+// Two terminals are considered positional alternatives when they appear at the
+// same position in productions that share the same LHS and are otherwise
+// identical (same prefix/suffix). For example, if the grammar has:
+//
+//	expression_statement → [expression, _automatic_semicolon]
+//	expression_statement → [expression, ;]
+//
+// then ";" is a positional alternative to "_automatic_semicolon" at position 1
+// of the expression_statement production. This detects inline CHOICE patterns
+// like _semicolon: $ => choice($._automatic_semicolon, ";") that were
+// flattened during normalization.
+func findProductionAlternativeCounterparts(ng *NormalizedGrammar, extSym int, extSymSet map[int]int, tokenCount int) []int {
+	// Build a map of (LHS, position, prefix-suffix hash) → productions
+	// containing extSym at that position. Then find productions with the
+	// same key but a different terminal at that position.
+	type prodKey struct {
+		lhs int
+		pos int
+		sig string // serialized RHS with the position blanked out
+	}
+
+	// Find all positions where extSym appears in productions.
+	extPositions := make(map[prodKey]bool)
+	for _, prod := range ng.Productions {
+		for i, sym := range prod.RHS {
+			if sym == extSym {
+				// Build signature: LHS + RHS with position i blanked.
+				sig := prodSignature(prod.RHS, i)
+				key := prodKey{lhs: prod.LHS, pos: i, sig: sig}
+				extPositions[key] = true
+			}
+		}
+	}
+	if len(extPositions) == 0 {
+		return nil
+	}
+
+	// Find non-external terminals at the same position in matching
+	// productions.
+	seen := make(map[int]bool)
+	var result []int
+	for _, prod := range ng.Productions {
+		for i, sym := range prod.RHS {
+			if sym == extSym || sym >= tokenCount {
+				continue
+			}
+			if _, isExt := extSymSet[sym]; isExt {
+				continue
+			}
+			sig := prodSignature(prod.RHS, i)
+			key := prodKey{lhs: prod.LHS, pos: i, sig: sig}
+			if extPositions[key] && !seen[sym] {
+				seen[sym] = true
+				result = append(result, sym)
+			}
+		}
+	}
+	return result
+}
+
+// prodSignature returns a string identifying the RHS shape with position idx
+// blanked out to -1, allowing matching of productions that differ only at
+// one symbol position.
+func prodSignature(rhs []int, blankIdx int) string {
+	buf := make([]byte, 0, len(rhs)*4)
+	for i, sym := range rhs {
+		if i == blankIdx {
+			buf = append(buf, 0xFF, 0xFF, 0xFF, 0xFF)
+		} else {
+			buf = append(buf, byte(sym>>24), byte(sym>>16), byte(sym>>8), byte(sym))
 		}
 	}
 	return string(buf)

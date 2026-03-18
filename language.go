@@ -13,8 +13,9 @@ import (
 // Symbol is a grammar symbol ID (terminal or nonterminal).
 type Symbol uint16
 
-// StateID is a parser state index.
-type StateID uint16
+// StateID is a parser state index. uint32 supports grammars with >65K states
+// (e.g. COBOL with 67K states from 1071 rules).
+type StateID uint32
 
 // FieldID is a named field index.
 type FieldID uint16
@@ -77,9 +78,10 @@ type LexTransition struct {
 
 // LexMode maps a parser state to its lexer configuration.
 type LexMode struct {
-	LexState          uint16
-	ExternalLexState  uint16
-	ReservedWordSetID uint16
+	LexState              uint16
+	ExternalLexState      uint16
+	ReservedWordSetID     uint16
+	AfterWhitespaceLexState uint16 // DFA start state to use after whitespace (0 = same as LexState)
 }
 
 // LanguageMetadata holds the grammar's semantic version (ABI 15+).

@@ -1,6 +1,7 @@
 package grammargen
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -91,6 +92,13 @@ type NormalizedGrammar struct {
 	// External scanner support (populated when Grammar.Externals is set).
 	ExternalSymbols []int // external token index → symbol ID
 
+	// PrecedenceOrder stores the symbol-level precedence ordering from the
+	// grammar's precedences table. Maps a rule name to its numeric position
+	// (higher = higher priority) and whether it's a SYMBOL or STRING entry.
+	// Used during conflict resolution to compare a reduce production's LHS
+	// against the named precedence of a competing shift action.
+	PrecedenceOrder *precOrderTable
+
 	// conflictCache is built lazily by LR conflict resolution so repeated
 	// resolveActionConflict calls can reuse the same reverse indexes.
 	conflictCache *conflictResolutionCache
@@ -98,21 +106,24 @@ type NormalizedGrammar struct {
 
 // symbolTable is used during normalization.
 type symbolTable struct {
-	byName           map[string]int // terminal name → symbol ID
-	nontermByName    map[string]int // nonterminal name → symbol ID
-	symbols          []SymbolInfo
-	nextID           int
-	fieldMap         map[string]int
-	fields           []string
-	binaryRepeatMode bool // use tree-sitter binary repeat helper shape
+	byName             map[string]int // terminal name → symbol ID
+	nontermByName      map[string]int // nonterminal name → symbol ID
+	namedTokenByName   map[string]int // named token name → symbol ID (when distinct from anonymous)
+	symbols            []SymbolInfo
+	nextID             int
+	fieldMap           map[string]int
+	fields             []string
+	binaryRepeatMode    bool // use tree-sitter binary repeat helper shape
+	choiceLiftThreshold int  // if >0, lift inline CHOICE nodes exceeding this width
 }
 
 func newSymbolTable() *symbolTable {
 	st := &symbolTable{
-		byName:        make(map[string]int),
-		nontermByName: make(map[string]int),
-		fieldMap:      make(map[string]int),
-		fields:        []string{""}, // index 0 is always ""
+		byName:           make(map[string]int),
+		nontermByName:    make(map[string]int),
+		namedTokenByName: make(map[string]int),
+		fieldMap:         make(map[string]int),
+		fields:           []string{""}, // index 0 is always ""
 	}
 	// Symbol 0 = "end" (EOF). Tree-sitter C marks this Named=true.
 	st.addSymbol("end", SymbolInfo{
@@ -181,10 +192,27 @@ func (st *symbolTable) lookup(name string) (int, bool) {
 	return id, ok
 }
 
-// lookupNonterm returns the nonterminal symbol ID. Falls back to byName
-// for named tokens that are treated like nonterminals in Sym() references.
+// lookupNonterm returns the nonterminal symbol ID. Falls back to
+// namedTokenByName (for named tokens that are distinct from anonymous
+// terminals with the same name), then to byName.
 func (st *symbolTable) lookupNonterm(name string) (int, bool) {
 	if id, ok := st.nontermByName[name]; ok {
+		return id, ok
+	}
+	// Prefer the named token when it was split from an anonymous terminal.
+	// This ensures Sym("number") in literal_type resolves to the named
+	// TOKEN symbol, not the anonymous keyword string.
+	if id, ok := st.namedTokenByName[name]; ok {
+		return id, ok
+	}
+	return st.lookup(name)
+}
+
+// lookupNamedToken returns the named token symbol ID. If the named token
+// was split from an anonymous terminal, returns the split ID; otherwise
+// falls back to byName.
+func (st *symbolTable) lookupNamedToken(name string) (int, bool) {
+	if id, ok := st.namedTokenByName[name]; ok {
 		return id, ok
 	}
 	return st.lookup(name)
@@ -224,6 +252,7 @@ func Normalize(g *Grammar) (*NormalizedGrammar, error) {
 
 	st := newSymbolTable()
 	st.binaryRepeatMode = g.BinaryRepeatMode
+	st.choiceLiftThreshold = g.ChoiceLiftThreshold
 	ng := &NormalizedGrammar{}
 
 	// Phase 1: Collect all string literals and register terminal symbols.
@@ -298,6 +327,33 @@ func Normalize(g *Grammar) (*NormalizedGrammar, error) {
 				visible = true
 				named = false
 				kind = SymbolTerminal
+			}
+		}
+		// When a complex TOKEN rule (not a string-only token) has the same
+		// name as an already-registered anonymous string literal, they must
+		// get distinct symbol IDs. Example: TS has STRING "number" in
+		// predefined_type (the keyword) and TOKEN(CHOICE(...)) number (the
+		// numeric literal pattern). Tree-sitter C gives them different IDs;
+		// without this split, productions for predefined_type and literal_type
+		// become indistinguishable.
+		if named && kind == SymbolNamedToken {
+			if existingID, exists := st.lookup(name); exists &&
+				!st.symbols[existingID].Named && st.symbols[existingID].Kind == SymbolTerminal {
+				rule := g.Rules[name]
+				if rule != nil && !isStringOnlyToken(rule) {
+					// Allocate a new symbol for the named token, keeping
+					// the anonymous terminal at its original ID for string
+					// literal references.
+					newID := len(st.symbols)
+					st.namedTokenByName[name] = newID
+					st.symbols = append(st.symbols, SymbolInfo{
+						Name:    displayName,
+						Visible: visible,
+						Named:   named,
+						Kind:    kind,
+					})
+					continue
+				}
 			}
 		}
 		st.addSymbol(name, SymbolInfo{
@@ -392,8 +448,11 @@ func Normalize(g *Grammar) (*NormalizedGrammar, error) {
 	var keywordEntries []TerminalPattern
 	var wordSymbolID int
 	if g.Word != "" {
-		wordSymbolID, _ = st.lookup(g.Word)
-		keywordSet, keywordSymbols, keywordEntries = identifyKeywords(g, st, stringLiterals)
+		// Use lookupNamedToken so that if the word token was split from
+		// an anonymous terminal (e.g. identifier TOKEN colliding with
+		// "identifier" string), we get the named token's symbol ID.
+		wordSymbolID, _ = st.lookupNamedToken(g.Word)
+		keywordSet, keywordSymbols, keywordEntries = identifyKeywords(g, st, stringLiterals, namedTokens)
 	}
 
 	// Phase 6: Extract terminal patterns for DFA generation.
@@ -480,6 +539,39 @@ func Normalize(g *Grammar) (*NormalizedGrammar, error) {
 		conflicts = append(conflicts, syms)
 	}
 
+	// Phase 8b: Extend conflict groups to include auxiliary repeat rules.
+	// When a grammar rule X is in a conflict group, auxiliary repeat rules
+	// originating from X (e.g. X_repeat52) should inherit that membership.
+	// Without this, R/R conflicts between a parent rule and its repeat
+	// auxiliary are resolved deterministically (killing the repeat path)
+	// instead of being kept as GLR as tree-sitter C intends.
+	{
+		// Build reverse map: grammar rule name → set of conflict group indices.
+		conflictGroupsByName := make(map[string][]int)
+		for gi, cgroup := range g.Conflicts {
+			for _, name := range cgroup {
+				conflictGroupsByName[name] = append(conflictGroupsByName[name], gi)
+			}
+		}
+		// For each auxiliary rule, check if its originating rule is in any
+		// conflict group. If so, add the auxiliary's symbol ID to that group.
+		for auxName, originName := range auxOrigin {
+			gis := conflictGroupsByName[originName]
+			if len(gis) == 0 {
+				continue
+			}
+			auxID, ok := st.lookupNonterm(auxName)
+			if !ok {
+				continue
+			}
+			for _, gi := range gis {
+				if gi < len(conflicts) {
+					conflicts[gi] = append(conflicts[gi], auxID)
+				}
+			}
+		}
+	}
+
 	// Phase 9: Resolve supertypes.
 	var supertypes []int
 	for _, name := range g.Supertypes {
@@ -519,6 +611,7 @@ func Normalize(g *Grammar) (*NormalizedGrammar, error) {
 	ng.WordSymbolID = wordSymbolID
 	ng.KeywordEntries = keywordEntries
 	ng.ExternalSymbols = externalSymbols
+	ng.PrecedenceOrder = buildPrecOrderTable(g.Precedences, buildNamedPrecMapFromLevels(g.Precedences))
 
 	// Set tokenCount boundary on symbols so assembly knows where terminals end.
 	_ = tokenCount
@@ -1237,18 +1330,20 @@ func prepareRule(r *Rule, parentName string, st *symbolTable, auxRules map[strin
 	switch r.Kind {
 	case RuleRepeat:
 		preparedInner := prepareRule(cloneRule(r.Children[0]), parentName, st, auxRules, counter)
+		// If the inner rule is a wide CHOICE and we have a lift threshold,
+		// extract it into an auxiliary nonterminal to prevent the repeat
+		// helper from creating N² productions (where N = choice width).
+		preparedInner = maybeExtractWideChoice(preparedInner, parentName, st, auxRules, counter)
 		if st.binaryRepeatMode {
-			// Tree-sitter's binary repeat helper: aux → choice(seq(aux, aux), inner).
-			// Produces correct SHIFT_REPEAT / reduce conflicts in the LR tables.
 			auxName := ensureRepeatAuxBinary(parentName, preparedInner, st, auxRules, counter)
 			return Choice(Sym(auxName), Blank())
 		}
-		// Default: keep 0- and 1-item cases in parent, 2+ in helper.
 		auxName := ensureRepeatAuxLinear(parentName, preparedInner, st, auxRules, counter)
 		return Choice(Blank(), cloneRule(preparedInner), Sym(auxName))
 
 	case RuleRepeat1:
 		preparedInner := prepareRule(cloneRule(r.Children[0]), parentName, st, auxRules, counter)
+		preparedInner = maybeExtractWideChoice(preparedInner, parentName, st, auxRules, counter)
 		if st.binaryRepeatMode {
 			auxName := ensureRepeatAuxBinary(parentName, preparedInner, st, auxRules, counter)
 			return Sym(auxName)
@@ -1267,7 +1362,146 @@ func prepareRule(r *Rule, parentName string, st *symbolTable, auxRules map[strin
 	for i, c := range r.Children {
 		r.Children[i] = prepareRule(c, parentName, st, auxRules, counter)
 	}
+
+	// For SEQ nodes in grammars with ChoiceLiftThreshold: lift inline CHOICE
+	// children whose width exceeds the threshold into auxiliary nonterminals.
+	// This prevents Cartesian product explosion in production extraction.
+	// Only enabled for grammars that explicitly opt in (e.g. COBOL with 1071 rules).
+	if r.Kind == RuleSeq && st.choiceLiftThreshold > 0 {
+		r = liftLargeSeqChoices(r, parentName, st, auxRules, counter)
+	}
+
 	return r
+}
+
+// liftLargeSeqChoices lifts CHOICE children of a SEQ node into auxiliary
+// hidden nonterminals when the Cartesian product of alternatives would
+// exceed a production budget. The budget is choiceLiftThreshold^2 (e.g.
+// threshold=8 → budget=64 productions per SEQ). Choices are lifted
+// widest-first until the product is within budget.
+// maybeExtractWideChoice checks if r is a CHOICE with more children than
+// choiceLiftThreshold. If so, it extracts the CHOICE into an auxiliary
+// nonterminal and returns a symbol reference. This prevents repeat helpers
+// from creating N² productions when their body is a wide CHOICE.
+func maybeExtractWideChoice(r *Rule, parentName string, st *symbolTable, auxRules map[string]*Rule, counter *int) *Rule {
+	if st.choiceLiftThreshold <= 0 || r == nil || r.Kind != RuleChoice {
+		return r
+	}
+	if len(r.Children) <= st.choiceLiftThreshold {
+		return r
+	}
+	*counter++
+	auxName := fmt.Sprintf("_%s_choice_lift%d", parentName, *counter)
+	if _, exists := st.lookupNonterm(auxName); !exists {
+		st.addSymbol(auxName, SymbolInfo{
+			Name: auxName, Visible: false, Named: false, Kind: SymbolNonterminal,
+		})
+		auxRules[auxName] = r
+	}
+	return Sym(auxName)
+}
+
+// estimateAlternativeCount returns the number of flat alternatives that
+// enumerateAlternatives would produce for a rule.
+func estimateAlternativeCount(r *Rule) int {
+	if r == nil {
+		return 1
+	}
+	switch r.Kind {
+	case RuleChoice:
+		n := 0
+		for _, c := range r.Children {
+			n += estimateAlternativeCount(c)
+		}
+		if n == 0 {
+			return 1
+		}
+		return n
+	case RuleSeq:
+		product := 1
+		for _, c := range r.Children {
+			product *= estimateAlternativeCount(c)
+			if product > 10000 {
+				return product
+			}
+		}
+		return product
+	case RuleBlank:
+		return 1
+	case RuleField, RuleAlias, RulePrec, RulePrecLeft, RulePrecRight, RulePrecDynamic:
+		if len(r.Children) > 0 {
+			return estimateAlternativeCount(r.Children[0])
+		}
+		return 1
+	default:
+		return 1
+	}
+}
+
+// liftLargeSeqChoices examines a SEQ node and lifts CHOICE children into
+// auxiliary nonterminals when the total Cartesian product exceeds the
+// choiceLiftThreshold. Only active when st.choiceLiftThreshold > 0.
+func liftLargeSeqChoices(seq *Rule, parentName string, st *symbolTable, auxRules map[string]*Rule, counter *int) *Rule {
+	threshold := st.choiceLiftThreshold
+	if threshold <= 0 {
+		return seq
+	}
+
+	total := estimateAlternativeCount(seq)
+	if total <= threshold {
+		return seq
+	}
+
+	newChildren := make([]*Rule, len(seq.Children))
+	copy(newChildren, seq.Children)
+
+	for total > threshold {
+		// Find the widest liftable CHOICE child.
+		bestIdx := -1
+		bestAlts := 0
+		for i, c := range newChildren {
+			if c == nil {
+				continue
+			}
+			alts := estimateAlternativeCount(c)
+			if alts > bestAlts && alts >= 2 {
+				inner := c
+				for inner != nil && (inner.Kind == RuleField || inner.Kind == RuleAlias ||
+					inner.Kind == RulePrec || inner.Kind == RulePrecLeft ||
+					inner.Kind == RulePrecRight || inner.Kind == RulePrecDynamic) {
+					if len(inner.Children) > 0 {
+						inner = inner.Children[0]
+					} else {
+						break
+					}
+				}
+				if inner != nil && inner.Kind == RuleChoice {
+					bestIdx = i
+					bestAlts = alts
+				}
+			}
+		}
+		if bestIdx < 0 || bestAlts <= 1 {
+			break
+		}
+
+		*counter++
+		auxName := fmt.Sprintf("_%s_choice_lift%d", parentName, *counter)
+		if _, exists := st.lookupNonterm(auxName); !exists {
+			st.addSymbol(auxName, SymbolInfo{
+				Name: auxName, Visible: false, Named: false, Kind: SymbolNonterminal,
+			})
+			auxRules[auxName] = cloneRule(newChildren[bestIdx])
+		}
+		newChildren[bestIdx] = Sym(auxName)
+
+		newSeq := &Rule{Kind: RuleSeq, Children: newChildren}
+		total = estimateAlternativeCount(newSeq)
+	}
+
+	result := *seq
+	result.Children = newChildren
+	return &result
 }
 
 func ensureRepeatAuxLinear(parentName string, inner *Rule, st *symbolTable, auxRules map[string]*Rule, counter *int) string {
@@ -1548,7 +1782,7 @@ func extractTerminals(g *Grammar, st *symbolTable, stringLits []string, namedTok
 
 	// String-only named tokens: prec-based priority, greedy decides ties.
 	for _, name := range stringNamedTokens {
-		id, ok := st.lookup(name)
+		id, ok := st.lookupNamedToken(name)
 		if !ok {
 			continue
 		}
@@ -1588,9 +1822,14 @@ func extractTerminals(g *Grammar, st *symbolTable, stringLits []string, namedTok
 	}
 
 	// Non-string named tokens: prec-based priority, greedy decides ties.
+	// Skip keywords — they're recognized via the word token + keyword DFA.
 	for _, name := range patternNamedTokens {
-		id, ok := st.lookup(name)
+		id, ok := st.lookupNamedToken(name)
 		if !ok {
+			continue
+		}
+		// Skip pattern-based keywords (e.g. COBOL case-insensitive keywords).
+		if keywordSet != nil && keywordSet[id] {
 			continue
 		}
 		rule := g.Rules[name]
@@ -1624,10 +1863,18 @@ func extractTerminals(g *Grammar, st *symbolTable, stringLits []string, namedTok
 		if entry.immediate {
 			if expanded.Kind == RuleString && hasLongerStringPrefixPattern(patterns, expanded.Value) {
 				// IMMTOKEN "#" has a longer non-immediate sibling "#)".
-				// Don't apply -10000; use same prec-based priority so greedy
+				// Don't apply bonus; use same prec-based priority so greedy
 				// picks the longer non-immediate string over this IMMTOKEN.
+			} else if !isStringOnlyRule(expanded) {
+				// Pattern-based IMMTOKEN (e.g. [^\n'] for char content):
+				// use a modest -500 bonus so it beats regular tokens (prio 0)
+				// but loses to tokens with explicit PREC(1) (prio -1000).
+				// This prevents broad catch-all IMMTOKENs from defeating
+				// more specific TOKEN(PREC(1,...)) patterns like escape_sequence.
+				adjustedPriority -= 500
 			} else {
-				// No longer sibling: IMMTOKEN gets -10000 bonus to beat
+				// String-based IMMTOKEN: use the full -10000 bonus.
+				// String IMMTOKENs are specific and should always beat
 				// non-immediate tokens sharing the same lex mode.
 				adjustedPriority -= 10000
 			}
@@ -1677,11 +1924,13 @@ func hasLongerStringPrefixPattern(patterns []TerminalPattern, prefix string) boo
 	return false
 }
 
-// identifyKeywords determines which string terminals are keywords.
-// A keyword is a string terminal whose characters all match the word token's
-// pattern. Returns the keyword set, ordered symbol IDs, and terminal patterns
+// identifyKeywords determines which terminals are keywords.
+// A keyword is a terminal whose accepted strings all match the word token's
+// pattern. This includes both string literals (e.g. "if") and pattern-based
+// terminals (e.g. [iI][fF] for case-insensitive keywords like COBOL).
+// Returns the keyword set, ordered symbol IDs, and terminal patterns
 // for keyword DFA construction.
-func identifyKeywords(g *Grammar, st *symbolTable, stringLits []string) (map[int]bool, []int, []TerminalPattern) {
+func identifyKeywords(g *Grammar, st *symbolTable, stringLits []string, namedTokens []string) (map[int]bool, []int, []TerminalPattern) {
 	wordRule := g.Rules[g.Word]
 	if wordRule == nil {
 		return nil, nil, nil
@@ -1700,7 +1949,7 @@ func identifyKeywords(g *Grammar, st *symbolTable, stringLits []string) (map[int
 	b.states[frag.end].accept = 1 // any non-zero accept
 	b.states[frag.end].priority = 0
 
-	dfa := subsetConstruction(&nfa{states: b.states, start: frag.start})
+	wordDFA, _ := subsetConstruction(context.Background(), &nfa{states: b.states, start: frag.start})
 
 	keywordSet := make(map[int]bool)
 	var keywordSyms []int
@@ -1714,14 +1963,14 @@ func identifyKeywords(g *Grammar, st *symbolTable, stringLits []string) (map[int
 		// Treat only identifier-like literals as keyword candidates.
 		// Some grammars have broad `word` tokens that also match punctuation
 		// literals (e.g. //, $$), which should remain regular terminals.
-		if matchesDFA(dfa, s) && isIdentifierLikeKeywordLiteral(s) {
+		if matchesDFA(wordDFA, s) && isIdentifierLikeKeywordLiteral(s) {
 			keywordSet[id] = true
 			keywordSyms = append(keywordSyms, id)
-			// All keyword entries use uniform priority 0 so that the
-			// lexer's longest-match tiebreaker (scanPos > acceptPos)
-			// selects the longest keyword. Without this, prefix keywords
-			// like "fake" (priority N) beat longer keywords like
-			// "fake_clock" (priority N+M) even when the full text matches.
+			// All keyword entries use the same priority (0) so the DFA
+			// lexer's greedy longest-match tiebreaker selects correctly.
+			// Sequential priorities would cause shorter prefix keywords
+			// (e.g. "as") to beat longer ones (e.g. "assert") because the
+			// lexer prefers lower priority numbers.
 			keywordEntries = append(keywordEntries, TerminalPattern{
 				SymbolID: id,
 				Rule:     Str(s),
@@ -1730,7 +1979,182 @@ func identifyKeywords(g *Grammar, st *symbolTable, stringLits []string) (map[int
 		}
 	}
 
+	// Also check named pattern tokens for keyword candidacy. This handles
+	// grammars like COBOL where keywords are case-insensitive patterns
+	// (e.g. _IDENTIFICATION = [iI][dD][eE]...) rather than string literals.
+	// A pattern terminal is a keyword if every string it accepts is also
+	// accepted by the word token's pattern.
+	for _, name := range namedTokens {
+		// Skip the word token itself.
+		if name == g.Word {
+			continue
+		}
+		rule := g.Rules[name]
+		if rule == nil {
+			continue
+		}
+		// Only consider hidden pattern terminals (starting with "_").
+		// Visible named tokens are nonterminals wrapping productions.
+		if !strings.HasPrefix(name, "_") {
+			continue
+		}
+		// Only consider pure pattern rules (not token() or token.immediate() wrappers,
+		// which may have precedence semantics that matter for lexing).
+		if rule.Kind != RulePattern {
+			continue
+		}
+		id, ok := st.lookupNamedToken(name)
+		if !ok {
+			if id2, ok2 := st.lookup(name); ok2 {
+				id = id2
+			} else {
+				continue
+			}
+		}
+		// Skip if already identified (shouldn't happen, but be safe).
+		if keywordSet[id] {
+			continue
+		}
+		// Build a DFA for this candidate pattern and check if its language
+		// is a subset of the word token's language.
+		candExpanded, err := expandPatternRule(rule.Value)
+		if err != nil {
+			continue
+		}
+		cb := newNFABuilder()
+		candFrag, err := cb.buildFromRule(candExpanded)
+		if err != nil {
+			continue
+		}
+		cb.states[candFrag.end].accept = 1
+		cb.states[candFrag.end].priority = 0
+		candDFA, err := subsetConstruction(context.Background(), &nfa{states: cb.states, start: candFrag.start})
+		if err != nil || len(candDFA) == 0 {
+			continue
+		}
+		if dfaAcceptsSubsetOf(candDFA, wordDFA) {
+			keywordSet[id] = true
+			keywordSyms = append(keywordSyms, id)
+			keywordEntries = append(keywordEntries, TerminalPattern{
+				SymbolID: id,
+				Rule:     candExpanded,
+				Priority: 0,
+			})
+		}
+	}
+
 	return keywordSet, keywordSyms, keywordEntries
+}
+
+// dfaAcceptsSubsetOf checks whether every string accepted by DFA 'candidate'
+// is also accepted by DFA 'word'. Uses a product automaton approach: explores
+// all reachable (candidate_state, word_state) pairs. If any pair is reached
+// where 'candidate' accepts but 'word' does not, returns false.
+// A word_state of -1 means "dead state" (no transition found in word DFA).
+func dfaAcceptsSubsetOf(candidate, word []dfaState) bool {
+	if len(candidate) == 0 {
+		return true
+	}
+	if len(word) == 0 {
+		// Word DFA is empty — candidate can only be a subset if it also accepts nothing.
+		for _, s := range candidate {
+			if s.accept > 0 {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Product state: (candidate state, word state). word state -1 = dead.
+	type pair struct{ c, w int }
+	visited := make(map[pair]bool)
+	stack := []pair{{0, 0}}
+	visited[pair{0, 0}] = true
+
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		// Check accept: if candidate accepts here, word must also accept.
+		if candidate[cur.c].accept > 0 {
+			if cur.w < 0 || word[cur.w].accept == 0 {
+				return false
+			}
+		}
+
+		// Explore transitions from candidate state.
+		for _, ct := range candidate[cur.c].transitions {
+			// For each character in candidate's transition range, find
+			// the corresponding word DFA transition (or dead state).
+			// Since character ranges can overlap partially, split the
+			// candidate range against word transitions.
+			nextC := ct.nextState
+			wTransitions := wordTransitionsForRange(word, cur.w, ct.lo, ct.hi)
+			for _, wt := range wTransitions {
+				next := pair{nextC, wt.nextState}
+				if !visited[next] {
+					visited[next] = true
+					stack = append(stack, next)
+				}
+			}
+		}
+	}
+	return true
+}
+
+// wordTransEntry maps a sub-range to a word DFA next state (-1 = dead).
+type wordTransEntry struct {
+	lo, hi    rune
+	nextState int // -1 = dead
+}
+
+// wordTransitionsForRange returns the word DFA transitions covering the
+// character range [lo, hi]. Each piece of the range maps to either a word
+// DFA state or -1 (dead). If wordState is already -1 (dead), all
+// transitions go to -1.
+func wordTransitionsForRange(word []dfaState, wordState int, lo, hi rune) []wordTransEntry {
+	if wordState < 0 {
+		return []wordTransEntry{{lo, hi, -1}}
+	}
+	var result []wordTransEntry
+	pos := lo
+	for _, wt := range word[wordState].transitions {
+		if wt.hi < pos {
+			continue
+		}
+		if wt.lo > hi {
+			break
+		}
+		// Gap before this word transition: [pos, wt.lo-1] → dead
+		if wt.lo > pos {
+			gapHi := wt.lo - 1
+			if gapHi > hi {
+				gapHi = hi
+			}
+			result = append(result, wordTransEntry{pos, gapHi, -1})
+		}
+		// Overlap: [max(pos, wt.lo), min(hi, wt.hi)] → wt.nextState
+		overlapLo := pos
+		if wt.lo > overlapLo {
+			overlapLo = wt.lo
+		}
+		overlapHi := hi
+		if wt.hi < overlapHi {
+			overlapHi = wt.hi
+		}
+		if overlapLo <= overlapHi {
+			result = append(result, wordTransEntry{overlapLo, overlapHi, wt.nextState})
+		}
+		pos = overlapHi + 1
+		if pos > hi {
+			break
+		}
+	}
+	// Remaining range after all word transitions: dead
+	if pos <= hi {
+		result = append(result, wordTransEntry{pos, hi, -1})
+	}
+	return result
 }
 
 func isIdentifierLikeKeywordLiteral(s string) bool {
@@ -2364,6 +2788,59 @@ func flattenHiddenChoiceAlts(g *Grammar) *Grammar {
 			continue
 		}
 
+		// When some compounds are self-recursive and the non-self-recursive
+		// compounds do NOT share symbols with the pass-through alternatives,
+		// the base cases are qualitatively different from the pass-throughs.
+		// Stripping the pass-throughs leaves the self-recursive productions
+		// reachable only through the non-self-recursive base (e.g. parens),
+		// not through the pass-through paths (e.g. variable_expr).
+		//
+		// Example: HCL's _expr_term has pass-through alts (variable_expr,
+		// literal_value, ...) and compounds (_expr_term get_attr,
+		// _expr_term index, "(" expression ")"). The non-self-recursive
+		// compound "(" expression ")" doesn't share symbols with the
+		// pass-throughs, so stripping them means `var.field` can never
+		// parse — variable_expr no longer reduces to _expr_term.
+		//
+		// Contrast with repeat helpers like _items -> item | item item |
+		// _items item where the non-self-recursive compound (item item)
+		// shares `item` with the pass-through, making flattening safe.
+		if !allCompoundsAreSelfRecursive {
+			hasSelfRecursiveCompound := false
+			for _, c := range compound {
+				if ruleReferencesSym(c, name) {
+					hasSelfRecursiveCompound = true
+					break
+				}
+			}
+			if hasSelfRecursiveCompound {
+				ptSyms := make(map[string]bool)
+				for _, p := range pt {
+					for _, ref := range collectSymbolRefs(p) {
+						ptSyms[ref] = true
+					}
+				}
+				nonRecSharesPassthrough := false
+				for _, c := range compound {
+					if ruleReferencesSym(c, name) {
+						continue
+					}
+					for _, ref := range collectSymbolRefs(c) {
+						if ptSyms[ref] {
+							nonRecSharesPassthrough = true
+							break
+						}
+					}
+					if nonRecSharesPassthrough {
+						break
+					}
+				}
+				if !nonRecSharesPassthrough {
+					continue
+				}
+			}
+		}
+
 		flattenMap[name] = &flattenInfo{
 			passThrough: pt,
 			compound:    compound,
@@ -2412,7 +2889,6 @@ func flattenHiddenChoiceAlts(g *Grammar) *Grammar {
 	out.Word = g.Word
 	out.Supertypes = g.Supertypes
 	out.Inline = g.Inline
-	out.NonKeywordStrings = g.NonKeywordStrings
 	return out
 }
 
@@ -2755,7 +3231,10 @@ func expandInlineRules(g *Grammar) *Grammar {
 	}
 	out.Word = g.Word
 	out.Supertypes = g.Supertypes
-	out.NonKeywordStrings = g.NonKeywordStrings
+	out.Precedences = g.Precedences
+	out.BinaryRepeatMode = g.BinaryRepeatMode
+	out.EnableLRSplitting = g.EnableLRSplitting
+	out.ChoiceLiftThreshold = g.ChoiceLiftThreshold
 	// Don't propagate Inline — they've been expanded.
 
 	return out
