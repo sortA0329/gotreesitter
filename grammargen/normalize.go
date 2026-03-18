@@ -1358,7 +1358,141 @@ func prepareRule(r *Rule, parentName string, st *symbolTable, auxRules map[strin
 	for i, c := range r.Children {
 		r.Children[i] = prepareRule(c, parentName, st, auxRules, counter)
 	}
+
+	// After recursion, if this is a SEQ, check whether inline CHOICE children
+	// would cause a Cartesian product explosion in enumerateAlternatives.
+	// If so, lift large CHOICE children into auxiliary nonterminals.
+	// This mirrors tree-sitter C's flatten_grammar.cc which extracts inline
+	// choices to keep production counts manageable.
+	if r.Kind == RuleSeq {
+		r = liftLargeInlineChoices(r, parentName, st, auxRules, counter)
+	}
 	return r
+}
+
+// estimateAlternativeCount returns the number of flat alternatives that
+// enumerateAlternatives would produce for a rule. Used to decide whether
+// inline CHOICE nodes should be lifted into auxiliary nonterminals.
+func estimateAlternativeCount(r *Rule) int {
+	if r == nil {
+		return 1
+	}
+	switch r.Kind {
+	case RuleChoice:
+		n := 0
+		for _, c := range r.Children {
+			n += estimateAlternativeCount(c)
+		}
+		if n == 0 {
+			return 1
+		}
+		return n
+	case RuleSeq:
+		product := 1
+		for _, c := range r.Children {
+			product *= estimateAlternativeCount(c)
+			if product > 10000 {
+				return product // early exit to avoid overflow
+			}
+		}
+		return product
+	case RuleBlank:
+		return 1
+	case RuleField, RuleAlias, RulePrec, RulePrecLeft, RulePrecRight, RulePrecDynamic:
+		if len(r.Children) > 0 {
+			return estimateAlternativeCount(r.Children[0])
+		}
+		return 1
+	default:
+		return 1
+	}
+}
+
+// liftLargeInlineChoices examines a SEQ node and lifts CHOICE children
+// into auxiliary nonterminals when the total Cartesian product of
+// alternatives would exceed a threshold.
+// This prevents production explosion for grammars like COBOL where
+// deeply nested CHOICE-in-SEQ creates thousands of productions per rule.
+//
+// Strategy: only lift CHOICE children with >= minChoiceAlts alternatives.
+// Small choices (e.g., CHOICE(x, BLANK) from Optional with 2 alts) are
+// kept inline to preserve precedence and parse tree structure. Large
+// choices (e.g., CHOICE(a, b, c, d, e, BLANK) from REPEAT with 6+ alts)
+// are the primary source of Cartesian product explosion and are safe to lift.
+func liftLargeInlineChoices(seq *Rule, parentName string, st *symbolTable, auxRules map[string]*Rule, counter *int) *Rule {
+	// Adaptive threshold: large grammars (many rules) use a tighter
+	// threshold to prevent production and state explosion. Small grammars
+	// keep the higher threshold to avoid unnecessary auxiliary nonterminals
+	// that can change LR conflict resolution.
+	maxInlineAlternatives := 16 // default: allow up to 16 alternatives per SEQ
+	if len(st.symbols) > 500 {
+		maxInlineAlternatives = 8 // large grammars: more aggressive lifting
+	}
+	const minChoiceAlts = 2 // minimum alternatives in a CHOICE to be liftable
+
+	total := estimateAlternativeCount(seq)
+	if total <= maxInlineAlternatives {
+		return seq
+	}
+
+	// Iteratively lift the largest CHOICE child until the total is within bounds.
+	// We clone children to avoid mutating the shared slice.
+	newChildren := make([]*Rule, len(seq.Children))
+	copy(newChildren, seq.Children)
+
+	for total > maxInlineAlternatives {
+		// Find the CHOICE child with the most alternatives (>= minChoiceAlts).
+		bestIdx := -1
+		bestCount := minChoiceAlts - 1 // only lift choices with >= minChoiceAlts
+		for i, c := range newChildren {
+			if c != nil && isLiftableChoice(c) {
+				count := estimateAlternativeCount(c)
+				if count > bestCount {
+					bestCount = count
+					bestIdx = i
+				}
+			}
+		}
+		if bestIdx < 0 {
+			break // no more liftable choices above the minimum
+		}
+
+		// Lift this CHOICE into an auxiliary nonterminal.
+		*counter++
+		auxName := fmt.Sprintf("%s_choice%d", parentName, *counter)
+		if _, exists := st.lookupNonterm(auxName); !exists {
+			st.addSymbol(auxName, SymbolInfo{
+				Name: auxName, Visible: false, Named: false, Kind: SymbolNonterminal,
+			})
+			auxRules[auxName] = cloneRule(newChildren[bestIdx])
+		}
+		newChildren[bestIdx] = Sym(auxName)
+
+		// Recalculate total.
+		newSeq := &Rule{Kind: RuleSeq, Children: newChildren}
+		total = estimateAlternativeCount(newSeq)
+	}
+
+	result := *seq
+	result.Children = newChildren
+	return &result
+}
+
+// isLiftableChoice returns true if a rule is a CHOICE (possibly wrapped in
+// prec/field/alias) with multiple alternatives.
+func isLiftableChoice(r *Rule) bool {
+	if r == nil {
+		return false
+	}
+	switch r.Kind {
+	case RuleChoice:
+		return len(r.Children) >= 2
+	case RuleField, RuleAlias, RulePrec, RulePrecLeft, RulePrecRight, RulePrecDynamic:
+		if len(r.Children) > 0 {
+			return isLiftableChoice(r.Children[0])
+		}
+	}
+	return false
 }
 
 func ensureRepeatAuxLinear(parentName string, inner *Rule, st *symbolTable, auxRules map[string]*Rule, counter *int) string {
