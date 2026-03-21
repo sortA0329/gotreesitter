@@ -4,12 +4,15 @@ set -euo pipefail
 # Seed a local grammar parity root with pinned repos from grammars/languages.lock.
 #
 # Default focus:
-#   fortran,javascript,typescript,c,cobol
+#   javascript,typescript,tsx,c,c_sharp,cobol
+#   cpp stays opt-in for now: direct grammargen-vs-C generation still times out
+#   beyond the bounded default container budget.
 #
 # Examples:
 #   cgo_harness/seed_parity_repos.sh
 #   cgo_harness/seed_parity_repos.sh --dest .parity_seed
-#   cgo_harness/seed_parity_repos.sh --langs javascript,typescript,c
+#   cgo_harness/seed_parity_repos.sh --langs javascript,typescript,tsx,c,c_sharp,cobol
+#   cgo_harness/seed_parity_repos.sh --langs cpp  # opt-in quarantine
 #
 # This script is intentionally narrow and clone-safe: it only hydrates the
 # requested grammar repos at the exact pinned commit, so focused parity work
@@ -20,7 +23,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOCK_FILE="$REPO_ROOT/grammars/languages.lock"
 
 DEST_DIR="/tmp/grammar_parity"
-LANGS="fortran,javascript,typescript,c,cobol"
+LANGS="javascript,typescript,tsx,c,c_sharp,cobol"
 
 usage() {
   cat <<'EOF'
@@ -30,7 +33,7 @@ Options:
   --dest DIR      Destination root for seeded grammar repos
                   (default: /tmp/grammar_parity)
   --langs LIST    Comma-separated grammar names
-                  (default: fortran,javascript,typescript,c,cobol)
+                  (default: javascript,typescript,tsx,c,c_sharp,cobol)
   -h, --help      Show this help
 EOF
 }

@@ -46,7 +46,9 @@ func (JavaScriptExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalL
 		return jsScanTemplateChars(lexer)
 	}
 
-	if jsValid(validSymbols, jsTokJsxText) {
+	preferAutoSemicolon := jsPreferAutoSemicolonOverJsxText(lexer, validSymbols)
+
+	if jsValid(validSymbols, jsTokJsxText) && !preferAutoSemicolon {
 		if jsScanJsxText(lexer) {
 			return true
 		}
@@ -58,7 +60,14 @@ func (JavaScriptExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalL
 		if !ret && !scannedComment && jsValid(validSymbols, jsTokTernaryQmark) && lexer.Lookahead() == '?' {
 			return jsScanTernaryQmark(lexer)
 		}
+		if !ret && !scannedComment && preferAutoSemicolon && jsValid(validSymbols, jsTokJsxText) {
+			return jsScanJsxText(lexer)
+		}
 		return ret
+	}
+
+	if jsValid(validSymbols, jsTokJsxText) && preferAutoSemicolon {
+		return jsScanJsxText(lexer)
 	}
 
 	if jsValid(validSymbols, jsTokTernaryQmark) {
@@ -109,16 +118,33 @@ func jsScanAutoSemicolon(lexer *gotreesitter.ExternalLexer, validSymbols []bool,
 			return true
 		}
 		if ch == '}' {
-			for {
+			lexer.Advance(true)
+			for unicode.IsSpace(lexer.Lookahead()) {
 				lexer.Advance(true)
-				if !unicode.IsSpace(lexer.Lookahead()) {
-					break
+			}
+			switch lexer.Lookahead() {
+			case ':':
+				return jsValid(validSymbols, jsTokLogicalOr)
+			default:
+				if jsValid(validSymbols, jsTokJsxText) {
+					return false
+				}
+				if jsLooksLikeJSXAttributeContinuation(lexer) {
+					return false
 				}
 			}
-			if lexer.Lookahead() == ':' {
-				return jsValid(validSymbols, jsTokLogicalOr)
+			switch lexer.Lookahead() {
+			case '>':
+				return false
+			case '/':
+				lexer.Advance(true)
+				return lexer.Lookahead() != '>'
+			case '<':
+				lexer.Advance(true)
+				return lexer.Lookahead() != '/'
+			default:
+				return true
 			}
-			return true
 		}
 		if !unicode.IsSpace(ch) {
 			return false
@@ -287,9 +313,39 @@ func jsScanClosingComment(lexer *gotreesitter.ExternalLexer) bool {
 func jsScanJsxText(lexer *gotreesitter.ExternalLexer) bool {
 	sawText := false
 	atNewline := false
+	onlyWhitespace := true
 
 	for lexer.Lookahead() != 0 && lexer.Lookahead() != '<' && lexer.Lookahead() != '>' &&
 		lexer.Lookahead() != '{' && lexer.Lookahead() != '}' && lexer.Lookahead() != '&' {
+		if lexer.Lookahead() == '/' && onlyWhitespace {
+			lexer.Advance(false)
+			if lexer.Lookahead() == '>' {
+				return false
+			}
+			sawText = true
+			onlyWhitespace = false
+			continue
+		}
+		if onlyWhitespace && (lexer.Lookahead() == '_' || unicode.IsLetter(lexer.Lookahead())) {
+			for {
+				lexer.Advance(false)
+				ch := lexer.Lookahead()
+				if ch == '_' || ch == '-' || ch == ':' || ch == '.' ||
+					unicode.IsLetter(ch) || unicode.IsDigit(ch) {
+					continue
+				}
+				break
+			}
+			for unicode.IsSpace(lexer.Lookahead()) {
+				lexer.Advance(false)
+			}
+			if lexer.Lookahead() == '=' {
+				return false
+			}
+			sawText = true
+			onlyWhitespace = false
+			continue
+		}
 		isWS := unicode.IsSpace(lexer.Lookahead())
 		if lexer.Lookahead() == '\n' {
 			atNewline = true
@@ -298,6 +354,9 @@ func jsScanJsxText(lexer *gotreesitter.ExternalLexer) bool {
 			if !atNewline {
 				sawText = true
 			}
+		}
+		if !isWS {
+			onlyWhitespace = false
 		}
 		lexer.Advance(false)
 	}
@@ -308,3 +367,36 @@ func jsScanJsxText(lexer *gotreesitter.ExternalLexer) bool {
 }
 
 func jsValid(vs []bool, i int) bool { return i < len(vs) && vs[i] }
+
+func jsLooksLikeJSXAttributeContinuation(lexer *gotreesitter.ExternalLexer) bool {
+	ch := lexer.Lookahead()
+	if ch != '_' && !unicode.IsLetter(ch) {
+		return false
+	}
+	for {
+		lexer.Advance(true)
+		ch = lexer.Lookahead()
+		if ch == '_' || ch == '-' || ch == ':' || ch == '.' ||
+			unicode.IsLetter(ch) || unicode.IsDigit(ch) {
+			continue
+		}
+		break
+	}
+	for unicode.IsSpace(ch) {
+		lexer.Advance(true)
+		ch = lexer.Lookahead()
+	}
+	return ch == '=' || ch == '/' || ch == '>'
+}
+
+func jsPreferAutoSemicolonOverJsxText(lexer *gotreesitter.ExternalLexer, validSymbols []bool) bool {
+	if !jsValid(validSymbols, jsTokAutoSemicolon) || !jsValid(validSymbols, jsTokJsxText) {
+		return false
+	}
+	switch lexer.Lookahead() {
+	case 0, '\n', '\r', 0x2028, 0x2029:
+		return true
+	default:
+		return false
+	}
+}

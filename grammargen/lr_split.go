@@ -180,6 +180,7 @@ func localLR1Rebuild(
 								kind:    lrShift,
 								state:   target,
 								prec:    prod.Prec,
+								hasPrec: prod.HasExplicitPrec,
 								assoc:   prod.Assoc,
 								lhsSym:  prod.LHS,
 								isExtra: prod.IsExtra,

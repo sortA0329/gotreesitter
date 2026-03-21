@@ -2382,6 +2382,100 @@ func TestNormalizeDModuleDefinitionBoundsSnapToStructuralChildren(t *testing.T) 
 	}
 }
 
+func TestNormalizeTypeScriptRecoveredNamespaceRootRewrapsNamespaceBody(t *testing.T) {
+	lang := &Language{
+		Name:        "typescript",
+		SymbolNames: []string{"EOF", "ERROR", "program", "comment", "namespace", "identifier", "{", "enum_declaration", "statement_block", "internal_module", "expression_statement"},
+		SymbolMetadata: []SymbolMetadata{
+			{Name: "EOF", Visible: false, Named: false},
+			{Name: "ERROR", Visible: true, Named: true},
+			{Name: "program", Visible: true, Named: true},
+			{Name: "comment", Visible: true, Named: true},
+			{Name: "namespace", Visible: true, Named: false},
+			{Name: "identifier", Visible: true, Named: true},
+			{Name: "{", Visible: true, Named: false},
+			{Name: "enum_declaration", Visible: true, Named: true},
+			{Name: "statement_block", Visible: true, Named: true},
+			{Name: "internal_module", Visible: true, Named: true},
+			{Name: "expression_statement", Visible: true, Named: true},
+		},
+	}
+
+	arena := newNodeArena(arenaClassFull)
+	source := []byte("// c\nnamespace ts {\n  enum X\n\n")
+	comment := newLeafNodeInArena(arena, 3, true, 0, 4, Point{}, Point{Column: 4})
+	namespaceTok := newLeafNodeInArena(arena, 4, false, 5, 14, Point{Row: 1}, Point{Row: 1, Column: 9})
+	name := newLeafNodeInArena(arena, 5, true, 15, 17, Point{Row: 1, Column: 10}, Point{Row: 1, Column: 12})
+	openBrace := newLeafNodeInArena(arena, 6, false, 18, 19, Point{Row: 1, Column: 13}, Point{Row: 1, Column: 14})
+	enumDecl := newLeafNodeInArena(arena, 7, true, 22, 28, Point{Row: 2, Column: 2}, Point{Row: 2, Column: 8})
+	wsErr := newLeafNodeInArena(arena, 1, true, 28, 30, Point{Row: 2, Column: 8}, Point{Row: 4})
+	wsErr.hasError = true
+	root := newParentNodeInArena(arena, 1, true, []*Node{comment, namespaceTok, name, openBrace, enumDecl, wsErr}, nil, 0)
+	root.hasError = true
+
+	normalizeTypeScriptRecoveredNamespaceRoot(root, source, lang)
+
+	if got, want := root.Type(lang), "program"; got != want {
+		t.Fatalf("root.Type = %q, want %q", got, want)
+	}
+	if got, want := root.ChildCount(), 2; got != want {
+		t.Fatalf("root.ChildCount = %d, want %d", got, want)
+	}
+	expr := root.Child(1)
+	if got, want := expr.Type(lang), "expression_statement"; got != want {
+		t.Fatalf("expr.Type = %q, want %q", got, want)
+	}
+	mod := expr.Child(0)
+	if got, want := mod.Type(lang), "internal_module"; got != want {
+		t.Fatalf("module.Type = %q, want %q", got, want)
+	}
+	block := mod.Child(1)
+	if got, want := block.Type(lang), "statement_block"; got != want {
+		t.Fatalf("block.Type = %q, want %q", got, want)
+	}
+	if got, want := block.ChildCount(), 1; got != want {
+		t.Fatalf("block.ChildCount = %d, want %d", got, want)
+	}
+	if got, want := block.Child(0).Type(lang), "enum_declaration"; got != want {
+		t.Fatalf("block.Child(0).Type = %q, want %q", got, want)
+	}
+	if root.HasError() {
+		t.Fatal("root.HasError = true, want false")
+	}
+}
+
+func TestNormalizeKnownSpanAttributionDispatchesUppercaseCobol(t *testing.T) {
+	lang := &Language{
+		Name:        "COBOL",
+		SymbolNames: []string{"EOF", "start", "program_definition", "identification_division"},
+		SymbolMetadata: []SymbolMetadata{
+			{Name: "EOF", Visible: false, Named: false},
+			{Name: "start", Visible: true, Named: true},
+			{Name: "program_definition", Visible: true, Named: true},
+			{Name: "identification_division", Visible: true, Named: true},
+		},
+	}
+
+	source := []byte("       identification division.\n")
+	arena := newNodeArena(arenaClassFull)
+	div := newLeafNodeInArena(arena, 3, true, 0, uint32(len(source)-1), Point{}, Point{Column: uint32(len(source) - 1)})
+	def := newParentNodeInArena(arena, 2, true, []*Node{div}, nil, 0)
+	def.startByte = 0
+	def.endByte = uint32(len(source) - 1)
+	root := newParentNodeInArena(arena, 1, true, []*Node{def}, nil, 0)
+	root.startByte = 0
+	root.endByte = uint32(len(source))
+
+	normalizeKnownSpanAttribution(root, source, &Parser{language: lang})
+
+	if got, want := root.StartByte(), uint32(7); got != want {
+		t.Fatalf("root.StartByte = %d, want %d", got, want)
+	}
+	if got, want := root.Child(0).StartByte(), uint32(7); got != want {
+		t.Fatalf("program_definition.StartByte = %d, want %d", got, want)
+	}
+}
+
 func TestNormalizeHCLConfigFileRootDropsTopLevelWhitespace(t *testing.T) {
 	lang := &Language{
 		Name:        "hcl",

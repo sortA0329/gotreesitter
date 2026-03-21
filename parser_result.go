@@ -513,7 +513,7 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, p *Parser) {
 		normalizeCSharpSwitchTupleCasePatterns(root, lang)
 	case "caddy":
 		normalizeTopLevelTrailingLineBreakSpan(root, source, lang)
-	case "cobol":
+	case "cobol", "COBOL":
 		normalizeCobolLeadingAreaStart(root, source, lang)
 		normalizeCobolTopLevelDefinitionEnd(root, source, lang)
 	case "comment":
@@ -612,6 +612,7 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, p *Parser) {
 	case "svelte":
 		normalizeSvelteTrailingExtraTrivia(root, source, lang)
 	case "tsx", "typescript":
+		normalizeTypeScriptRecoveredNamespaceRoot(root, source, lang)
 		normalizeTypeScriptCompatibility(root, source, lang)
 	case "zig":
 		normalizeZigEmptyInitListFields(root, lang)
@@ -3976,7 +3977,7 @@ func firstNonWhitespaceByte(source []byte) uint32 {
 }
 
 func normalizeCobolLeadingAreaStart(root *Node, source []byte, lang *Language) {
-	if root == nil || lang == nil || lang.Name != "cobol" || len(source) == 0 {
+	if root == nil || lang == nil || (lang.Name != "cobol" && lang.Name != "COBOL") || len(source) == 0 {
 		return
 	}
 	start := firstNonWhitespaceByte(source)
@@ -4011,7 +4012,7 @@ func normalizeCobolLeadingAreaStart(root *Node, source []byte, lang *Language) {
 }
 
 func normalizeCobolTopLevelDefinitionEnd(root *Node, source []byte, lang *Language) {
-	if root == nil || lang == nil || lang.Name != "cobol" || root.Type(lang) != "start" || len(root.children) != 1 {
+	if root == nil || lang == nil || (lang.Name != "cobol" && lang.Name != "COBOL") || root.Type(lang) != "start" || len(root.children) != 1 {
 		return
 	}
 	def := root.children[0]
@@ -4879,6 +4880,143 @@ func normalizeTypeScriptCompatibility(root *Node, source []byte, lang *Language)
 		}
 	}
 	walk(root)
+}
+
+func normalizeTypeScriptRecoveredNamespaceRoot(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || len(root.children) < 4 {
+		return
+	}
+	if lang.Name != "tsx" && lang.Name != "typescript" {
+		return
+	}
+	rootType := root.Type(lang)
+	if rootType != "ERROR" && rootType != "program" {
+		return
+	}
+	stmtBlockSym, ok := lang.SymbolByName("statement_block")
+	if !ok {
+		return
+	}
+	internalModuleSym, ok := lang.SymbolByName("internal_module")
+	if !ok {
+		return
+	}
+	exprStmtSym, hasExprStmtSym := lang.SymbolByName("expression_statement")
+	programSym, hasProgramSym := lang.SymbolByName("program")
+
+	namespaceIdx := -1
+	for i, child := range root.children {
+		if child == nil || child.isExtra {
+			continue
+		}
+		if child.Type(lang) != "namespace" {
+			if child.Type(lang) != "comment" {
+				return
+			}
+			continue
+		}
+		namespaceIdx = i
+		break
+	}
+	if namespaceIdx < 0 || namespaceIdx+2 >= len(root.children) {
+		return
+	}
+	nameNode := root.children[namespaceIdx+1]
+	openBrace := root.children[namespaceIdx+2]
+	if nameNode == nil || openBrace == nil || nameNode.Type(lang) != "identifier" || openBrace.Type(lang) != "{" {
+		return
+	}
+
+	bodyChildren := make([]*Node, 0, len(root.children)-(namespaceIdx+3))
+	for i := namespaceIdx + 3; i < len(root.children); i++ {
+		child := root.children[i]
+		if child == nil {
+			continue
+		}
+		if typeScriptWhitespaceOnlyRecoverySubtree(child, source) {
+			continue
+		}
+		bodyChildren = append(bodyChildren, child)
+	}
+	if len(bodyChildren) == 0 {
+		return
+	}
+	if root.ownerArena != nil {
+		buf := root.ownerArena.allocNodeSlice(len(bodyChildren))
+		copy(buf, bodyChildren)
+		bodyChildren = buf
+	}
+
+	stmtBlockNamed := int(stmtBlockSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[stmtBlockSym].Named
+	internalModuleNamed := int(internalModuleSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[internalModuleSym].Named
+	block := newParentNodeInArena(root.ownerArena, stmtBlockSym, stmtBlockNamed, bodyChildren, nil, 0)
+	block.startByte = openBrace.startByte
+	block.startPoint = openBrace.startPoint
+	if len(bodyChildren) > 0 {
+		last := bodyChildren[len(bodyChildren)-1]
+		block.endByte = last.endByte
+		block.endPoint = last.endPoint
+	}
+
+	moduleChildren := []*Node{nameNode, block}
+	if root.ownerArena != nil {
+		buf := root.ownerArena.allocNodeSlice(len(moduleChildren))
+		copy(buf, moduleChildren)
+		moduleChildren = buf
+	}
+	internalModule := newParentNodeInArena(root.ownerArena, internalModuleSym, internalModuleNamed, moduleChildren, nil, 0)
+	internalModule.startByte = root.children[namespaceIdx].startByte
+	internalModule.startPoint = root.children[namespaceIdx].startPoint
+	internalModule.endByte = block.endByte
+	internalModule.endPoint = block.endPoint
+
+	wrapped := internalModule
+	if hasExprStmtSym {
+		exprStmtNamed := int(exprStmtSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[exprStmtSym].Named
+		exprChildren := []*Node{internalModule}
+		if root.ownerArena != nil {
+			buf := root.ownerArena.allocNodeSlice(1)
+			buf[0] = internalModule
+			exprChildren = buf
+		}
+		exprStmt := newParentNodeInArena(root.ownerArena, exprStmtSym, exprStmtNamed, exprChildren, nil, 0)
+		exprStmt.startByte = internalModule.startByte
+		exprStmt.startPoint = internalModule.startPoint
+		exprStmt.endByte = internalModule.endByte
+		exprStmt.endPoint = internalModule.endPoint
+		wrapped = exprStmt
+	}
+
+	newChildren := make([]*Node, 0, namespaceIdx+1)
+	for i := 0; i < namespaceIdx; i++ {
+		if root.children[i] != nil {
+			newChildren = append(newChildren, root.children[i])
+		}
+	}
+	newChildren = append(newChildren, wrapped)
+	if root.ownerArena != nil {
+		buf := root.ownerArena.allocNodeSlice(len(newChildren))
+		copy(buf, newChildren)
+		newChildren = buf
+	}
+	root.children = newChildren
+	root.fieldIDs = nil
+	root.fieldSources = nil
+	if hasProgramSym {
+		root.symbol = programSym
+		root.isNamed = int(programSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[programSym].Named
+	}
+	populateParentNode(root, root.children)
+}
+
+func typeScriptWhitespaceOnlyRecoverySubtree(node *Node, source []byte) bool {
+	if node == nil || (!node.HasError() && node.symbol != errorSymbol) {
+		return false
+	}
+	if int(node.endByte) > len(source) || node.startByte > node.endByte {
+		return false
+	}
+	return bytesAreTrivia(source[node.startByte:node.endByte])
 }
 
 func newTypeScriptNormalizationContext(source []byte, lang *Language) (typeScriptNormalizationContext, bool) {

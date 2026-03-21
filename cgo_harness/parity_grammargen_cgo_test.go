@@ -99,7 +99,15 @@ var grammargenCGOGrammars = []grammargenCGOGrammar{
 	{name: "scala", jsPath: "/tmp/grammar_parity/scala/grammar.js", blobFunc: grammars.ScalaLanguage, genTimeout: 45 * time.Second},
 	{name: "gomod", jsonPath: "/tmp/grammar_parity/gomod/src/grammar.json", blobFunc: grammars.GomodLanguage},
 	{name: "go", jsonPath: "/tmp/grammar_parity/go/src/grammar.json", blobFunc: grammars.GoLanguage, genTimeout: 45 * time.Second},
+	{name: "javascript", jsonPath: "/tmp/grammar_parity/javascript/src/grammar.json", blobFunc: grammars.JavascriptLanguage, genTimeout: 90 * time.Second},
+	{name: "typescript", jsonPath: "/tmp/grammar_parity/typescript/typescript/src/grammar.json", blobFunc: grammars.TypescriptLanguage, genTimeout: 180 * time.Second},
+	{name: "tsx", jsonPath: "/tmp/grammar_parity/typescript/tsx/src/grammar.json", blobFunc: grammars.TsxLanguage, genTimeout: 180 * time.Second},
 	{name: "c", jsonPath: "/tmp/grammar_parity/c/src/grammar.json", blobFunc: grammars.CLanguage, genTimeout: 60 * time.Second},
+	// Keep cpp opt-in for direct grammargen-vs-C runs until generation fits the
+	// bounded high-value container budget; default ratchets skip seeding it.
+	{name: "cpp", jsonPath: "/tmp/grammar_parity/cpp/src/grammar.json", blobFunc: grammars.CppLanguage, genTimeout: 300 * time.Second},
+	{name: "c_sharp", jsonPath: "/tmp/grammar_parity/c_sharp/src/grammar.json", blobFunc: grammars.CSharpLanguage, genTimeout: 90 * time.Second},
+	{name: "cobol", jsonPath: "/tmp/grammar_parity/cobol/src/grammar.json", blobFunc: grammars.CobolLanguage, genTimeout: 60 * time.Second},
 	// ── Languages without prior C oracle ──
 	{name: "csv", jsonPath: "/tmp/grammar_parity/csv/csv/src/grammar.json", blobFunc: grammars.CsvLanguage},
 	{name: "diff", jsonPath: "/tmp/grammar_parity/diff/src/grammar.json", blobFunc: grammars.DiffLanguage},

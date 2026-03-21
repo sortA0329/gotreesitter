@@ -86,6 +86,7 @@ type lrAction struct {
 	state   int   // shift target / goto target
 	prodIdx int   // reduce production index
 	prec    int   // for shift: precedence of the item's production
+	hasPrec bool  // production had an explicit compile-time precedence wrapper
 	assoc   Assoc // for shift: associativity of the item's production
 	lhsSym  int   // LHS nonterminal of the production (for conflict detection)
 	lhsSyms []int // additional LHS symbols (when shifts from multiple rules merge)
@@ -432,6 +433,7 @@ func buildLRTablesInternal(bgCtx context.Context, ng *NormalizedGrammar, trackPr
 						kind:    lrShift,
 						state:   targetState,
 						prec:    shiftPrec,
+						hasPrec: prod.HasExplicitPrec,
 						assoc:   shiftAssoc,
 						lhsSym:  prod.LHS,
 						isExtra: prod.IsExtra,
@@ -452,6 +454,9 @@ func buildLRTablesInternal(bgCtx context.Context, ng *NormalizedGrammar, trackPr
 						tables.addAction(stateIdx, la, lrAction{
 							kind:    lrReduce,
 							prodIdx: ce.prodIdx,
+							prec:    prod.Prec,
+							hasPrec: prod.HasExplicitPrec,
+							assoc:   prod.Assoc,
 							lhsSym:  prod.LHS,
 							isExtra: prod.IsExtra,
 						})
@@ -497,6 +502,7 @@ func propagateEntryShiftMetadata(tables *LRTables, itemSets []lrItemSet, ctx *lr
 						kind:    lrShift,
 						state:   act.state,
 						prec:    prod.Prec,
+						hasPrec: prod.HasExplicitPrec,
 						assoc:   prod.Assoc,
 						lhsSym:  prod.LHS,
 						isExtra: prod.IsExtra,
@@ -948,6 +954,9 @@ func (b *extraChainBuilder) addProdContinuation(stateIdx, prodIdx, pos int, foll
 			b.tables.addAction(stateIdx, la, lrAction{
 				kind:    lrReduce,
 				prodIdx: prodIdx,
+				prec:    prod.Prec,
+				hasPrec: prod.HasExplicitPrec,
+				assoc:   prod.Assoc,
 				lhsSym:  prod.LHS,
 				isExtra: prod.IsExtra,
 			})
@@ -962,6 +971,7 @@ func (b *extraChainBuilder) addProdContinuation(stateIdx, prodIdx, pos int, foll
 			kind:    lrShift,
 			state:   targetState,
 			prec:    prod.Prec,
+			hasPrec: prod.HasExplicitPrec,
 			assoc:   prod.Assoc,
 			lhsSym:  prod.LHS,
 			isExtra: false,
@@ -998,6 +1008,9 @@ func (b *extraChainBuilder) addNonterminalEntries(stateIdx, sym int, follow bits
 				b.tables.addAction(stateIdx, la, lrAction{
 					kind:    lrReduce,
 					prodIdx: prodIdx,
+					prec:    prod.Prec,
+					hasPrec: prod.HasExplicitPrec,
+					assoc:   prod.Assoc,
 					lhsSym:  prod.LHS,
 					isExtra: prod.IsExtra,
 				})
@@ -1012,6 +1025,7 @@ func (b *extraChainBuilder) addNonterminalEntries(stateIdx, sym int, follow bits
 				kind:    lrShift,
 				state:   targetState,
 				prec:    prod.Prec,
+				hasPrec: prod.HasExplicitPrec,
 				assoc:   prod.Assoc,
 				lhsSym:  prod.LHS,
 				isExtra: false,
@@ -2472,6 +2486,8 @@ func resolveActionConflict(lookaheadSym int, actions []lrAction, ng *NormalizedG
 
 		shiftPrec := shift.prec
 		reducePrec := prod.Prec
+		shiftHasPrec := shift.hasPrec || shift.assoc != AssocNone
+		reduceHasPrec := prod.HasExplicitPrec || prod.Assoc != AssocNone
 
 		// Consult the precedences table for SYMBOL-level ordering.
 		// Only apply when:
@@ -2501,6 +2517,23 @@ func resolveActionConflict(lookaheadSym int, actions []lrAction, ng *NormalizedG
 			if cmp < 0 {
 				return []lrAction{reduce}, nil
 			}
+		}
+		shiftLHSName := ""
+		if shift.lhsSym >= 0 && shift.lhsSym < len(ng.Symbols) {
+			shiftLHSName = ng.Symbols[shift.lhsSym].Name
+		}
+		lookaheadName := ""
+		if lookaheadSym >= 0 && lookaheadSym < len(ng.Symbols) {
+			lookaheadName = ng.Symbols[lookaheadSym].Name
+		}
+		// C-style assignment/comma conflicts need one extra distinction that the
+		// raw integer precedence cannot encode: an explicit negative shift prec
+		// on assignment_expression should not lose to an implicit default-zero
+		// reduce when the lookahead is "=". Keep this targeted so unrelated
+		// negative-precedence conflicts still use the normal resolver path.
+		if shiftLHSName == "assignment_expression" && lookaheadName == "=" &&
+			shiftHasPrec && shiftPrec < 0 && reducePrec == 0 && !reduceHasPrec {
+			return []lrAction{shift}, nil
 		}
 		// Apply precedence/associativity resolution when either side has a
 		// non-zero precedence OR the production declares explicit associativity.
@@ -2674,13 +2707,27 @@ func rrPickBest(reduces []lrAction, ng *NormalizedGrammar) []lrAction {
 			bestProd = rProd
 		} else if rProd.Prec == bestProd.Prec {
 			// Tree-sitter uses dynamic precedence as the next tiebreaker,
+			// then explicit compile-time precedence/associativity metadata,
 			// then falls back to production index (earlier declaration wins).
+			// This matters for cases like TypeScript type_query, where
+			// prec.right(0, ...) should outrank an implicit default-zero
+			// primary_expression reduce even though both numeric prec values
+			// are 0.
 			if rProd.DynPrec > bestProd.DynPrec {
 				best = r
 				bestProd = rProd
-			} else if rProd.DynPrec == bestProd.DynPrec && r.prodIdx < best.prodIdx {
-				best = r
-				bestProd = rProd
+			} else if rProd.DynPrec == bestProd.DynPrec {
+				rExplicit := rProd.HasExplicitPrec || rProd.Assoc != AssocNone
+				bestExplicit := bestProd.HasExplicitPrec || bestProd.Assoc != AssocNone
+				if rExplicit != bestExplicit {
+					if rExplicit {
+						best = r
+						bestProd = rProd
+					}
+				} else if r.prodIdx < best.prodIdx {
+					best = r
+					bestProd = rProd
+				}
 			}
 		}
 	}

@@ -49,7 +49,9 @@ func (TsxExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, v
 		return tsxScanTemplateChars(lexer)
 	}
 
-	if tsxValid(validSymbols, tsxTokJsxText) {
+	preferAutoSemicolon := tsxPreferAutoSemicolonOverJsxText(lexer, validSymbols)
+
+	if tsxValid(validSymbols, tsxTokJsxText) && !preferAutoSemicolon {
 		if tsxScanJsxText(lexer) {
 			return true
 		}
@@ -61,7 +63,14 @@ func (TsxExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, v
 		if !ret && !scannedComment && tsxValid(validSymbols, tsxTokTernaryQmark) && lexer.Lookahead() == '?' {
 			return tsxScanTernaryQmark(lexer)
 		}
+		if !ret && !scannedComment && preferAutoSemicolon && tsxValid(validSymbols, tsxTokJsxText) {
+			return tsxScanJsxText(lexer)
+		}
 		return ret
+	}
+
+	if tsxValid(validSymbols, tsxTokJsxText) && preferAutoSemicolon {
+		return tsxScanJsxText(lexer)
 	}
 
 	if tsxValid(validSymbols, tsxTokTernaryQmark) {
@@ -112,6 +121,9 @@ func tsxScanAutoSemicolon(lexer *gotreesitter.ExternalLexer, validSymbols []bool
 			return true
 		}
 		if ch == '}' {
+			if tsxValid(validSymbols, tsxTokJsxText) {
+				return false
+			}
 			// Do not consume `}` while producing ASI; swallowing it truncates
 			// surrounding blocks and can force premature error-accept paths.
 			return true
@@ -285,9 +297,39 @@ func tsxScanClosingComment(lexer *gotreesitter.ExternalLexer) bool {
 func tsxScanJsxText(lexer *gotreesitter.ExternalLexer) bool {
 	sawText := false
 	atNewline := false
+	onlyWhitespace := true
 
 	for lexer.Lookahead() != 0 && lexer.Lookahead() != '<' && lexer.Lookahead() != '>' &&
 		lexer.Lookahead() != '{' && lexer.Lookahead() != '}' && lexer.Lookahead() != '&' {
+		if lexer.Lookahead() == '/' && onlyWhitespace {
+			lexer.Advance(false)
+			if lexer.Lookahead() == '>' {
+				return false
+			}
+			sawText = true
+			onlyWhitespace = false
+			continue
+		}
+		if onlyWhitespace && (lexer.Lookahead() == '_' || unicode.IsLetter(lexer.Lookahead())) {
+			for {
+				lexer.Advance(false)
+				ch := lexer.Lookahead()
+				if ch == '_' || ch == '-' || ch == ':' || ch == '.' ||
+					unicode.IsLetter(ch) || unicode.IsDigit(ch) {
+					continue
+				}
+				break
+			}
+			for unicode.IsSpace(lexer.Lookahead()) {
+				lexer.Advance(false)
+			}
+			if lexer.Lookahead() == '=' {
+				return false
+			}
+			sawText = true
+			onlyWhitespace = false
+			continue
+		}
 		isWS := unicode.IsSpace(lexer.Lookahead())
 		if lexer.Lookahead() == '\n' {
 			atNewline = true
@@ -296,6 +338,9 @@ func tsxScanJsxText(lexer *gotreesitter.ExternalLexer) bool {
 			if !atNewline {
 				sawText = true
 			}
+		}
+		if !isWS {
+			onlyWhitespace = false
 		}
 		lexer.Advance(false)
 	}
@@ -306,3 +351,15 @@ func tsxScanJsxText(lexer *gotreesitter.ExternalLexer) bool {
 }
 
 func tsxValid(vs []bool, i int) bool { return i < len(vs) && vs[i] }
+
+func tsxPreferAutoSemicolonOverJsxText(lexer *gotreesitter.ExternalLexer, validSymbols []bool) bool {
+	if !tsxValid(validSymbols, tsxTokAutoSemicolon) || !tsxValid(validSymbols, tsxTokJsxText) {
+		return false
+	}
+	switch lexer.Lookahead() {
+	case 0, '\n', '\r', 0x2028, 0x2029:
+		return true
+	default:
+		return false
+	}
+}
