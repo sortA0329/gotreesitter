@@ -33,6 +33,58 @@ func TestTypeScriptCorpusSnippetParity(t *testing.T) {
 			name: "member_generic_call_and_nested_type_args",
 			src:  "a.b<[C]>();\na<C.D[]>();\n",
 		},
+		{
+			name: "unary_call_precedence",
+			src:  "!isNodeKind(kind)\n",
+		},
+		{
+			name: "logical_and_call_precedence",
+			src:  "node && cbNode(node)\n",
+		},
+		{
+			name: "logical_or_between_calls",
+			src:  "visitNodes(cbNode, cbNodes, node.decorators) || visitNodes(cbNode, cbNodes, node.modifiers)\n",
+		},
+		{
+			name: "equality_vs_logical_or_precedence",
+			src:  "token() === SyntaxKind.CloseBraceToken || token() === SyntaxKind.EndOfFileToken\n",
+		},
+		{
+			name: "logical_or_chain_with_equalities",
+			src:  "tokenIsIdentifierOrKeyword(token()) || token() === SyntaxKind.StringLiteral || token() === SyntaxKind.NumericLiteral\n",
+		},
+		{
+			name: "unary_vs_logical_and_precedence",
+			src:  "!noConditionalTypes && !scanner.hasPrecedingLineBreak()\n",
+		},
+		{
+			name: "parenthesized_unary_vs_logical_and_precedence",
+			src:  "!(token() === SyntaxKind.SemicolonToken && inErrorRecovery) && isStartOfStatement()\n",
+		},
+		{
+			name: "assignment_rhs_as_expression",
+			src:  "(result as Identifier).escapedText = \"\" as __String\n",
+		},
+		{
+			name: "assignment_rhs_call_as_expression",
+			src:  "unaryMinusExpression = createNode(SyntaxKind.PrefixUnaryExpression) as PrefixUnaryExpression\n",
+		},
+		{
+			name: "ternary_false_arm_as_expression",
+			src:  "token() === SyntaxKind.TrueKeyword || token() === SyntaxKind.FalseKeyword ? parseTokenNode<BooleanLiteral>() : parseLiteralLikeNode(token()) as LiteralExpression\n",
+		},
+		{
+			name: "as_union_type",
+			src:  "createNode(kind) as JSDocVariadicType | JSDocNonNullableType\n",
+		},
+		{
+			name: "as_union_type_chain",
+			src:  "createNode(kind, type.pos) as JSDocOptionalType | JSDocNonNullableType | JSDocNullableType\n",
+		},
+		{
+			name: "as_intersection_object_type",
+			src:  "createNode(SyntaxKind.ExpressionWithTypeArguments) as ExpressionWithTypeArguments & { expression: Identifier | PropertyAccessEntityNameExpression }\n",
+		},
 	}
 
 	for _, tt := range tests {
