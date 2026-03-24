@@ -559,6 +559,8 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, p *Parser) {
 	case "ini":
 		normalizeIniSectionStarts(root, lang)
 	case "javascript":
+		normalizeJavaScriptProgramStart(root, lang)
+		normalizeJavaScriptTypeScriptOptionalChainLeaves(root, lang)
 		normalizeJavaScriptTypeScriptCallPrecedence(root, lang)
 		normalizeJavaScriptTypeScriptUnaryPrecedence(root, lang)
 		normalizeJavaScriptTypeScriptBinaryPrecedence(root, lang)
@@ -616,6 +618,7 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, p *Parser) {
 	case "svelte":
 		normalizeSvelteTrailingExtraTrivia(root, source, lang)
 	case "tsx", "typescript":
+		normalizeJavaScriptTypeScriptOptionalChainLeaves(root, lang)
 		normalizeJavaScriptTypeScriptCallPrecedence(root, lang)
 		normalizeJavaScriptTypeScriptUnaryPrecedence(root, lang)
 		normalizeJavaScriptTypeScriptBinaryPrecedence(root, lang)
@@ -4665,6 +4668,18 @@ func normalizeJavaScriptTopLevelObjectLiterals(root *Node, lang *Language) {
 	}
 }
 
+func normalizeJavaScriptProgramStart(root *Node, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "javascript" || root.Type(lang) != "program" {
+		return
+	}
+	first, _ := firstAndLastNonNilChild(root.children)
+	if first == nil {
+		return
+	}
+	root.startByte = first.startByte
+	root.startPoint = first.startPoint
+}
+
 func normalizeRubyTopLevelModuleBounds(root *Node, source []byte, lang *Language) {
 	if root == nil || lang == nil || lang.Name != "ruby" || root.Type(lang) != "program" || len(source) == 0 {
 		return
@@ -4840,6 +4855,38 @@ func insertJavaScriptStatementBlockComment(parent *Node, childIdx int, comment *
 		}
 	}
 	populateParentNode(parent, parent.children)
+}
+
+func normalizeJavaScriptTypeScriptOptionalChainLeaves(root *Node, lang *Language) {
+	if root == nil || lang == nil {
+		return
+	}
+	switch lang.Name {
+	case "javascript", "typescript", "tsx":
+	default:
+		return
+	}
+
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type(lang) == "optional_chain" && len(n.children) == 1 {
+			child := n.children[0]
+			if child != nil && !child.IsNamed() && !child.IsExtra() &&
+				child.startByte == n.startByte && child.endByte == n.endByte &&
+				child.startPoint == n.startPoint && child.endPoint == n.endPoint {
+				n.children = nil
+				n.fieldIDs = nil
+				n.fieldSources = nil
+			}
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
 }
 
 func normalizeJavaScriptTypeScriptCallPrecedence(root *Node, lang *Language) {
