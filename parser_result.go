@@ -5133,8 +5133,8 @@ func rewriteTypeScriptPredefinedGenericCall(node *Node, ctx *typeScriptNormaliza
 	if callee == nil || lt == nil || typeArg == nil || lt.symbol != ctx.lessThanSym {
 		return nil
 	}
-	switch callee.symbol {
-	case ctx.identifierSym, ctx.memberExpressionSym:
+	switch callee.Type(ctx.lang) {
+	case "identifier", "member_expression":
 	default:
 		return nil
 	}
@@ -5194,14 +5194,14 @@ func normalizeTypeScriptGenericCallTypeArgument(node *Node, ctx *typeScriptNorma
 	if node == nil || ctx == nil || ctx.lang == nil {
 		return nil
 	}
-	switch node.symbol {
-	case ctx.predefinedTypeSym:
+	switch node.Type(ctx.lang) {
+	case "predefined_type":
 		return node
-	case ctx.typeIdentifierSym:
+	case "type_identifier":
 		if ctx.hasTypeIdentifierSym {
 			return node
 		}
-	case ctx.identifierSym:
+	case "identifier":
 		if typeKeywordSym, ok := typeScriptPredefinedTypeSymbol(ctx.lang, node.Text(ctx.source)); ok {
 			typeKeywordNamed := int(typeKeywordSym) < len(ctx.lang.SymbolMetadata) && ctx.lang.SymbolMetadata[typeKeywordSym].Named
 			typeLeaf := newLeafNodeInArena(node.ownerArena, typeKeywordSym, typeKeywordNamed, node.startByte, node.endByte, node.startPoint, node.endPoint)
