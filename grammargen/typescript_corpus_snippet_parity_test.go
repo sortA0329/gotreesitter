@@ -109,6 +109,10 @@ func TestTypeScriptCorpusSnippetParity(t *testing.T) {
 			name: "if_statement_set_computed_member_call",
 			src:  "if ( foo ) {\n\tset[ 1 ].apply()\n}\n",
 		},
+		{
+			name: "destructured_function_type_parameter",
+			src:  "let foo: ({a}: Foo) => number\n",
+		},
 	}
 
 	for _, tt := range tests {
@@ -164,6 +168,10 @@ func TestTSXCorpusSnippetParity(t *testing.T) {
 			name: "if_statement_set_computed_member_call",
 			src:  "if ( foo ) {\n\tset[ 1 ].apply()\n}\n",
 		},
+		{
+			name: "destructured_function_type_parameter",
+			src:  "let foo: ({a}: Foo) => number\n",
+		},
 	}
 
 	for _, tt := range tests {
@@ -187,6 +195,7 @@ func TestTypeScriptDirectCRegressionDeepParity(t *testing.T) {
 		{name: "async_arrow_identifier", src: "const x = async => async;\n"},
 		{name: "if_statement_set_computed_subscript", src: "if ( foo ) {\n\tset[ 1 ]\n}\n"},
 		{name: "if_statement_set_computed_member_call", src: "if ( foo ) {\n\tset[ 1 ].apply()\n}\n"},
+		{name: "destructured_function_type_parameter", src: "let foo: ({a}: Foo) => number\n"},
 	})
 }
 
@@ -204,6 +213,7 @@ func TestTSXDirectCRegressionDeepParity(t *testing.T) {
 		{name: "async_arrow_identifier", src: "const x = async => async;\n"},
 		{name: "if_statement_set_computed_subscript", src: "if ( foo ) {\n\tset[ 1 ]\n}\n"},
 		{name: "if_statement_set_computed_member_call", src: "if ( foo ) {\n\tset[ 1 ].apply()\n}\n"},
+		{name: "destructured_function_type_parameter", src: "let foo: ({a}: Foo) => number\n"},
 	})
 }
 
