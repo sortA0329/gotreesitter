@@ -143,6 +143,67 @@ func TestTSXShiftExpressionStillUsesRightShiftToken(t *testing.T) {
 	}
 }
 
+func TestTypeScriptShiftExpressionStillUsesRightShiftToken(t *testing.T) {
+	const src = "const x = foo >> bar\nconst y = foo>>bar\n"
+	tree, lang := parseByLanguageName(t, "typescript", src)
+	root := tree.RootNode()
+	if root.HasError() {
+		t.Fatalf("unexpected typescript parse error: %s", root.SExpr(lang))
+	}
+	for _, expr := range []string{"foo >> bar", "foo>>bar"} {
+		shift := firstNode(root, func(n *gotreesitter.Node) bool {
+			return n.Type(lang) == "binary_expression" && n.Text([]byte(src)) == expr
+		})
+		if shift == nil {
+			t.Fatalf("typescript shift expression missing binary_expression for %q: %s", expr, root.SExpr(lang))
+		}
+	}
+}
+
+func TestTypeScriptTypeAssertionOverTernaryParsesWithoutError(t *testing.T) {
+	const src = "namespace ts {\n    function createNodeArray<T extends Node>(elements: T[], pos: number, end?: number): NodeArray<T> {\n        const length = elements.length;\n        const array = <MutableNodeArray<T>>(length >= 1 && length <= 4 ? elements.slice() : elements);\n        return array;\n    }\n}\n"
+	tree, lang := parseByLanguageName(t, "typescript", src)
+	root := tree.RootNode()
+	if root.HasError() {
+		t.Fatalf("unexpected typescript parse error: %s", root.SExpr(lang))
+	}
+
+	typeAssertion := firstNode(root, func(n *gotreesitter.Node) bool {
+		return n.Type(lang) == "type_assertion" && n.Text([]byte(src)) == "<MutableNodeArray<T>>(length >= 1 && length <= 4 ? elements.slice() : elements)"
+	})
+	if typeAssertion == nil {
+		t.Fatalf("missing type_assertion for compact close angles: %s", root.SExpr(lang))
+	}
+	ternary := firstNode(typeAssertion, func(n *gotreesitter.Node) bool {
+		return n.Type(lang) == "ternary_expression"
+	})
+	if ternary == nil {
+		t.Fatalf("type_assertion missing ternary_expression payload: %s", typeAssertion.SExpr(lang))
+	}
+}
+
+func TestTypeScriptTypeAssertionOverCallExpressionParsesWithoutError(t *testing.T) {
+	const src = "namespace ts {\n    function parseNamedImportsOrExports(kind: SyntaxKind) {\n        const node = createNode(kind);\n        node.elements = <NodeArray<ImportSpecifier> | NodeArray<ExportSpecifier>>parseBracketedList(ParsingContext.ImportOrExportSpecifiers,\n            kind === SyntaxKind.NamedImports ? parseImportSpecifier : parseExportSpecifier,\n            SyntaxKind.OpenBraceToken, SyntaxKind.CloseBraceToken);\n        return finishNode(node);\n    }\n}\n"
+	tree, lang := parseByLanguageName(t, "typescript", src)
+	root := tree.RootNode()
+	if root.HasError() {
+		t.Fatalf("unexpected typescript parse error: %s", root.SExpr(lang))
+	}
+
+	typeAssertion := firstNode(root, func(n *gotreesitter.Node) bool {
+		return n.Type(lang) == "type_assertion" && n.Text([]byte(src)) == "<NodeArray<ImportSpecifier> | NodeArray<ExportSpecifier>>parseBracketedList(ParsingContext.ImportOrExportSpecifiers,\n            kind === SyntaxKind.NamedImports ? parseImportSpecifier : parseExportSpecifier,\n            SyntaxKind.OpenBraceToken, SyntaxKind.CloseBraceToken)"
+	})
+	if typeAssertion == nil {
+		t.Fatalf("missing type_assertion for compact close-angle call: %s", root.SExpr(lang))
+	}
+	call := firstNode(typeAssertion, func(n *gotreesitter.Node) bool {
+		return n.Type(lang) == "call_expression"
+	})
+	if call == nil {
+		t.Fatalf("type_assertion missing call_expression payload: %s", typeAssertion.SExpr(lang))
+	}
+}
+
 func TestTSXEnumAssignmentsDoNotInheritNameFieldFromEnumBody(t *testing.T) {
 	const src = "export enum MaterialsInputType {\n  ELEMENTS = 'elements',\n}\n"
 	tree, lang := parseByLanguageName(t, "tsx", src)

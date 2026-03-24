@@ -458,6 +458,9 @@ func (d *dfaTokenSource) normalizeDFAToken(tok Token, endPos int, endRow, endCol
 	if d == nil || d.language == nil || d.lexer == nil {
 		return tok, endPos, endRow, endCol
 	}
+	if splitTok, splitEndPos, splitEndRow, splitEndCol, ok := d.splitCompactCloseAngleToken(tok); ok {
+		return splitTok, splitEndPos, splitEndRow, splitEndCol
+	}
 	if d.language.Name != "bash" || tok.Symbol != 86 || tok.EndByte <= tok.StartByte+1 {
 		return tok, endPos, endRow, endCol
 	}
@@ -480,6 +483,192 @@ func (d *dfaTokenSource) normalizeDFAToken(tok Token, endPos int, endRow, endCol
 		tok.Text = tok.Text[:1]
 	}
 	return tok, start + 1, tok.StartPoint.Row + 1, 0
+}
+
+func (d *dfaTokenSource) splitCompactCloseAngleToken(tok Token) (Token, int, uint32, uint32, bool) {
+	if d == nil || d.language == nil || d.lookupActionIndex == nil {
+		return tok, 0, 0, 0, false
+	}
+	switch d.language.Name {
+	case "dart", "tsx", "typescript":
+	default:
+		return tok, 0, 0, 0, false
+	}
+	if d.symbolName(tok.Symbol) != ">>" {
+		return tok, 0, 0, 0, false
+	}
+
+	gtSym, ok := d.bestActiveSymbolByName(">")
+	if !ok {
+		return tok, 0, 0, 0, false
+	}
+	shiftSym, shiftOK := d.bestActiveSymbolByName(">>")
+	if !d.shouldSplitCompactCloseAngleToken(tok, gtSym, shiftSym, shiftOK) {
+		return tok, 0, 0, 0, false
+	}
+	if tok.EndByte != tok.StartByte+2 || tok.EndPoint.Row != tok.StartPoint.Row {
+		return tok, 0, 0, 0, false
+	}
+
+	tok.Symbol = gtSym
+	tok.EndByte = tok.StartByte + 1
+	tok.EndPoint = Point{Row: tok.StartPoint.Row, Column: tok.StartPoint.Column + 1}
+	if len(tok.Text) > 1 {
+		tok.Text = tok.Text[:1]
+	}
+	return tok, int(tok.EndByte), tok.EndPoint.Row, tok.EndPoint.Column, true
+}
+
+func (d *dfaTokenSource) shouldSplitCompactCloseAngleToken(tok Token, gtSym, shiftSym Symbol, shiftOK bool) bool {
+	if !shiftOK {
+		return true
+	}
+	gtSpec := d.activeActionSpecificity(gtSym)
+	shiftSpec := d.activeActionSpecificity(shiftSym)
+	if gtSpec > shiftSpec {
+		return true
+	}
+	if gtSpec < shiftSpec {
+		return false
+	}
+	next := d.nextNonSpaceByte(int(tok.EndByte))
+	switch next {
+	case 0, '(', ')', '[', ']', '{', '}', ',', '.', ';', ':', '?':
+		return true
+	default:
+		return isTypeScriptIdentifierStartByte(next) &&
+			d.sharesSameReduceOnlyActions(gtSym, shiftSym) &&
+			d.hasTypeAssertionStyleOpenerBefore(int(tok.StartByte))
+	}
+}
+
+func (d *dfaTokenSource) nextNonSpaceByte(pos int) byte {
+	if d == nil || d.lexer == nil {
+		return 0
+	}
+	for pos < len(d.lexer.source) {
+		switch d.lexer.source[pos] {
+		case ' ', '\t', '\n', '\r':
+			pos++
+			continue
+		default:
+			return d.lexer.source[pos]
+		}
+	}
+	return 0
+}
+
+func isTypeScriptIdentifierStartByte(ch byte) bool {
+	return ch == '_' || ch == '$' ||
+		(ch >= 'a' && ch <= 'z') ||
+		(ch >= 'A' && ch <= 'Z')
+}
+
+func (d *dfaTokenSource) hasTypeAssertionStyleOpenerBefore(pos int) bool {
+	if d == nil || d.lexer == nil || pos <= 0 {
+		return false
+	}
+	for i := pos - 1; i >= 0; i-- {
+		if isASCIIWhitespace(d.lexer.source[i]) {
+			continue
+		}
+		if d.lexer.source[i] != '<' {
+			continue
+		}
+		prev := d.prevNonSpaceByte(i - 1)
+		switch prev {
+		case 0, '\n', '=', '(', '[', '{', ':', ',', '?':
+			return true
+		default:
+			continue
+		}
+	}
+	return false
+}
+
+func (d *dfaTokenSource) prevNonSpaceByte(pos int) byte {
+	if d == nil || d.lexer == nil {
+		return 0
+	}
+	for pos >= 0 {
+		if !isASCIIWhitespace(d.lexer.source[pos]) {
+			return d.lexer.source[pos]
+		}
+		pos--
+	}
+	return 0
+}
+
+func isASCIIWhitespace(ch byte) bool {
+	switch ch {
+	case ' ', '\t', '\n', '\r':
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *dfaTokenSource) sharesSameReduceOnlyActions(a, b Symbol) bool {
+	if d == nil || d.language == nil || d.lookupActionIndex == nil || a == 0 || b == 0 {
+		return false
+	}
+	aIdx := d.lookupActionIndex(d.state, a)
+	bIdx := d.lookupActionIndex(d.state, b)
+	if aIdx == 0 || bIdx == 0 || aIdx != bIdx || int(aIdx) >= len(d.language.ParseActions) {
+		return false
+	}
+	actions := d.language.ParseActions[aIdx].Actions
+	if len(actions) == 0 {
+		return false
+	}
+	for _, act := range actions {
+		if act.Type != ParseActionReduce {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *dfaTokenSource) bestActiveSymbolByName(name string) (Symbol, bool) {
+	if d == nil || d.language == nil || d.lookupActionIndex == nil {
+		return 0, false
+	}
+	best := Symbol(0)
+	bestSpecificity := -1
+	bestVisible := false
+	found := false
+	for i := range d.language.SymbolNames {
+		sym := Symbol(i)
+		if d.symbolName(sym) != name || !d.hasAnyActionForSymbol(sym) {
+			continue
+		}
+		visible := false
+		if meta, ok := d.symbolMetadata(sym); ok {
+			visible = meta.Visible
+		}
+		specificity := d.activeActionSpecificity(sym)
+		if !found || specificity > bestSpecificity || (specificity == bestSpecificity && visible && !bestVisible) {
+			best = sym
+			bestSpecificity = specificity
+			bestVisible = visible
+			found = true
+		}
+	}
+	return best, found
+}
+
+func (d *dfaTokenSource) symbolName(sym Symbol) string {
+	if d == nil || d.language == nil {
+		return ""
+	}
+	if meta, ok := d.symbolMetadata(sym); ok && meta.Name != "" {
+		return meta.Name
+	}
+	idx := int(sym)
+	if idx < 0 || idx >= len(d.language.SymbolNames) {
+		return ""
+	}
+	return d.language.SymbolNames[idx]
 }
 
 func (d *dfaTokenSource) preferSpecificTokenOnExactMatch(candTok Token, candEndPos int, bestTok Token, bestEndPos int) bool {
