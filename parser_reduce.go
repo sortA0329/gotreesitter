@@ -60,6 +60,58 @@ func buildReduceFieldPresence(lang *Language) []bool {
 	return out
 }
 
+func buildSingleTokenWrapperSymbols(lang *Language) []bool {
+	if lang == nil || len(lang.ParseActions) == 0 || len(lang.SymbolMetadata) == 0 {
+		return nil
+	}
+
+	valid := make([]bool, len(lang.SymbolMetadata))
+	for i, meta := range lang.SymbolMetadata {
+		valid[i] = meta.Visible && meta.Named
+	}
+
+	seenBySymbol := make([]map[uint16]uint8, len(lang.SymbolMetadata))
+	any := false
+	for _, entry := range lang.ParseActions {
+		for _, act := range entry.Actions {
+			if act.Type != ParseActionReduce {
+				continue
+			}
+			sym := int(act.Symbol)
+			if sym < 0 || sym >= len(valid) || !valid[sym] {
+				continue
+			}
+			seen := seenBySymbol[sym]
+			if seen == nil {
+				seen = map[uint16]uint8{}
+				seenBySymbol[sym] = seen
+			}
+			if prev, ok := seen[act.ProductionID]; ok && prev != act.ChildCount {
+				valid[sym] = false
+				continue
+			}
+			seen[act.ProductionID] = act.ChildCount
+		}
+	}
+
+	out := make([]bool, len(lang.SymbolMetadata))
+	for sym, seen := range seenBySymbol {
+		if !valid[sym] || len(seen) != 1 {
+			continue
+		}
+		for _, cc := range seen {
+			if cc == 1 {
+				out[sym] = true
+				any = true
+			}
+		}
+	}
+	if !any {
+		return nil
+	}
+	return out
+}
+
 func (p *Parser) applyActionWithReduceChain(s *glrStack, act ParseAction, tok Token, anyReduced *bool, nodeCount *int, arena *nodeArena, entryScratch *glrEntryScratch, gssScratch *gssScratch, tmpEntries *[]stackEntry, deferParentLinks bool, trackChildErrors *bool) bool {
 	p.applyAction(s, act, tok, anyReduced, nodeCount, arena, entryScratch, gssScratch, tmpEntries, deferParentLinks, trackChildErrors)
 	if act.Type != ParseActionReduce || tok.NoLookahead || s == nil || s.dead || s.accepted || s.shifted {
@@ -1976,6 +2028,9 @@ func (p *Parser) collapsibleUnarySelfReduction(act ParseAction, tok Token, arena
 	if p.reduceProductionHasFields(act.ProductionID) || len(p.reduceAliasSequence(act.ProductionID)) != 0 {
 		return nil
 	}
+	if !p.isSingleTokenWrapperSymbol(act.Symbol) {
+		return nil
+	}
 	if child.symbol != act.Symbol {
 		if child.ChildCount() != 0 || !p.canCollapseNamedLeafWrapper(act.Symbol, child.symbol) {
 			return nil
@@ -2004,7 +2059,17 @@ func (p *Parser) canCollapseNamedLeafWrapper(parentSym, childSym Symbol) bool {
 	if !child.Visible || child.Named {
 		return false
 	}
-	return parent.Name == child.Name
+	return true
+}
+
+func (p *Parser) isSingleTokenWrapperSymbol(sym Symbol) bool {
+	if p == nil || len(p.singleTokenWrapperSymbol) == 0 {
+		return false
+	}
+	if int(sym) < 0 || int(sym) >= len(p.singleTokenWrapperSymbol) {
+		return false
+	}
+	return p.singleTokenWrapperSymbol[sym]
 }
 
 func recoverAction(entry *ParseActionEntry) (ParseAction, bool) {

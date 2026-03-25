@@ -49,6 +49,7 @@ type Parser struct {
 	smallTokenLookup                    [][]uint16
 	reduceAliasSeq                      [][]Symbol
 	aliasTargetSymbol                   []bool
+	singleTokenWrapperSymbol            []bool
 	reduceHasFields                     []bool
 	fieldInheritedScratch               []bool
 	fieldConflictedScratch              []bool
@@ -243,6 +244,7 @@ func NewParser(lang *Language) *Parser {
 		}
 		p.reduceAliasSeq = buildReduceAliasSequences(lang)
 		p.aliasTargetSymbol = buildAliasTargetSymbols(lang)
+		p.singleTokenWrapperSymbol = buildSingleTokenWrapperSymbols(lang)
 		p.reduceHasFields = buildReduceFieldPresence(lang)
 		p.recoverByState, p.hasRecoverState, p.hasRecoverSymbol = buildRecoverActionsByState(lang)
 		p.hasKeywordState = buildKeywordStates(lang)
