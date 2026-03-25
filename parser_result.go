@@ -506,8 +506,11 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, p *Parser) {
 		normalizeBashProgramVariableAssignments(root, lang)
 	case "c":
 		normalizeCTranslationUnitRoot(root, lang)
+		normalizeCPreprocessorDirectiveShapes(root, source, lang)
+		normalizeCDeclarationBounds(root, source, lang)
 		normalizeCSizeofUnknownTypeIdentifiers(root, source, lang)
 		normalizeCCastUnknownTypeIdentifiers(root, source, lang)
+		normalizeCPointerAssignmentPrecedence(root, lang)
 	case "c_sharp":
 		normalizeCSharpTypeConstraintKeywords(root, lang)
 		normalizeCSharpSwitchTupleCasePatterns(root, lang)
@@ -1162,6 +1165,287 @@ func rootLooksLikeCTopLevel(root *Node, lang *Language) bool {
 	return sawTopLevel
 }
 
+func normalizeCDeclarationBounds(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil {
+		return
+	}
+	if lang.Name != "c" && lang.Name != "cpp" {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type(lang) == "declaration" {
+			first, last := firstAndLastNonNilChild(n.children)
+			if first != nil && n.startByte < first.startByte &&
+				first.startByte <= uint32(len(source)) &&
+				cBytesAreCommentOrTrivia(source[n.startByte:first.startByte]) {
+				n.startByte = first.startByte
+				n.startPoint = first.startPoint
+			}
+			if last != nil && n.endByte > last.endByte &&
+				n.endByte <= uint32(len(source)) &&
+				bytesAreTrivia(source[last.endByte:n.endByte]) {
+				setNodeEndTo(n, last.endByte, source)
+			}
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func normalizeCPreprocessorDirectiveShapes(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || len(root.children) == 0 {
+		return
+	}
+	if lang.Name != "c" && lang.Name != "cpp" {
+		return
+	}
+	if root.Type(lang) != "translation_unit" {
+		return
+	}
+	preprocDefSym, hasPreprocDef := symbolByName(lang, "preproc_def")
+	nameFieldID, hasNameField := lang.FieldByName("name")
+	valueFieldID, hasValueField := lang.FieldByName("value")
+
+	out := make([]*Node, 0, len(root.children))
+	changed := false
+	for i := 0; i < len(root.children); i++ {
+		child := root.children[i]
+		if child == nil {
+			continue
+		}
+		if hasPreprocDef && hasNameField && hasValueField {
+			if normalizeCWhitespaceSeparatedFunctionMacro(child, source, lang, preprocDefSym, nameFieldID, valueFieldID) {
+				changed = true
+			}
+		}
+		if consumed, ok := normalizeCPreprocessorDirectiveRange(child, source, lang); ok {
+			changed = true
+			for i+1 < len(root.children) && root.children[i+1] != nil && root.children[i+1].startByte < consumed {
+				i++
+			}
+		}
+		out = append(out, child)
+	}
+	if !changed {
+		return
+	}
+	if root.ownerArena != nil {
+		buf := root.ownerArena.allocNodeSlice(len(out))
+		copy(buf, out)
+		out = buf
+	}
+	root.children = out
+	root.fieldIDs = nil
+	root.fieldSources = nil
+	populateParentNode(root, out)
+	extendNodeToTrailingWhitespace(root, source)
+}
+
+func normalizeCWhitespaceSeparatedFunctionMacro(node *Node, source []byte, lang *Language, preprocDefSym Symbol, nameFieldID, valueFieldID FieldID) bool {
+	if node == nil || lang == nil || node.Type(lang) != "preproc_function_def" || len(node.children) != 4 {
+		return false
+	}
+	name := node.children[1]
+	params := node.children[2]
+	value := node.children[3]
+	if name == nil || params == nil || value == nil || name.Type(lang) != "identifier" || params.Type(lang) != "preproc_params" || value.Type(lang) != "preproc_arg" {
+		return false
+	}
+	if name.endByte >= params.startByte || params.startByte > uint32(len(source)) {
+		return false
+	}
+	if !bytesAreTrivia(source[name.endByte:params.startByte]) {
+		return false
+	}
+
+	value.startByte = params.startByte
+	value.startPoint = advancePointByBytes(Point{}, source[:params.startByte])
+	if value.endByte < value.startByte {
+		value.endByte = value.startByte
+		value.endPoint = value.startPoint
+	}
+
+	children := []*Node{node.children[0], name, value}
+	if node.ownerArena != nil {
+		buf := node.ownerArena.allocNodeSlice(len(children))
+		copy(buf, children)
+		children = buf
+	}
+	node.symbol = preprocDefSym
+	node.isNamed = int(preprocDefSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[preprocDefSym].Named
+	node.children = children
+	ensureNodeFieldStorage(node, len(children))
+	for i := range node.fieldIDs {
+		node.fieldIDs[i] = 0
+	}
+	for i := range node.fieldSources {
+		node.fieldSources[i] = fieldSourceNone
+	}
+	node.fieldIDs[1] = nameFieldID
+	node.fieldIDs[2] = valueFieldID
+	node.fieldSources[1] = fieldSourceDirect
+	node.fieldSources[2] = fieldSourceDirect
+	populateParentNode(node, node.children)
+	return true
+}
+
+func normalizeCPreprocessorDirectiveRange(node *Node, source []byte, lang *Language) (uint32, bool) {
+	if node == nil || lang == nil || len(node.children) == 0 {
+		return 0, false
+	}
+	switch node.Type(lang) {
+	case "preproc_def", "preproc_function_def", "preproc_call":
+	default:
+		return 0, false
+	}
+	arg := node.children[len(node.children)-1]
+	if arg == nil || arg.Type(lang) != "preproc_arg" || node.startByte >= uint32(len(source)) {
+		return 0, false
+	}
+	directiveEnd, valueEnd, ok := cScanPreprocessorDirectiveExtent(source, node.startByte)
+	if !ok || directiveEnd <= node.endByte {
+		return 0, false
+	}
+	valueStart := cScanPreprocessorValueStart(source, arg.startByte, valueEnd)
+	if valueStart < arg.startByte || valueStart > valueEnd {
+		valueStart = arg.startByte
+	}
+	arg.startByte = valueStart
+	arg.startPoint = advancePointByBytes(Point{}, source[:valueStart])
+	setNodeEndTo(arg, valueEnd, source)
+	populateParentNode(node, node.children)
+	extendNodeEndTo(node, directiveEnd, source)
+	return directiveEnd, true
+}
+
+func cScanPreprocessorDirectiveExtent(source []byte, start uint32) (directiveEnd uint32, valueEnd uint32, ok bool) {
+	if start >= uint32(len(source)) {
+		return 0, 0, false
+	}
+	lineStart := int(start)
+	lastValueEnd := lineStart
+	for lineStart < len(source) {
+		lineEnd := lineStart
+		for lineEnd < len(source) && source[lineEnd] != '\n' {
+			lineEnd++
+		}
+		lastValueEnd = lineEnd
+		if lineEnd > lineStart && source[lineEnd-1] == '\r' {
+			lastValueEnd--
+		}
+		directiveEnd = uint32(lineEnd)
+		if lineEnd < len(source) && source[lineEnd] == '\n' {
+			directiveEnd++
+		}
+		if !cLineEndsWithContinuation(source[lineStart:lineEnd]) {
+			return directiveEnd, uint32(lastValueEnd), true
+		}
+		lineStart = lineEnd + 1
+	}
+	return uint32(len(source)), uint32(lastValueEnd), true
+}
+
+func cScanPreprocessorValueStart(source []byte, start, end uint32) uint32 {
+	if start > end || end > uint32(len(source)) {
+		return start
+	}
+	i := start
+	for i < end {
+		switch source[i] {
+		case ' ', '\t', '\n', '\r', '\f', '\\':
+			i++
+			continue
+		default:
+			return i
+		}
+	}
+	return end
+}
+
+func cLineEndsWithContinuation(line []byte) bool {
+	end := len(line)
+	for end > 0 && (line[end-1] == ' ' || line[end-1] == '\t' || line[end-1] == '\f' || line[end-1] == '\r') {
+		end--
+	}
+	if end == 0 || line[end-1] != '\\' {
+		return false
+	}
+	backslashes := 0
+	for i := end - 1; i >= 0 && line[i] == '\\'; i-- {
+		backslashes++
+	}
+	return backslashes%2 == 1
+}
+
+func cBytesAreCommentOrTrivia(b []byte) bool {
+	for i := 0; i < len(b); {
+		switch b[i] {
+		case ' ', '\t', '\n', '\r', '\f':
+			i++
+		case '/':
+			if i+1 >= len(b) {
+				return false
+			}
+			switch b[i+1] {
+			case '/':
+				end, ok := cScanLineCommentEnd(b, i)
+				if !ok {
+					return false
+				}
+				i = end
+			case '*':
+				end, ok := cScanBlockCommentEnd(b, i)
+				if !ok {
+					return false
+				}
+				i = end
+			default:
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func cScanLineCommentEnd(b []byte, start int) (int, bool) {
+	if start+1 >= len(b) || b[start] != '/' || b[start+1] != '/' {
+		return 0, false
+	}
+	i := start + 2
+	for i < len(b) {
+		if b[i] == '\n' {
+			lineEnd := i
+			if cLineEndsWithContinuation(b[start:lineEnd]) {
+				i++
+				continue
+			}
+			return i + 1, true
+		}
+		i++
+	}
+	return len(b), true
+}
+
+func cScanBlockCommentEnd(b []byte, start int) (int, bool) {
+	if start+1 >= len(b) || b[start] != '/' || b[start+1] != '*' {
+		return 0, false
+	}
+	for i := start + 2; i+1 < len(b); i++ {
+		if b[i] == '*' && b[i+1] == '/' {
+			return i + 2, true
+		}
+	}
+	return 0, false
+}
+
 func normalizeCSizeofUnknownTypeIdentifiers(root *Node, source []byte, lang *Language) {
 	if root == nil || lang == nil || lang.Name != "c" {
 		return
@@ -1428,6 +1712,77 @@ func normalizeCCastUnknownTypeIdentifiers(root *Node, source []byte, lang *Langu
 		}
 	}
 	repair(root)
+}
+
+func normalizeCPointerAssignmentPrecedence(root *Node, lang *Language) {
+	if root == nil || lang == nil {
+		return
+	}
+	if lang.Name != "c" && lang.Name != "cpp" {
+		return
+	}
+
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		for i, child := range n.children {
+			walk(child)
+			for {
+				rewritten := rewriteCPointerAssignmentPrecedence(child, lang)
+				if rewritten == nil {
+					break
+				}
+				n.children[i] = rewritten
+				rewritten.parent = n
+				rewritten.childIndex = i
+				child = rewritten
+			}
+		}
+	}
+	walk(root)
+}
+
+func rewriteCPointerAssignmentPrecedence(node *Node, lang *Language) *Node {
+	if node == nil || lang == nil || node.Type(lang) != "pointer_expression" || len(node.children) != 2 {
+		return nil
+	}
+	operator := node.children[0]
+	assignment := node.children[1]
+	if operator == nil || assignment == nil || operator.Type(lang) != "*" || assignment.Type(lang) != "assignment_expression" || len(assignment.children) != 3 {
+		return nil
+	}
+	left := assignment.children[0]
+	assignOp := assignment.children[1]
+	right := assignment.children[2]
+	if left == nil || assignOp == nil || right == nil || !isCAssignmentOperatorToken(assignOp.Type(lang)) {
+		return nil
+	}
+
+	rewrittenPointer := cloneNodeInArena(node.ownerArena, node)
+	rewrittenPointer.children = cloneNodeSliceInArena(node.ownerArena, []*Node{operator, left})
+	populateParentNode(rewrittenPointer, rewrittenPointer.children)
+
+	rewrittenAssign := cloneNodeInArena(node.ownerArena, assignment)
+	rewrittenAssign.children = cloneNodeSliceInArena(node.ownerArena, []*Node{rewrittenPointer, assignOp, right})
+	populateParentNode(rewrittenAssign, rewrittenAssign.children)
+	return rewrittenAssign
+}
+
+func isCAssignmentOperatorToken(tok string) bool {
+	if tok == "=" {
+		return true
+	}
+	if !strings.HasSuffix(tok, "=") {
+		return false
+	}
+	switch tok {
+	case "==", "!=", "<=", ">=", "=>", "===", "!==":
+		return false
+	default:
+		return true
+	}
 }
 
 func looksLikeCTypedefName(name string) bool {
