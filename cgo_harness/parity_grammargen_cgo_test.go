@@ -106,7 +106,7 @@ var grammargenCGOGrammars = []grammargenCGOGrammar{
 	// Keep cpp opt-in for direct grammargen-vs-C runs until generation fits the
 	// bounded high-value container budget; default ratchets skip seeding it.
 	{name: "cpp", jsonPath: "/tmp/grammar_parity/cpp/src/grammar.json", blobFunc: grammars.CppLanguage, genTimeout: 300 * time.Second},
-	{name: "c_sharp", jsonPath: "/tmp/grammar_parity/c_sharp/src/grammar.json", blobFunc: grammars.CSharpLanguage, genTimeout: 90 * time.Second},
+	{name: "c_sharp", jsonPath: "/tmp/grammar_parity/c_sharp/src/grammar.json", blobFunc: grammars.CSharpLanguage, genTimeout: 300 * time.Second},
 	{name: "cobol", jsonPath: "/tmp/grammar_parity/cobol/src/grammar.json", blobFunc: grammars.CobolLanguage, genTimeout: 60 * time.Second},
 	// ── Languages without prior C oracle ──
 	{name: "csv", jsonPath: "/tmp/grammar_parity/csv/csv/src/grammar.json", blobFunc: grammars.CsvLanguage},

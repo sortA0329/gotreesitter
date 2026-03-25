@@ -677,7 +677,12 @@ func promoteDefaultAliases(symbols []SymbolInfo, productions []Production, extra
 
 	for _, symID := range extraSymbols {
 		if symID >= 0 && symID < len(statuses) {
-			statuses[symID].appearsUnaliased = true
+			// Extras that appear only with aliases (e.g., ALIAS-wrapper nonterminals
+			// like COBOL's _LINE_COMMENT_ALIAS) should still be eligible for alias
+			// promotion. Only mark as unaliased if it has no recorded aliases at all.
+			if len(statuses[symID].aliases) == 0 {
+				statuses[symID].appearsUnaliased = true
+			}
 		}
 	}
 

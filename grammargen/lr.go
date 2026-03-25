@@ -3256,10 +3256,19 @@ func allInDeclaredConflict(reduces []lrAction, ng *NormalizedGrammar, cache *con
 		allFound := true
 		for _, r := range reduces {
 			lhs := ng.Productions[r.prodIdx].LHS
+			// Resolve auxiliary symbols (repeat helpers, alias wrappers) to their
+			// parent symbols for conflict group matching, mirroring the logic in
+			// shiftReduceInConflictGroup.
+			parentLHSs := resolveAuxToParents(lhs, ng)
 			found := false
-			for _, sym := range cgroup {
-				if sym == lhs {
-					found = true
+			for _, parent := range parentLHSs {
+				for _, sym := range cgroup {
+					if sym == parent {
+						found = true
+						break
+					}
+				}
+				if found {
 					break
 				}
 			}
