@@ -685,6 +685,8 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, p *Parser) {
 		normalizeTypeScriptRecoveredNamespaceRoot(root, source, lang)
 		normalizeTypeScriptCompatibility(root, source, lang)
 		normalizeCollapsedNamedLeafChildren(root, lang, "existential_type", "*")
+	case "yaml":
+		normalizeYAMLRecoveredRoot(root, source, lang)
 	case "zig":
 		normalizeZigEmptyInitListFields(root, lang)
 	}
@@ -823,6 +825,295 @@ func firstAndLastNonNilChild(children []*Node) (*Node, *Node) {
 		}
 	}
 	return first, first
+}
+
+func normalizeYAMLRecoveredRoot(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "yaml" || len(root.children) == 0 {
+		return
+	}
+	if root.Type(lang) == "stream" && yamlRootLooksCanonical(root, lang) {
+		return
+	}
+	if root.Type(lang) != "stream" && root.Type(lang) != "ERROR" {
+		return
+	}
+
+	flat := yamlFlattenRecoveredRootChildren(root.children, lang)
+	if len(flat) == 0 {
+		return
+	}
+
+	leadingComments := 0
+	for leadingComments < len(flat) && flat[leadingComments] != nil && flat[leadingComments].Type(lang) == "comment" {
+		leadingComments++
+	}
+	doc := yamlBuildRecoveredSingleDocument(flat[leadingComments:], root.endByte, root.endPoint, root.ownerArena, lang)
+	if doc == nil {
+		return
+	}
+
+	streamSym, ok := symbolByName(lang, "stream")
+	if !ok {
+		return
+	}
+	streamChildren := make([]*Node, 0, leadingComments+1)
+	streamChildren = append(streamChildren, flat[:leadingComments]...)
+	streamChildren = append(streamChildren, doc)
+
+	root.symbol = streamSym
+	root.isNamed = lang.SymbolMetadata[streamSym].Named
+	root.children = cloneNodeSliceInArena(root.ownerArena, streamChildren)
+	root.fieldIDs = nil
+	root.fieldSources = nil
+	root.hasError = false
+	populateParentNode(root, root.children)
+	root.startByte = 0
+	root.startPoint = Point{}
+	root.endByte = uint32(len(source))
+	root.endPoint = pointAtOffsetYAML(source, len(source))
+}
+
+func yamlRootLooksCanonical(root *Node, lang *Language) bool {
+	if root == nil || lang == nil || root.Type(lang) != "stream" {
+		return false
+	}
+	for _, child := range root.children {
+		if child == nil {
+			continue
+		}
+		switch child.Type(lang) {
+		case "comment", "document":
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func yamlFlattenRecoveredRootChildren(children []*Node, lang *Language) []*Node {
+	flat := make([]*Node, 0, len(children))
+	for _, child := range children {
+		if child == nil {
+			continue
+		}
+		switch child.Type(lang) {
+		case "_bl":
+			continue
+		case "_r_prp":
+			if len(child.children) == 1 && child.children[0] != nil {
+				flat = append(flat, child.children[0])
+			}
+		case "ERROR":
+			if len(child.children) == 1 && child.children[0] != nil {
+				grandchild := child.children[0]
+				if grandchild.Type(lang) == "---" || grandchild.Type(lang) == "..." || grandchild.Type(lang) == ">" || grandchild.Type(lang) == "|" {
+					flat = append(flat, grandchild)
+					continue
+				}
+			}
+			flat = append(flat, child)
+		default:
+			if strings.HasPrefix(child.Type(lang), "_r_blk_str_repeat") {
+				continue
+			}
+			flat = append(flat, child)
+		}
+	}
+	return flat
+}
+
+func yamlBuildRecoveredSingleDocument(nodes []*Node, endByte uint32, endPoint Point, arena *nodeArena, lang *Language) *Node {
+	if len(nodes) == 0 || lang == nil {
+		return nil
+	}
+	documentSym, ok := symbolByName(lang, "document")
+	if !ok {
+		return nil
+	}
+
+	i := 0
+	prefix := make([]*Node, 0, len(nodes))
+	for i < len(nodes) {
+		switch nodes[i].Type(lang) {
+		case "tag_directive", "yaml_directive", "reserved_directive", "---", "...":
+			prefix = append(prefix, nodes[i])
+			i++
+		default:
+			goto prefixDone
+		}
+	}
+prefixDone:
+
+	body := yamlBuildRecoveredDocumentBody(nodes[i:], endByte, endPoint, arena, lang)
+	if body == nil {
+		return nil
+	}
+
+	children := make([]*Node, 0, len(prefix)+1)
+	children = append(children, prefix...)
+	children = append(children, body)
+	doc := newParentNodeInArena(arena, documentSym, lang.SymbolMetadata[documentSym].Named, children, nil, 0)
+	doc.endByte = endByte
+	doc.endPoint = endPoint
+	doc.hasError = false
+	return doc
+}
+
+func yamlBuildRecoveredDocumentBody(nodes []*Node, endByte uint32, endPoint Point, arena *nodeArena, lang *Language) *Node {
+	if len(nodes) == 0 || lang == nil {
+		return nil
+	}
+	for _, node := range nodes {
+		yamlWrapPlainScalarFlowNodes(node, lang)
+	}
+
+	decoratorsEnd := 0
+	for decoratorsEnd < len(nodes) {
+		switch nodes[decoratorsEnd].Type(lang) {
+		case "tag", "anchor", "alias":
+			decoratorsEnd++
+		default:
+			goto decoratorsDone
+		}
+	}
+decoratorsDone:
+
+	bodyNodes := nodes[decoratorsEnd:]
+	if len(bodyNodes) == 0 {
+		return nil
+	}
+
+	var core *Node
+	first := yamlFirstNonComment(bodyNodes, lang)
+	if first == nil {
+		return nil
+	}
+	switch first.Type(lang) {
+	case "block_mapping_pair":
+		core = yamlWrapYAMLCollection("block_mapping", bodyNodes, endByte, endPoint, arena, lang)
+	case "block_sequence_item":
+		core = yamlWrapYAMLCollection("block_sequence", bodyNodes, endByte, endPoint, arena, lang)
+	case ">", "|":
+		blockScalarSym, ok := symbolByName(lang, "block_scalar")
+		if !ok {
+			return nil
+		}
+		core = newParentNodeInArena(arena, blockScalarSym, lang.SymbolMetadata[blockScalarSym].Named, []*Node{first}, nil, 0)
+		core.endByte = endByte
+		core.endPoint = endPoint
+		core.hasError = false
+	case "block_scalar":
+		core = first
+	default:
+		if first.Type(lang) == "ERROR" {
+			return nil
+		}
+		core = first
+	}
+
+	if decoratorsEnd == 0 {
+		if core.Type(lang) == "block_mapping" || core.Type(lang) == "block_sequence" || core.Type(lang) == "flow_node" {
+			return yamlWrapYAMLBlockNode([]*Node{core}, endByte, endPoint, arena, lang)
+		}
+		core.endByte = endByte
+		core.endPoint = endPoint
+		core.hasError = false
+		return core
+	}
+
+	blockChildren := make([]*Node, 0, decoratorsEnd+1)
+	blockChildren = append(blockChildren, nodes[:decoratorsEnd]...)
+	if core.Type(lang) == "block_node" {
+		blockChildren = append(blockChildren, core.children...)
+	} else {
+		blockChildren = append(blockChildren, core)
+	}
+	return yamlWrapYAMLBlockNode(blockChildren, endByte, endPoint, arena, lang)
+}
+
+func yamlWrapYAMLCollection(name string, children []*Node, endByte uint32, endPoint Point, arena *nodeArena, lang *Language) *Node {
+	sym, ok := symbolByName(lang, name)
+	if !ok {
+		return nil
+	}
+	node := newParentNodeInArena(arena, sym, lang.SymbolMetadata[sym].Named, children, nil, 0)
+	node.endByte = endByte
+	node.endPoint = endPoint
+	node.hasError = false
+	return node
+}
+
+func yamlWrapYAMLBlockNode(children []*Node, endByte uint32, endPoint Point, arena *nodeArena, lang *Language) *Node {
+	sym, ok := symbolByName(lang, "block_node")
+	if !ok {
+		return nil
+	}
+	node := newParentNodeInArena(arena, sym, lang.SymbolMetadata[sym].Named, children, nil, 0)
+	node.endByte = endByte
+	node.endPoint = endPoint
+	node.hasError = false
+	return node
+}
+
+func yamlWrapPlainScalarFlowNodes(node *Node, lang *Language) {
+	if node == nil || lang == nil {
+		return
+	}
+	for _, child := range node.children {
+		yamlWrapPlainScalarFlowNodes(child, lang)
+	}
+	if node.Type(lang) != "flow_node" || len(node.children) != 1 {
+		return
+	}
+	child := node.children[0]
+	if child == nil || child.Type(lang) == "plain_scalar" {
+		return
+	}
+	switch child.Type(lang) {
+	case "string_scalar", "null_scalar", "boolean_scalar", "integer_scalar", "float_scalar", "timestamp_scalar":
+	default:
+		return
+	}
+	plainScalarSym, ok := symbolByName(lang, "plain_scalar")
+	if !ok {
+		return
+	}
+	plain := newParentNodeInArena(node.ownerArena, plainScalarSym, lang.SymbolMetadata[plainScalarSym].Named, []*Node{child}, nil, 0)
+	node.children = cloneNodeSliceInArena(node.ownerArena, []*Node{plain})
+	node.fieldIDs = nil
+	node.fieldSources = nil
+	node.hasError = false
+	populateParentNode(node, node.children)
+}
+
+func yamlFirstNonComment(nodes []*Node, lang *Language) *Node {
+	for _, node := range nodes {
+		if node == nil || node.Type(lang) == "comment" {
+			continue
+		}
+		return node
+	}
+	return nil
+}
+
+func pointAtOffsetYAML(src []byte, offset int) Point {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(src) {
+		offset = len(src)
+	}
+	var p Point
+	for i := 0; i < offset; i++ {
+		if src[i] == '\n' {
+			p.Row++
+			p.Column = 0
+		} else {
+			p.Column++
+		}
+	}
+	return p
 }
 
 func normalizeHTMLRecoveredNestedCustomTags(root *Node, lang *Language) {
