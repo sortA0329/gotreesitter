@@ -34,3 +34,26 @@ func TestAdaptScannerForLanguageNilTarget(t *testing.T) {
 		t.Fatal("expected false for nil target language")
 	}
 }
+
+func TestAdaptScannerForLanguagePreservesExistingExternalLexStates(t *testing.T) {
+	ref := YamlLanguage()
+	target := *ref
+	target.ExternalScanner = nil
+	target.ExternalLexStates = [][]bool{
+		{false, false},
+		{true, false},
+	}
+
+	if !AdaptScannerForLanguage("yaml", &target) {
+		t.Fatal("AdaptScannerForLanguage(yaml) returned false")
+	}
+	if target.ExternalScanner == nil {
+		t.Fatal("expected external scanner to be attached")
+	}
+	if len(target.ExternalLexStates) != 2 {
+		t.Fatalf("len(ExternalLexStates) = %d, want 2", len(target.ExternalLexStates))
+	}
+	if !target.ExternalLexStates[1][0] || target.ExternalLexStates[1][1] {
+		t.Fatalf("ExternalLexStates was overwritten: %+v", target.ExternalLexStates)
+	}
+}

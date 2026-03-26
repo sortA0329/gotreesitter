@@ -377,8 +377,10 @@ func AdaptScannerForLanguage(name string, targetLang *gotreesitter.Language) boo
 		}
 		if same {
 			targetLang.ExternalScanner = refLang.ExternalScanner
-			if els := externalLexStatesRegistry[lookupName]; els != nil {
-				targetLang.ExternalLexStates = els
+			if len(targetLang.ExternalLexStates) == 0 {
+				if els := externalLexStatesRegistry[lookupName]; els != nil {
+					targetLang.ExternalLexStates = els
+				}
 			}
 			return true
 		}
@@ -389,8 +391,10 @@ func AdaptScannerForLanguage(name string, targetLang *gotreesitter.Language) boo
 		return false
 	}
 	targetLang.ExternalScanner = adapted
-	if els := externalLexStatesRegistry[lookupName]; els != nil {
-		targetLang.ExternalLexStates = els
+	if len(targetLang.ExternalLexStates) == 0 {
+		if els := externalLexStatesRegistry[lookupName]; els != nil {
+			targetLang.ExternalLexStates = els
+		}
 	}
 	return true
 }
