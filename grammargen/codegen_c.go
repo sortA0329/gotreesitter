@@ -8,7 +8,8 @@ import (
 )
 
 // GenerateC compiles a Grammar to a standard tree-sitter parser.c string.
-// The output is compatible with tree-sitter's C runtime ABI 14.
+// The output is compatible with tree-sitter's C runtime ABI 14/15 features
+// that grammargen currently emits.
 func GenerateC(g *Grammar) (string, error) {
 	lang, err := GenerateLanguage(g)
 	if err != nil {
@@ -33,6 +34,7 @@ func EmitC(name string, lang *gotreesitter.Language) (string, error) {
 	emitParseTable(&b, lang)
 	emitSmallParseTable(&b, lang)
 	emitLexModes(&b, lang)
+	emitReservedWords(&b, lang)
 	emitLexFunction(&b, "ts_lex", lang.LexStates, lang)
 	if len(lang.KeywordLexStates) > 0 {
 		emitLexFunction(&b, "ts_lex_keywords", lang.KeywordLexStates, lang)
@@ -67,6 +69,9 @@ func emitHeader(b *strings.Builder, name string, lang *gotreesitter.Language) {
 	fmt.Fprintf(b, "#define TOKEN_COUNT %d\n", lang.TokenCount)
 	fmt.Fprintf(b, "#define EXTERNAL_TOKEN_COUNT %d\n", lang.ExternalTokenCount)
 	fmt.Fprintf(b, "#define FIELD_COUNT %d\n", lang.FieldCount)
+	if lang.MaxReservedWordSetSize > 0 {
+		fmt.Fprintf(b, "#define MAX_RESERVED_WORD_SET_SIZE %d\n", lang.MaxReservedWordSetSize)
+	}
 	fmt.Fprintf(b, "#define MAX_ALIAS_SEQUENCE_LENGTH %d\n", maxAliasLen)
 	fmt.Fprintf(b, "#define PRODUCTION_ID_COUNT %d\n\n", lang.ProductionIDCount)
 }
@@ -287,6 +292,33 @@ func emitLexModes(b *strings.Builder, lang *gotreesitter.Language) {
 	fmt.Fprintf(b, "};\n\n")
 }
 
+func emitReservedWords(b *strings.Builder, lang *gotreesitter.Language) {
+	if lang.MaxReservedWordSetSize == 0 || len(lang.ReservedWords) == 0 {
+		return
+	}
+
+	stride := int(lang.MaxReservedWordSetSize)
+	rowCount := (len(lang.ReservedWords) + stride - 1) / stride
+	fmt.Fprintf(b, "static const TSSymbol ts_reserved_words[%d][MAX_RESERVED_WORD_SET_SIZE] = {\n", rowCount)
+	for row := 0; row < rowCount; row++ {
+		fmt.Fprintf(b, "  [%d] = {\n", row)
+		start := row * stride
+		end := start + stride
+		if end > len(lang.ReservedWords) {
+			end = len(lang.ReservedWords)
+		}
+		for _, sym := range lang.ReservedWords[start:end] {
+			if sym == 0 {
+				break
+			}
+			cname := symbolToCName(lang.SymbolNames[sym], int(sym), lang)
+			fmt.Fprintf(b, "    %s,\n", cname)
+		}
+		fmt.Fprintf(b, "  },\n")
+	}
+	fmt.Fprintf(b, "};\n\n")
+}
+
 func emitLexFunction(b *strings.Builder, funcName string, states []gotreesitter.LexState, lang *gotreesitter.Language) {
 	fmt.Fprintf(b, "static bool %s(TSLexer *lexer, TSStateId state) {\n", funcName)
 	fmt.Fprintf(b, "  START_LEXER();\n")
@@ -416,6 +448,10 @@ func emitLanguageExport(b *strings.Builder, name string, lang *gotreesitter.Lang
 
 	if len(lang.PrimaryStateIDs) > 0 {
 		fmt.Fprintf(b, "    .primary_state_ids = ts_primary_state_ids,\n")
+	}
+	if len(lang.ReservedWords) > 0 && lang.MaxReservedWordSetSize > 0 {
+		fmt.Fprintf(b, "    .reserved_words = &ts_reserved_words[0][0],\n")
+		fmt.Fprintf(b, "    .max_reserved_word_set_size = %d,\n", lang.MaxReservedWordSetSize)
 	}
 
 	fmt.Fprintf(b, "  };\n")

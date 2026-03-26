@@ -51,22 +51,31 @@ type PrecEntry struct {
 	Name     string // prec name or rule name
 }
 
+// ReservedWordSet is an ordered named set of reserved word token rules.
+// The first set is the global set from grammar.json's top-level `reserved`
+// object. Additional sets are preserved for future context-specific support.
+type ReservedWordSet struct {
+	Name  string
+	Rules []*Rule
+}
+
 // Grammar is the top-level grammar definition.
 type Grammar struct {
-	Name              string
-	Rules             map[string]*Rule
-	RuleOrder         []string // order rules were defined (first = start rule)
-	Extras            []*Rule
-	Conflicts         [][]string
-	Externals         []*Rule
-	Inline            []string
-	Word              string
-	Supertypes        []string
-	Tests             []TestCase // embedded test cases
-	EnableLRSplitting  bool       // opt-in: attempt LR(1) state splitting for merge pathology
-	BinaryRepeatMode   bool       // use tree-sitter's binary repeat helper shape (aux→seq(aux,aux)|inner)
-	Precedences        [][]PrecEntry // ordered precedence levels (each level: earlier = higher prec)
-	ChoiceLiftThreshold int       // if >0, lift inline CHOICE nodes with more alternatives than this into auxiliary nonterminals to prevent production explosion
+	Name                string
+	Rules               map[string]*Rule
+	RuleOrder           []string // order rules were defined (first = start rule)
+	Extras              []*Rule
+	Conflicts           [][]string
+	Externals           []*Rule
+	Inline              []string
+	Word                string
+	ReservedWordSets    []ReservedWordSet
+	Supertypes          []string
+	Tests               []TestCase    // embedded test cases
+	EnableLRSplitting   bool          // opt-in: attempt LR(1) state splitting for merge pathology
+	BinaryRepeatMode    bool          // use tree-sitter's binary repeat helper shape (aux→seq(aux,aux)|inner)
+	Precedences         [][]PrecEntry // ordered precedence levels (each level: earlier = higher prec)
+	ChoiceLiftThreshold int           // if >0, lift inline CHOICE nodes with more alternatives than this into auxiliary nonterminals to prevent production explosion
 }
 
 // NewGrammar creates a new grammar with the given name.

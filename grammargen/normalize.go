@@ -91,6 +91,10 @@ type NormalizedGrammar struct {
 	KeywordSymbols []int             // symbol IDs that are keywords
 	WordSymbolID   int               // word token symbol ID (e.g., identifier)
 	KeywordEntries []TerminalPattern // keyword patterns for keyword DFA
+	// ReservedWordSets stores token symbol IDs for each imported reserved word
+	// set. The first set is the global set from grammar.json. Current
+	// generation derives per-state subsets from that global set.
+	ReservedWordSets [][]int
 
 	// External scanner support (populated when Grammar.Externals is set).
 	ExternalSymbols []int // external token index → symbol ID
@@ -464,6 +468,11 @@ func Normalize(g *Grammar) (*NormalizedGrammar, error) {
 		return nil, fmt.Errorf("extract terminals: %w", err)
 	}
 
+	reservedWordSets, err := resolveReservedWordSets(g.ReservedWordSets, st, terminals)
+	if err != nil {
+		return nil, fmt.Errorf("resolve reserved words: %w", err)
+	}
+
 	// Phase 7: Extract productions from each nonterminal rule.
 	var productions []Production
 	prodIDCounter := 0
@@ -613,6 +622,7 @@ func Normalize(g *Grammar) (*NormalizedGrammar, error) {
 	ng.KeywordSymbols = keywordSymbols
 	ng.WordSymbolID = wordSymbolID
 	ng.KeywordEntries = keywordEntries
+	ng.ReservedWordSets = reservedWordSets
 	ng.ExternalSymbols = externalSymbols
 	ng.PrecedenceOrder = buildPrecOrderTable(g.Precedences, buildNamedPrecMapFromLevels(g.Precedences))
 
@@ -620,6 +630,101 @@ func Normalize(g *Grammar) (*NormalizedGrammar, error) {
 	_ = tokenCount
 
 	return ng, nil
+}
+
+func resolveReservedWordSets(sets []ReservedWordSet, st *symbolTable, terminals []TerminalPattern) ([][]int, error) {
+	if len(sets) == 0 {
+		return nil, nil
+	}
+
+	out := make([][]int, 0, len(sets))
+	for _, set := range sets {
+		seen := make(map[int]bool, len(set.Rules))
+		resolved := make([]int, 0, len(set.Rules))
+		for _, rule := range set.Rules {
+			symID, ok := resolveReservedWordSymbol(rule, st, terminals)
+			if !ok {
+				return nil, fmt.Errorf("set %q: unsupported reserved rule %s", set.Name, describeRule(rule))
+			}
+			if !seen[symID] {
+				seen[symID] = true
+				resolved = append(resolved, symID)
+			}
+		}
+		out = append(out, resolved)
+	}
+	return out, nil
+}
+
+func resolveReservedWordSymbol(rule *Rule, st *symbolTable, terminals []TerminalPattern) (int, bool) {
+	if rule == nil {
+		return 0, false
+	}
+
+	rule = unwrapReservedWordRule(rule)
+	switch rule.Kind {
+	case RuleString:
+		id, ok := st.lookup(rule.Value)
+		if ok && id >= 0 && id < len(st.symbols) && st.symbols[id].Kind != SymbolNonterminal {
+			return id, true
+		}
+	case RuleSymbol:
+		id, ok := st.lookupNamedToken(rule.Value)
+		if ok && id >= 0 && id < len(st.symbols) && st.symbols[id].Kind != SymbolNonterminal {
+			return id, true
+		}
+	}
+
+	for _, term := range terminals {
+		if rulesEqual(unwrapReservedWordRule(term.Rule), rule) {
+			return term.SymbolID, true
+		}
+	}
+	return 0, false
+}
+
+func unwrapReservedWordRule(rule *Rule) *Rule {
+	for rule != nil {
+		switch rule.Kind {
+		case RuleToken, RuleImmToken, RuleField, RulePrec, RulePrecLeft, RulePrecRight, RulePrecDynamic, RuleAlias:
+			if len(rule.Children) == 0 {
+				return rule
+			}
+			rule = rule.Children[0]
+		default:
+			return rule
+		}
+	}
+	return nil
+}
+
+func describeRule(rule *Rule) string {
+	if rule == nil {
+		return "<nil>"
+	}
+	switch rule.Kind {
+	case RuleString:
+		return fmt.Sprintf("STRING(%q)", rule.Value)
+	case RulePattern:
+		return fmt.Sprintf("PATTERN(%q)", rule.Value)
+	case RuleSymbol:
+		return fmt.Sprintf("SYMBOL(%q)", rule.Value)
+	case RuleToken:
+		return fmt.Sprintf("TOKEN(%s)", describeRule(firstRuleChild(rule)))
+	case RuleImmToken:
+		return fmt.Sprintf("IMMEDIATE_TOKEN(%s)", describeRule(firstRuleChild(rule)))
+	case RuleAlias:
+		return fmt.Sprintf("ALIAS(%s, %q)", describeRule(firstRuleChild(rule)), rule.Value)
+	default:
+		return fmt.Sprintf("kind=%d", rule.Kind)
+	}
+}
+
+func firstRuleChild(rule *Rule) *Rule {
+	if rule == nil || len(rule.Children) == 0 {
+		return nil
+	}
+	return rule.Children[0]
 }
 
 func promoteDefaultAliases(symbols []SymbolInfo, productions []Production, extraSymbols []int) {

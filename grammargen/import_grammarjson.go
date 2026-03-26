@@ -91,6 +91,24 @@ func ImportGrammarJSON(data []byte) (*Grammar, error) {
 		g.Word = raw.Word
 	}
 
+	// Import reserved word sets in source order. The first set is the global
+	// reserved set in tree-sitter's grammar.json format.
+	for _, name := range raw.reservedOrder {
+		members := raw.Reserved[name]
+		rules := make([]*Rule, 0, len(members))
+		for _, member := range members {
+			rule, err := conv.convertRule(member)
+			if err != nil {
+				return nil, fmt.Errorf("reserved %q: %w", name, err)
+			}
+			rules = append(rules, rule)
+		}
+		g.ReservedWordSets = append(g.ReservedWordSets, ReservedWordSet{
+			Name:  name,
+			Rules: rules,
+		})
+	}
+
 	// Import supertypes.
 	g.Supertypes = raw.Supertypes
 
@@ -166,16 +184,18 @@ func importPrecedenceLevels(rawLevels []json.RawMessage) [][]PrecEntry {
 
 // jsonGrammar is the top-level structure of a grammar.json file.
 type jsonGrammar struct {
-	Name        string                     `json:"name"`
-	Rules       map[string]json.RawMessage `json:"rules"`
-	Extras      []json.RawMessage          `json:"extras"`
-	Conflicts   [][]string                 `json:"conflicts"`
-	Externals   []json.RawMessage          `json:"externals"`
-	Inline      []string                   `json:"inline"`
-	Supertypes  []string                   `json:"supertypes"`
-	Word        string                     `json:"word"`
-	Precedences []json.RawMessage          `json:"precedences"`
-	ruleOrder   []string                   // populated during UnmarshalJSON
+	Name          string                       `json:"name"`
+	Rules         map[string]json.RawMessage   `json:"rules"`
+	Extras        []json.RawMessage            `json:"extras"`
+	Conflicts     [][]string                   `json:"conflicts"`
+	Externals     []json.RawMessage            `json:"externals"`
+	Inline        []string                     `json:"inline"`
+	Supertypes    []string                     `json:"supertypes"`
+	Word          string                       `json:"word"`
+	Reserved      map[string][]json.RawMessage `json:"reserved"`
+	Precedences   []json.RawMessage            `json:"precedences"`
+	ruleOrder     []string                     // populated during UnmarshalJSON
+	reservedOrder []string                     // populated during UnmarshalJSON
 }
 
 // jsonPrecEntry is an entry in the precedences array.
@@ -202,6 +222,9 @@ func (g *jsonGrammar) UnmarshalJSON(data []byte) error {
 
 	if rulesRaw, ok := raw["rules"]; ok {
 		g.ruleOrder = extractKeyOrder(rulesRaw)
+	}
+	if reservedRaw, ok := raw["reserved"]; ok {
+		g.reservedOrder = extractKeyOrder(reservedRaw)
 	}
 
 	return nil

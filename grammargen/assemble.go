@@ -74,6 +74,8 @@ func assemble(
 		return nil, fmt.Errorf("build parse tables: %w", err)
 	}
 
+	buildReservedWordTables(lang, ng)
+
 	// Build field map tables.
 	buildFieldMaps(lang, ng)
 
@@ -124,6 +126,147 @@ func assemble(
 	buildSupertypeMap(lang, ng)
 
 	return lang, nil
+}
+
+func buildReservedWordTables(lang *gotreesitter.Language, ng *NormalizedGrammar) {
+	if lang == nil || ng == nil || ng.WordSymbolID == 0 || len(ng.ReservedWordSets) == 0 {
+		return
+	}
+
+	// grammar.json's first reserved set is the global set. Tree-sitter derives
+	// per-state subsets by removing keywords that are explicitly valid in a
+	// state; mirror that derivation here for the imported global set.
+	base := make([]gotreesitter.Symbol, 0, len(ng.ReservedWordSets[0]))
+	for _, symID := range ng.ReservedWordSets[0] {
+		if symID > 0 {
+			base = append(base, gotreesitter.Symbol(symID))
+		}
+	}
+	if len(base) == 0 {
+		return
+	}
+
+	serializedSets := map[string]uint16{"": 0}
+	uniqueSets := [][]gotreesitter.Symbol{{}}
+	wordSym := gotreesitter.Symbol(ng.WordSymbolID)
+
+	for state := 1; state < len(lang.LexModes); state++ {
+		if !stateNeedsReservedWords(lang, gotreesitter.StateID(state), wordSym, ng.KeywordSymbols) {
+			continue
+		}
+
+		reserved := make([]gotreesitter.Symbol, 0, len(base))
+		for _, sym := range base {
+			if lookupActionIndexForLanguage(lang, gotreesitter.StateID(state), sym) == 0 {
+				reserved = append(reserved, sym)
+			}
+		}
+		if len(reserved) == 0 {
+			continue
+		}
+
+		key := serializeReservedWordSet(reserved)
+		setID, ok := serializedSets[key]
+		if !ok {
+			setID = uint16(len(uniqueSets))
+			serializedSets[key] = setID
+			uniqueSets = append(uniqueSets, reserved)
+		}
+		lang.LexModes[state].ReservedWordSetID = setID
+	}
+
+	if len(uniqueSets) <= 1 {
+		return
+	}
+
+	maxSetSize := 0
+	for _, set := range uniqueSets {
+		if len(set) > maxSetSize {
+			maxSetSize = len(set)
+		}
+	}
+	if maxSetSize == 0 {
+		return
+	}
+
+	lang.ReservedWords = make([]gotreesitter.Symbol, len(uniqueSets)*maxSetSize)
+	lang.MaxReservedWordSetSize = uint16(maxSetSize)
+	for i, set := range uniqueSets {
+		offset := i * maxSetSize
+		copy(lang.ReservedWords[offset:offset+len(set)], set)
+	}
+	if lang.LanguageVersion < 15 {
+		lang.LanguageVersion = 15
+	}
+}
+
+func stateNeedsReservedWords(lang *gotreesitter.Language, state gotreesitter.StateID, wordSym gotreesitter.Symbol, keywordSymbols []int) bool {
+	if lookupActionIndexForLanguage(lang, state, wordSym) != 0 {
+		return true
+	}
+	for _, symID := range keywordSymbols {
+		if lookupActionIndexForLanguage(lang, state, gotreesitter.Symbol(symID)) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func lookupActionIndexForLanguage(lang *gotreesitter.Language, state gotreesitter.StateID, sym gotreesitter.Symbol) uint16 {
+	if lang == nil {
+		return 0
+	}
+	denseLimit := int(lang.LargeStateCount)
+	if denseLimit == 0 {
+		denseLimit = len(lang.ParseTable)
+	}
+	if int(state) < denseLimit {
+		if int(state) >= len(lang.ParseTable) {
+			return 0
+		}
+		row := lang.ParseTable[state]
+		if int(sym) >= len(row) {
+			return 0
+		}
+		return row[sym]
+	}
+	smallIdx := int(state) - int(lang.LargeStateCount)
+	if smallIdx < 0 || smallIdx >= len(lang.SmallParseTableMap) {
+		return 0
+	}
+	table := lang.SmallParseTable
+	offset := lang.SmallParseTableMap[smallIdx]
+	if int(offset) >= len(table) {
+		return 0
+	}
+	groupCount := table[offset]
+	pos := int(offset) + 1
+	for i := uint16(0); i < groupCount; i++ {
+		if pos+1 >= len(table) {
+			break
+		}
+		sectionValue := table[pos]
+		symbolCount := table[pos+1]
+		pos += 2
+		for j := uint16(0); j < symbolCount; j++ {
+			if pos >= len(table) {
+				break
+			}
+			if gotreesitter.Symbol(table[pos]) == sym {
+				return sectionValue
+			}
+			pos++
+		}
+	}
+	return 0
+}
+
+func serializeReservedWordSet(set []gotreesitter.Symbol) string {
+	buf := make([]byte, 0, len(set)*2)
+	for _, sym := range set {
+		buf = append(buf, byte(sym>>8), byte(sym))
+	}
+	return string(buf)
 }
 
 // buildParseTables constructs ParseActions, ParseTable (dense),
@@ -547,8 +690,6 @@ func buildExternalLexStates(lang *gotreesitter.Language, tables *LRTables, ng *N
 		}
 	}
 
-
-
 	// Row 0: all-false (no external tokens valid).
 	rows := [][]bool{make([]bool, extCount)}
 	rowMap := make(map[string]int) // serialized row → row index
@@ -661,8 +802,8 @@ func stripHiddenExternalsFromPureReduceStates(tables *LRTables, ng *NormalizedGr
 	// production-based counterparts.
 	tokenCount := ng.TokenCount()
 	type cpInfo struct {
-		extSym     int
-		cpSyms     []int
+		extSym int
+		cpSyms []int
 	}
 	var candidates []cpInfo
 	for _, symID := range ng.ExternalSymbols {
