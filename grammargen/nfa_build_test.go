@@ -39,3 +39,18 @@ func TestBuildChoiceSharesStringPrefixes(t *testing.T) {
 		t.Fatalf("start transitions = %#v, want single 'a' edge", startTransitions)
 	}
 }
+
+func TestBuildPatternMergesAdjacentCharClassRanges(t *testing.T) {
+	builder := newNFABuilder()
+	frag, err := builder.buildFromRule(Pat("[ab]"))
+	if err != nil {
+		t.Fatalf("buildFromRule(pattern): %v", err)
+	}
+	transitions := builder.states[frag.start].transitions
+	if got, want := len(transitions), 1; got != want {
+		t.Fatalf("len(transitions) = %d, want %d", got, want)
+	}
+	if transitions[0].lo != 'a' || transitions[0].hi != 'b' {
+		t.Fatalf("transition = [%q,%q], want ['a','b']", transitions[0].lo, transitions[0].hi)
+	}
+}

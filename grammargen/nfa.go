@@ -145,6 +145,8 @@ func (b *nfaBuilder) buildFromRegexNode(node *regexNode) (nfaFragment, error) {
 		ranges := node.runes
 		if node.negate {
 			ranges = complementRanges(ranges)
+		} else {
+			ranges = mergeRanges(ranges)
 		}
 		for _, rr := range ranges {
 			b.addCharRange(start, rr.lo, rr.hi, end)
