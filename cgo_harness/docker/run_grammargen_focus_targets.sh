@@ -7,7 +7,7 @@ REAL_RUNNER="$SCRIPT_DIR/run_single_grammar_parity.sh"
 CGO_RUNNER="$SCRIPT_DIR/run_grammargen_c_parity.sh"
 
 MODE="all"
-LANGS_CSV="javascript,typescript,tsx,c,cpp,c_sharp,cobol,fortran"
+LANGS_CSV="css,javascript,typescript,tsx,c,cpp,c_sharp,cobol,fortran"
 MEMORY_LIMIT="8g"
 CPUS_LIMIT="1"
 PIDS_LIMIT="512"
@@ -30,7 +30,7 @@ usage() {
 Usage: run_grammargen_focus_targets.sh [options]
 
 Run the high-value grammargen targets only, with safe isolation by default:
-  javascript, typescript, tsx, c, cpp, c_sharp, cobol, fortran
+  css, javascript, typescript, tsx, c, cpp, c_sharp, cobol, fortran
 
 Modes:
   all          Run real-corpus parity and direct grammargen-vs-C parity
@@ -85,7 +85,7 @@ canonical_lang() {
 
 is_supported_focus_lang() {
   case "$1" in
-    javascript|typescript|tsx|c|cpp|c_sharp|cobol|fortran) return 0 ;;
+    css|javascript|typescript|tsx|c|cpp|c_sharp|cobol|fortran) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -99,7 +99,7 @@ real_corpus_lang() {
 
 supports_cgo_parity() {
   case "$1" in
-    javascript|typescript|tsx|c|cpp|c_sharp|cobol) return 0 ;;
+    css|javascript|typescript|tsx|c|cpp|c_sharp|cobol) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -125,7 +125,7 @@ while [[ $# -gt 0 ]]; do
     --lr-split) LR_SPLIT=1; shift ;;
     --no-build) BUILD_IMAGE=0; shift ;;
     --list)
-      printf '%s\n' javascript typescript tsx c cpp c_sharp cobol fortran
+      printf '%s\n' css javascript typescript tsx c cpp c_sharp cobol fortran
       exit 0
       ;;
     -h|--help)
