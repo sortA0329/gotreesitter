@@ -282,6 +282,48 @@ func TestNonterminalExtraChainSyntheticStatesCanStartNestedExtras(t *testing.T) 
 	}
 }
 
+func TestNonterminalExtraChainSyntheticStatesSkipNestedStartsWithoutStarterOverlap(t *testing.T) {
+	g := NewGrammar("extra_chain_no_nested_overlap")
+	g.Define("source_file", Repeat1(Sym("item")))
+	g.Define("item", Pat(`[a-z]+`))
+	g.Define("directive", Seq(
+		Token(Str("#region")),
+		Token(Pat(`[A-Za-z]+`)),
+		Token(Str("\n")),
+	))
+	g.SetExtras(Pat(`[ \t]+`), Sym("directive"))
+
+	ng, err := Normalize(g)
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	tables, ctx, err := buildLRTablesWithProvenance(ng)
+	if err != nil {
+		t.Fatalf("build LR tables: %v", err)
+	}
+	addNonterminalExtraChains(tables, ng, ctx)
+
+	startSyms := diagFindAllSymbols(ng, "#region")
+	if len(startSyms) != 1 {
+		t.Fatalf("expected one #region symbol, got %v", startSyms)
+	}
+
+	rootActs := tables.ActionTable[0][startSyms[0]]
+	if len(rootActs) != 1 || rootActs[0].kind != lrShift {
+		t.Fatalf("expected synthetic extra-chain shift on #region from state 0, got %s", diagFormatActions(ng, rootActs))
+	}
+	outerState := rootActs[0].state
+	if outerState < tables.ExtraChainStateStart {
+		t.Fatalf("expected synthetic target >= %d, got %d", tables.ExtraChainStateStart, outerState)
+	}
+
+	for _, act := range tables.ActionTable[outerState][startSyms[0]] {
+		if act.kind == lrShift && act.isExtra {
+			t.Fatalf("synthetic state %d should not inject nested #region extra starts: %s", outerState, diagFormatActions(ng, tables.ActionTable[outerState][startSyms[0]]))
+		}
+	}
+}
+
 func TestNonterminalExtraChainSyntheticStatesPreferStructuralTokensOverExtraInjection(t *testing.T) {
 	g := NewGrammar("extra_chain_structural_preference")
 	g.Define("source_file", Repeat1(Sym("item")))

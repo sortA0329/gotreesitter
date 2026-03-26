@@ -687,25 +687,25 @@ type lrContext struct {
 	// Narrow annotation-argument tagging metadata. These are precomputed once so
 	// buildItemSets can cheaply preserve declaration-family context only while a
 	// state remains inside annotation arguments.
-	annotationAtSym              int
-	annotationDefSym             int
-	annotationOpenParenSym       int
-	annotationCloseParenSym      int
-	bracedTemplateBodySym        int
-	bracedTemplateBody1Sym       int
-	bracedTemplateBody2Sym       int
-	definitionBoundaryTagBySym   []uint32
-	annotationArgCarrierLHS      []bool
-	templateDefinitionCarrierLHS []bool
-	repeatWrapperLHS             []bool
-	operatorIdentSym             int
-	operatorStarSym              int
-	nonNullLiteralSym            int
-	conditionalTypeSym           int
+	annotationAtSym                 int
+	annotationDefSym                int
+	annotationOpenParenSym          int
+	annotationCloseParenSym         int
+	bracedTemplateBodySym           int
+	bracedTemplateBody1Sym          int
+	bracedTemplateBody2Sym          int
+	definitionBoundaryTagBySym      []uint32
+	annotationArgCarrierLHS         []bool
+	templateDefinitionCarrierLHS    []bool
+	repeatWrapperLHS                []bool
+	operatorIdentSym                int
+	operatorStarSym                 int
+	nonNullLiteralSym               int
+	conditionalTypeSym              int
 	conditionalTypeExternalQmarkSym int
-	conditionalTypeExtendsSym    int
-	conditionalTypePlainQmarkSym int
-	conditionalTypeCarrierLHS    []bool
+	conditionalTypeExtendsSym       int
+	conditionalTypePlainQmarkSym    int
+	conditionalTypeCarrierLHS       []bool
 
 	// Reusable closure queue scratch keeps closureToSet/closureIncremental from
 	// reallocating worklists and in-queue tracking on every item-set build.
@@ -894,6 +894,11 @@ type extraChainBuilder struct {
 	entryStateCache map[string]int
 	entrySeen       map[string]bool
 	unionStateCache map[string]int
+}
+
+type terminalStartMatcher struct {
+	any   bool
+	runes map[rune]struct{}
 }
 
 func newExtraChainBuilder(tables *LRTables, ng *NormalizedGrammar, ctx *lrContext, terminalExtras []int) *extraChainBuilder {
@@ -1161,6 +1166,101 @@ func dumpExtraChainBitset(ng *NormalizedGrammar, bs *bitset) string {
 	return strings.Join(names, ",")
 }
 
+func buildTerminalStartMatchers(patterns []TerminalPattern) map[int]terminalStartMatcher {
+	bySym := make(map[int]terminalStartMatcher)
+	for _, pat := range patterns {
+		matcher := terminalStartMatcherForPattern(pat)
+		if existing, ok := bySym[pat.SymbolID]; ok {
+			bySym[pat.SymbolID] = mergeTerminalStartMatchers(existing, matcher)
+		} else {
+			bySym[pat.SymbolID] = matcher
+		}
+	}
+	return bySym
+}
+
+func mergeTerminalStartMatchers(a, b terminalStartMatcher) terminalStartMatcher {
+	if a.any || b.any {
+		return terminalStartMatcher{any: true}
+	}
+	if len(a.runes) == 0 {
+		return b
+	}
+	if len(b.runes) == 0 {
+		return a
+	}
+	out := terminalStartMatcher{runes: make(map[rune]struct{}, len(a.runes)+len(b.runes))}
+	for r := range a.runes {
+		out.runes[r] = struct{}{}
+	}
+	for r := range b.runes {
+		out.runes[r] = struct{}{}
+	}
+	return out
+}
+
+func terminalStartMatcherForPattern(p TerminalPattern) terminalStartMatcher {
+	if p.Rule == nil {
+		return terminalStartMatcher{any: true}
+	}
+	nfa, err := buildCombinedNFA([]TerminalPattern{p})
+	if err != nil || nfa == nil {
+		return terminalStartMatcher{any: true}
+	}
+	startClosure := epsilonClosure(nfa, []int{nfa.start})
+	out := terminalStartMatcher{runes: make(map[rune]struct{})}
+	const maxExplicitRunes = 64
+	for _, s := range startClosure {
+		for _, tr := range nfa.states[s].transitions {
+			if tr.epsilon {
+				continue
+			}
+			if tr.hi < tr.lo {
+				continue
+			}
+			if tr.hi-tr.lo > maxExplicitRunes || len(out.runes) > maxExplicitRunes {
+				return terminalStartMatcher{any: true}
+			}
+			for r := tr.lo; r <= tr.hi; r++ {
+				out.runes[r] = struct{}{}
+				if len(out.runes) > maxExplicitRunes {
+					return terminalStartMatcher{any: true}
+				}
+			}
+		}
+	}
+	if len(out.runes) == 0 {
+		return terminalStartMatcher{any: true}
+	}
+	return out
+}
+
+func terminalStartMatchersOverlap(a, b terminalStartMatcher) bool {
+	if a.any || b.any {
+		return true
+	}
+	if len(a.runes) == 0 || len(b.runes) == 0 {
+		return true
+	}
+	if len(a.runes) > len(b.runes) {
+		a, b = b, a
+	}
+	for r := range a.runes {
+		if _, ok := b.runes[r]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func terminalStartMatcherHasSingleRune(m terminalStartMatcher, want rune) bool {
+	if m.any || len(m.runes) != 1 {
+		return false
+	}
+	_, ok := m.runes[want]
+	return ok
+}
+
 // addNonterminalExtraChains creates dedicated parse state chains for nonterminal
 // extra productions and adds shift actions from every main state.
 func addNonterminalExtraChains(tables *LRTables, ng *NormalizedGrammar, ctx *lrContext) {
@@ -1203,6 +1303,7 @@ func addNonterminalExtraChains(tables *LRTables, ng *NormalizedGrammar, ctx *lrC
 			extraStartsByFirstSym[firstSym] = append(extraStartsByFirstSym[firstSym], prodIdx)
 		}
 	}
+	startMatchers := buildTerminalStartMatchers(ng.Terminals)
 
 	builder := newExtraChainBuilder(tables, ng, ctx, terminalExtras)
 	stateFollowSet := func(state int) bitset {
@@ -1264,6 +1365,45 @@ func addNonterminalExtraChains(tables *LRTables, ng *NormalizedGrammar, ctx *lrC
 		}
 		return hasReduce
 	}
+	syntheticStateMayInjectExtraStart := func(state, firstSym int) bool {
+		if state < mainStateCount {
+			return true
+		}
+		extraMatcher, ok := startMatchers[firstSym]
+		if !ok {
+			return true
+		}
+		// Narrow pruning for directive-style extras. Languages like Scala rely
+		// on nested comment extras inside synthetic states; the current
+		// generation pathology is driven by C#-style preprocessor extras whose
+		// starters are all '#'-prefixed and do not meaningfully nest.
+		if !terminalStartMatcherHasSingleRune(extraMatcher, '#') {
+			return true
+		}
+		acts, ok := tables.ActionTable[state]
+		if !ok {
+			return false
+		}
+		for sym, actionList := range acts {
+			if sym <= 0 || sym >= tokenCount {
+				continue
+			}
+			hasStructuralShift := false
+			for _, act := range actionList {
+				if act.kind == lrShift && !act.isExtra {
+					hasStructuralShift = true
+					break
+				}
+			}
+			if !hasStructuralShift {
+				continue
+			}
+			if matcher, ok := startMatchers[sym]; !ok || terminalStartMatchersOverlap(extraMatcher, matcher) {
+				return true
+			}
+		}
+		return false
+	}
 
 	// Iterate over the growing state space so synthetic extra-chain states also
 	// gain extra entry shifts. This closes the construction under nesting:
@@ -1275,6 +1415,9 @@ func addNonterminalExtraChains(tables *LRTables, ng *NormalizedGrammar, ctx *lrC
 		}
 		follow := stateFollowSet(state)
 		for _, firstSym := range extraFirstSyms {
+			if !syntheticStateMayInjectExtraStart(state, firstSym) {
+				continue
+			}
 			hasNonExtraAction := false
 			for _, act := range tables.ActionTable[state][firstSym] {
 				if !act.isExtra {

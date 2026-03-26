@@ -1039,7 +1039,11 @@ func computeLexModes(
 		}
 		if followTokens != nil {
 			for _, sym := range followTokens(state) {
-				if sym > 0 && sym < tokenCount && !extSet[sym] {
+				// Reduce-follow expansion exists to admit the word token in
+				// states where a keyword becomes valid only after reducing a
+				// preceding nonterminal. Widening lex modes with every follow
+				// terminal is both unnecessary and expensive for large grammars.
+				if sym > 0 && sym < tokenCount && !extSet[sym] && keywordSymbols[sym] {
 					directValid[sym] = true
 				}
 			}
