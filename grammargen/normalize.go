@@ -3176,6 +3176,10 @@ func inlinePassthroughRefs(r *Rule, flattenMap map[string]*flattenInfo) *Rule {
 // Without this, enumerateAlternatives would let the inner alias shadow the outer
 // one (e.g., YAML's plain_scalar blocking flow_node).
 func inlinePassthroughRefsCtx(r *Rule, flattenMap map[string]*flattenInfo, insideAlias bool) *Rule {
+	return inlinePassthroughRefsCtxSeen(r, flattenMap, insideAlias, make(map[string]bool))
+}
+
+func inlinePassthroughRefsCtxSeen(r *Rule, flattenMap map[string]*flattenInfo, insideAlias bool, expanding map[string]bool) *Rule {
 	if r == nil {
 		return nil
 	}
@@ -3189,6 +3193,11 @@ func inlinePassthroughRefsCtx(r *Rule, flattenMap map[string]*flattenInfo, insid
 		if insideAlias && !fi.replaceRule {
 			return r
 		}
+		if expanding[r.Value] {
+			return r
+		}
+		expanding[r.Value] = true
+		defer delete(expanding, r.Value)
 		// Create Choice(original_ref, passthrough_alt1, passthrough_alt2, ...)
 		alts := make([]*Rule, 0, len(fi.passThrough)+1)
 		alts = append(alts, r) // keep original ref for compound alts
@@ -3201,6 +3210,7 @@ func inlinePassthroughRefsCtx(r *Rule, flattenMap map[string]*flattenInfo, insid
 			if insideAlias {
 				c = stripTopAlias(c)
 			}
+			c = inlinePassthroughRefsCtxSeen(c, flattenMap, insideAlias, expanding)
 			alts = append(alts, c)
 		}
 		return Choice(alts...)
@@ -3216,7 +3226,7 @@ func inlinePassthroughRefsCtx(r *Rule, flattenMap map[string]*flattenInfo, insid
 	changed := false
 	newChildren := make([]*Rule, len(r.Children))
 	for i, c := range r.Children {
-		nc := inlinePassthroughRefsCtx(c, flattenMap, inAlias)
+		nc := inlinePassthroughRefsCtxSeen(c, flattenMap, inAlias, expanding)
 		if nc != c {
 			changed = true
 		}

@@ -221,3 +221,62 @@ func TestInlineHiddenAllPassthroughChoice(t *testing.T) {
 		t.Fatal("document should retain original hidden reference alongside direct passthrough refs")
 	}
 }
+
+func TestFlattenHiddenPassthroughTransitiveChoice(t *testing.T) {
+	g := &Grammar{
+		Name: "test_flatten_hidden_passthrough_transitive",
+		Rules: map[string]*Rule{
+			"document": Seq(Str("FROM"), Sym("_outer"), Str("BY")),
+			"_outer":   Choice(Sym("_inner"), Seq(Str("LEN"), Sym("ident"))),
+			"_inner":   Choice(Sym("number"), Seq(Str("ALL"), Sym("number"))),
+			"ident":    Pat(`[a-z]+`),
+			"number":   Pat(`[0-9]+`),
+		},
+		RuleOrder: []string{"document", "_outer", "_inner", "ident", "number"},
+	}
+
+	ng, err := Normalize(g)
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+
+	symNameToID := make(map[string]int)
+	for i, info := range ng.Symbols {
+		symNameToID[info.Name] = i
+	}
+
+	documentID := symNameToID["document"]
+	outerID := symNameToID["_outer"]
+	innerID := symNameToID["_inner"]
+	numberID := symNameToID["number"]
+
+	hasOuter := false
+	hasInner := false
+	hasNumber := false
+	for _, p := range ng.Productions {
+		if p.LHS != documentID {
+			continue
+		}
+		for _, sym := range p.RHS {
+			if sym == outerID {
+				hasOuter = true
+			}
+			if sym == innerID {
+				hasInner = true
+			}
+			if sym == numberID {
+				hasNumber = true
+			}
+		}
+	}
+
+	if !hasOuter {
+		t.Fatal("document should retain original _outer reference for compound alternatives")
+	}
+	if !hasInner {
+		t.Fatal("document should retain direct _inner reference from first-level passthrough flattening")
+	}
+	if !hasNumber {
+		t.Fatal("document missing transitive passthrough reference to number")
+	}
+}

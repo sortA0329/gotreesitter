@@ -344,11 +344,25 @@ func AdaptScannerForLanguage(name string, targetLang *gotreesitter.Language) boo
 	if targetLang == nil || len(targetLang.ExternalSymbols) == 0 {
 		return false
 	}
+	if name == "" {
+		return false
+	}
+
+	lookupName := name
+	if _, ok := externalScannerRegistry[lookupName]; !ok {
+		lowerName := strings.ToLower(name)
+		if _, ok := externalScannerRegistry[lowerName]; ok {
+			lookupName = lowerName
+		}
+	}
+	if _, ok := externalScannerRegistry[lookupName]; !ok {
+		return false
+	}
 
 	// Scanner adaptation needs the checked-in ts2go blob as the stable symbol
 	// oracle. Do not route this through override lookup or we can recurse back
 	// into the same override currently being decoded.
-	refLang := loadEmbeddedLanguageBase(name + ".bin")
+	refLang := loadEmbeddedLanguageBase(lookupName + ".bin")
 	if refLang == nil || refLang.ExternalScanner == nil {
 		return false
 	}
@@ -363,7 +377,7 @@ func AdaptScannerForLanguage(name string, targetLang *gotreesitter.Language) boo
 		}
 		if same {
 			targetLang.ExternalScanner = refLang.ExternalScanner
-			if els := externalLexStatesRegistry[name]; els != nil {
+			if els := externalLexStatesRegistry[lookupName]; els != nil {
 				targetLang.ExternalLexStates = els
 			}
 			return true
@@ -375,7 +389,7 @@ func AdaptScannerForLanguage(name string, targetLang *gotreesitter.Language) boo
 		return false
 	}
 	targetLang.ExternalScanner = adapted
-	if els := externalLexStatesRegistry[name]; els != nil {
+	if els := externalLexStatesRegistry[lookupName]; els != nil {
 		targetLang.ExternalLexStates = els
 	}
 	return true

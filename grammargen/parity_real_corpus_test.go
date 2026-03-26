@@ -209,13 +209,6 @@ func TestMultiGrammarImportRealCorpusParity(t *testing.T) {
 					gram.EnableLRSplitting = true
 				}
 			}
-			// Enable CHOICE lifting for grammars with massive production explosion.
-			// These grammars have hundreds of case-insensitive keyword patterns
-			// that create Cartesian products in SEQ rules.
-			switch g.name {
-			case "cobol":
-				gram.ChoiceLiftThreshold = 8
-			}
 			// Enable binary repeat mode for validated grammars that benefit
 			// from tree-sitter's upstream repeat lowering shape.
 			switch g.name {

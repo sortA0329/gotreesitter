@@ -2647,7 +2647,17 @@ func TestMultiGrammarImportPipeline(t *testing.T) {
 }
 
 func adaptExternalScanner(refLang, genLang *gotreesitter.Language) {
-	if refLang.ExternalScanner == nil || len(genLang.ExternalSymbols) == 0 {
+	if genLang == nil || len(genLang.ExternalSymbols) == 0 {
+		return
+	}
+	name := genLang.Name
+	if name == "" && refLang != nil {
+		name = refLang.Name
+	}
+	if name != "" && grammars.AdaptScannerForLanguage(name, genLang) {
+		return
+	}
+	if refLang == nil || refLang.ExternalScanner == nil {
 		return
 	}
 	if scanner, ok := gotreesitter.AdaptExternalScannerByExternalOrder(refLang, genLang); ok {
