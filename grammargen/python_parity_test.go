@@ -60,6 +60,20 @@ func TestPythonFStringLiteralParity(t *testing.T) {
 	assertPythonParity(t, genLang, refLang, sample)
 }
 
+func TestPython2PrintChevronParity(t *testing.T) {
+	genLang := loadGeneratedPythonLanguageForParity(t)
+	refLang := grammars.PythonLanguage()
+	adaptExternalScanner(refLang, genLang)
+
+	sample := "def driver(file, gulp):\n" +
+		"    print >> sys.stdout, 1, 2, 3\n" +
+		"    print >> sys.stdout\n" +
+		"    print >> gulp, 1, 2, 3,\n" +
+		"    print >> file, 'hello world'\n"
+
+	assertPythonParity(t, genLang, refLang, sample)
+}
+
 func loadGeneratedPythonLanguageForParity(t *testing.T) *gotreesitter.Language {
 	t.Helper()
 

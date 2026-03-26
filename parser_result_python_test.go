@@ -6,7 +6,7 @@ import (
 
 func TestBuildResultFromNodesCollapsesPythonTerminalIfSuffix(t *testing.T) {
 	lang := &Language{
-		Name: "python",
+		Name:       "python",
 		FieldNames: []string{"", "condition", "consequence"},
 		SymbolNames: []string{
 			"",
@@ -76,7 +76,7 @@ func TestBuildResultFromNodesCollapsesPythonTerminalIfSuffix(t *testing.T) {
 
 func TestBuildResultFromNodesCollapsesPythonTerminalClassAndIfSuffix(t *testing.T) {
 	lang := &Language{
-		Name: "python",
+		Name:       "python",
 		FieldNames: []string{"", "name", "superclasses", "body", "condition", "consequence"},
 		SymbolNames: []string{
 			"",
@@ -353,6 +353,104 @@ func TestBuildResultFromNodesRepairsPythonBlockEndToTrailingPunctuation(t *testi
 	}
 	if got, want := gotFn.endByte, semi.endByte; got != want {
 		t.Fatalf("function_definition endByte = %d, want %d", got, want)
+	}
+}
+
+func TestRepairPythonBlockPreservesOriginalEndAfterTrailingSemicolon(t *testing.T) {
+	lang := &Language{
+		Name: "python",
+		SymbolNames: []string{
+			"",
+			"block",
+			"assignment",
+			";",
+			"_indent",
+		},
+	}
+	arena := acquireNodeArena(arenaClassFull)
+
+	assign := newLeafNodeInArena(arena, 2, true, 10, 15, Point{Row: 1, Column: 8}, Point{Row: 1, Column: 13})
+	semi := newLeafNodeInArena(arena, 3, false, 15, 16, Point{Row: 1, Column: 13}, Point{Row: 1, Column: 14})
+	indent := newLeafNodeInArena(arena, 4, false, 9, 10, Point{Row: 1, Column: 7}, Point{Row: 1, Column: 8})
+	block := newParentNodeInArena(arena, 1, true, []*Node{indent, assign, semi}, nil, 0)
+	block.endByte = 28
+	block.endPoint = Point{Row: 2, Column: 10}
+
+	repaired, changed := repairPythonBlock(block, arena, lang, false)
+	if !changed {
+		t.Fatal("expected repairPythonBlock to preserve extended original end")
+	}
+	if repaired == nil || repaired.Type(lang) != "block" {
+		t.Fatalf("expected repaired block, got %#v", repaired)
+	}
+	if got, want := repaired.endByte, block.endByte; got != want {
+		t.Fatalf("block endByte = %d, want %d", got, want)
+	}
+	if got, want := repaired.endPoint, block.endPoint; got != want {
+		t.Fatalf("block endPoint = %+v, want %+v", got, want)
+	}
+}
+
+func TestNormalizePythonTrailingSelfCallsFoldsIntoNestedFunctionBlock(t *testing.T) {
+	lang := &Language{
+		Name: "python",
+		SymbolNames: []string{
+			"",
+			"module",
+			"block",
+			"function_definition",
+			"identifier",
+			"parameters",
+			"comment",
+			"assignment",
+			";",
+			"call",
+			"argument_list",
+		},
+	}
+	arena := acquireNodeArena(arenaClassFull)
+	source := []byte("    def foo():\n        x = 1;\n    foo()\n")
+
+	fnName := newLeafNodeInArena(arena, 4, true, 8, 11, Point{Column: 8}, Point{Column: 11})
+	body := newParentNodeInArena(arena, 2, true, []*Node{
+		newLeafNodeInArena(arena, 7, true, 23, 28, Point{Row: 1, Column: 8}, Point{Row: 1, Column: 13}),
+		newLeafNodeInArena(arena, 8, false, 28, 29, Point{Row: 1, Column: 13}, Point{Row: 1, Column: 14}),
+	}, nil, 0)
+	fn := newParentNodeInArena(arena, 3, true, []*Node{
+		fnName,
+		newParentNodeInArena(arena, 5, true, nil, nil, 0),
+		newLeafNodeInArena(arena, 6, true, 15, 18, Point{Row: 1, Column: 0}, Point{Row: 1, Column: 3}),
+		body,
+	}, nil, 0)
+	fn.startByte = 4
+	fn.startPoint = Point{Column: 4}
+	call := newParentNodeInArena(arena, 9, true, []*Node{
+		newLeafNodeInArena(arena, 4, true, 34, 37, Point{Row: 2, Column: 4}, Point{Row: 2, Column: 7}),
+		newParentNodeInArena(arena, 10, true, nil, nil, 0),
+	}, nil, 0)
+	outerBlock := newParentNodeInArena(arena, 2, true, []*Node{fn, call}, nil, 0)
+	module := newParentNodeInArena(arena, 1, true, []*Node{outerBlock}, nil, 0)
+
+	normalizePythonTrailingSelfCalls(module, source, lang)
+
+	block := module.Child(0)
+	if block == nil || block.Type(lang) != "block" {
+		t.Fatalf("expected block child, got %#v", block)
+	}
+	if got, want := block.ChildCount(), 1; got != want {
+		t.Fatalf("outer block child count = %d, want %d", got, want)
+	}
+	gotFn := block.Child(0)
+	if gotFn == nil || gotFn.Type(lang) != "function_definition" {
+		t.Fatalf("expected function_definition child, got %s", block.SExpr(lang))
+	}
+	gotBody := gotFn.Child(gotFn.ChildCount() - 1)
+	if gotBody == nil || gotBody.Type(lang) != "block" {
+		t.Fatalf("expected nested block, got %s", gotFn.SExpr(lang))
+	}
+	last := gotBody.Child(gotBody.ChildCount() - 1)
+	if last == nil || last.Type(lang) != "call" {
+		t.Fatalf("expected trailing call folded into function body, got %s", gotBody.SExpr(lang))
 	}
 }
 

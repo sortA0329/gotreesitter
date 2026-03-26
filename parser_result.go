@@ -638,6 +638,8 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, p *Parser) {
 	case "pug":
 		normalizeTopLevelTrailingLineBreakSpan(root, source, lang)
 	case "python":
+		normalizePythonTrailingSelfCalls(root, source, lang)
+		normalizePythonPrintStatements(root, source, lang)
 		normalizePythonInterpolationPatterns(root, lang)
 		normalizeCollapsedNamedLeafChildren(root, lang, "pass_statement", "pass")
 		normalizePythonStringContinuationEscapes(root, source, lang)
@@ -978,6 +980,273 @@ func normalizeHTMLRecoveredNestedCustomTagRanges(root *Node, source []byte, lang
 		}
 	}
 	walk(root)
+}
+
+func normalizePythonPrintStatements(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "python" || len(source) == 0 {
+		return
+	}
+	var walk func(*Node)
+	walk = func(node *Node) {
+		if node == nil {
+			return
+		}
+		for _, child := range node.children {
+			walk(child)
+		}
+		switch node.Type(lang) {
+		case "module", "block":
+			rewritten, changed := rewritePythonStatementList(node.children, source, lang)
+			if !changed {
+				return
+			}
+			node.children = cloneNodeSliceInArena(node.ownerArena, rewritten)
+			node.fieldIDs = nil
+			node.fieldSources = nil
+			populateParentNode(node, node.children)
+		}
+	}
+	walk(root)
+}
+
+func normalizePythonTrailingSelfCalls(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "python" || len(source) == 0 {
+		return
+	}
+	var walk func(*Node)
+	walk = func(node *Node) {
+		if node == nil {
+			return
+		}
+		for _, child := range node.children {
+			walk(child)
+		}
+		if node.Type(lang) != "block" {
+			return
+		}
+		rewritten, changed := foldPythonTrailingSelfCallsInBlock(node.children, source, lang)
+		if !changed {
+			return
+		}
+		node.children = cloneNodeSliceInArena(node.ownerArena, rewritten)
+		node.fieldIDs = nil
+		node.fieldSources = nil
+		populateParentNode(node, node.children)
+	}
+	walk(root)
+}
+
+func foldPythonTrailingSelfCallsInBlock(children []*Node, source []byte, lang *Language) ([]*Node, bool) {
+	if len(children) < 2 || lang == nil || lang.Name != "python" || len(source) == 0 {
+		return children, false
+	}
+	out := make([]*Node, 0, len(children))
+	changed := false
+	for i := 0; i < len(children); i++ {
+		cur := children[i]
+		if i+1 >= len(children) {
+			out = append(out, cur)
+			continue
+		}
+		next := children[i+1]
+		rewritten, ok := foldPythonTrailingSelfCallIntoNestedFunction(cur, next, source, lang)
+		if !ok {
+			out = append(out, cur)
+			continue
+		}
+		out = append(out, rewritten)
+		changed = true
+		i++
+	}
+	if !changed {
+		return children, false
+	}
+	return out, true
+}
+
+func foldPythonTrailingSelfCallIntoNestedFunction(fnNode, trailingCall *Node, source []byte, lang *Language) (*Node, bool) {
+	if fnNode == nil || trailingCall == nil || lang == nil || lang.Name != "python" || len(source) == 0 {
+		return nil, false
+	}
+	if fnNode.Type(lang) != "function_definition" || trailingCall.Type(lang) != "call" {
+		return nil, false
+	}
+	if trailingCall.startPoint.Column != fnNode.startPoint.Column {
+		return nil, false
+	}
+	fnName, ok := pythonFunctionDefinitionNameNode(fnNode, lang)
+	if !ok || fnName == nil {
+		return nil, false
+	}
+	callName, ok := pythonCallIdentifierNode(trailingCall, lang)
+	if !ok || callName == nil {
+		return nil, false
+	}
+	if !pythonNodeTextEqual(fnName, callName, source) {
+		return nil, false
+	}
+	bodyIndex := -1
+	var body *Node
+	for i, child := range fnNode.children {
+		if child != nil && child.Type(lang) == "block" {
+			bodyIndex = i
+			body = child
+		}
+	}
+	if bodyIndex < 0 || body == nil || !pythonBlockEndsWithSemicolon(body, lang) {
+		return nil, false
+	}
+
+	bodyClone := cloneNodeInArena(body.ownerArena, body)
+	bodyChildren := make([]*Node, 0, len(body.children)+1)
+	bodyChildren = append(bodyChildren, body.children...)
+	bodyChildren = append(bodyChildren, trailingCall)
+	bodyClone.children = cloneNodeSliceInArena(bodyClone.ownerArena, bodyChildren)
+	bodyClone.fieldIDs = nil
+	bodyClone.fieldSources = nil
+	populateParentNode(bodyClone, bodyClone.children)
+
+	fnClone := cloneNodeInArena(fnNode.ownerArena, fnNode)
+	fnChildren := append([]*Node(nil), fnNode.children...)
+	fnChildren[bodyIndex] = bodyClone
+	fnClone.children = cloneNodeSliceInArena(fnClone.ownerArena, fnChildren)
+	fnClone.fieldIDs = append([]FieldID(nil), fnNode.fieldIDs...)
+	fnClone.fieldSources = append([]uint8(nil), fnNode.fieldSources...)
+	populateParentNode(fnClone, fnClone.children)
+	return fnClone, true
+}
+
+func rewritePythonStatementList(children []*Node, source []byte, lang *Language) ([]*Node, bool) {
+	if len(children) == 0 || lang == nil || lang.Name != "python" {
+		return children, false
+	}
+	out := make([]*Node, 0, len(children))
+	changed := false
+	for _, child := range children {
+		if child == nil {
+			out = append(out, nil)
+			continue
+		}
+		if rewritten, ok := rewriteMalformedPythonPrintStatement(child, source, lang); ok {
+			out = append(out, rewritten)
+			changed = true
+			continue
+		}
+		out = append(out, child)
+	}
+	if !changed {
+		return children, false
+	}
+	return out, true
+}
+
+func rewriteMalformedPythonPrintStatement(node *Node, source []byte, lang *Language) (*Node, bool) {
+	if node == nil || lang == nil || lang.Name != "python" {
+		return nil, false
+	}
+	bin, extras, ok := pythonMalformedPrintStatementParts(node, source, lang)
+	if !ok || bin == nil || len(bin.children) < 3 {
+		return nil, false
+	}
+	printStmtSym, ok := symbolByName(lang, "print_statement")
+	if !ok {
+		return nil, false
+	}
+	chevronSym, ok := symbolByName(lang, "chevron")
+	if !ok {
+		return nil, false
+	}
+	printSym, ok := symbolByName(lang, "print")
+	if !ok {
+		return nil, false
+	}
+
+	printNamed := false
+	if int(printSym) < len(lang.SymbolMetadata) {
+		printNamed = lang.SymbolMetadata[printSym].Named
+	}
+	printStmtNamed := true
+	if int(printStmtSym) < len(lang.SymbolMetadata) {
+		printStmtNamed = lang.SymbolMetadata[printStmtSym].Named
+	}
+	chevronNamed := true
+	if int(chevronSym) < len(lang.SymbolMetadata) {
+		chevronNamed = lang.SymbolMetadata[chevronSym].Named
+	}
+
+	left := bin.children[0]
+	op := bin.children[1]
+	dest := bin.children[2]
+	printLeaf := cloneNodeInArena(node.ownerArena, left)
+	printLeaf.symbol = printSym
+	printLeaf.isNamed = printNamed
+	printLeaf.children = nil
+	printLeaf.fieldIDs = nil
+	printLeaf.fieldSources = nil
+
+	chevron := cloneNodeInArena(node.ownerArena, bin)
+	chevron.symbol = chevronSym
+	chevron.isNamed = chevronNamed
+	chevron.children = cloneNodeSliceInArena(chevron.ownerArena, []*Node{op, dest})
+	chevron.fieldIDs = nil
+	chevron.fieldSources = nil
+	chevron.productionID = 0
+	populateParentNode(chevron, chevron.children)
+
+	rewritten := cloneNodeInArena(node.ownerArena, node)
+	children := make([]*Node, 0, 2+len(extras))
+	children = append(children, printLeaf, chevron)
+	children = append(children, extras...)
+	rewritten.symbol = printStmtSym
+	rewritten.isNamed = printStmtNamed
+	rewritten.children = cloneNodeSliceInArena(rewritten.ownerArena, children)
+	rewritten.fieldIDs = nil
+	rewritten.fieldSources = nil
+	rewritten.productionID = 0
+	populateParentNode(rewritten, rewritten.children)
+	return rewritten, true
+}
+
+func pythonMalformedPrintStatementParts(node *Node, source []byte, lang *Language) (*Node, []*Node, bool) {
+	if node == nil || lang == nil || lang.Name != "python" {
+		return nil, nil, false
+	}
+	switch node.Type(lang) {
+	case "binary_operator":
+		if pythonIsPrintChevronBinary(node, source, lang) {
+			return node, nil, true
+		}
+	case "tuple_expression":
+		if len(node.children) == 0 {
+			return nil, nil, false
+		}
+		bin := node.children[0]
+		if pythonIsPrintChevronBinary(bin, source, lang) {
+			return bin, node.children[1:], true
+		}
+	}
+	return nil, nil, false
+}
+
+func pythonIsPrintChevronBinary(node *Node, source []byte, lang *Language) bool {
+	if node == nil || lang == nil || lang.Name != "python" || len(node.children) != 3 {
+		return false
+	}
+	if node.Type(lang) != "binary_operator" {
+		return false
+	}
+	left := node.children[0]
+	op := node.children[1]
+	if left == nil || op == nil {
+		return false
+	}
+	if left.Type(lang) != "identifier" || op.Type(lang) != ">>" {
+		return false
+	}
+	if left.startByte >= left.endByte || int(left.endByte) > len(source) {
+		return false
+	}
+	return string(source[left.startByte:left.endByte]) == "print"
 }
 
 func normalizeBashProgramVariableAssignments(root *Node, lang *Language) {
@@ -12912,10 +13181,14 @@ func repairPythonBlock(node *Node, arena *nodeArena, lang *Language, allowHoist 
 		if firstNamed == nil || lastSpan == nil {
 			return node, false
 		}
+		wantEndByte, wantEndPoint := lastSpan.endByte, lastSpan.endPoint
+		if pythonBlockShouldPreserveOriginalEnd(node, out, lang) {
+			wantEndByte, wantEndPoint = node.endByte, node.endPoint
+		}
 		if node.startByte == firstNamed.startByte &&
 			node.startPoint == firstNamed.startPoint &&
-			node.endByte == lastSpan.endByte &&
-			node.endPoint == lastSpan.endPoint {
+			node.endByte == wantEndByte &&
+			node.endPoint == wantEndPoint {
 			return node, false
 		}
 		changed = true
@@ -12939,9 +13212,14 @@ func repairPythonBlock(node *Node, arena *nodeArena, lang *Language, allowHoist 
 	if lastSpan != nil {
 		cloned.endByte = lastSpan.endByte
 		cloned.endPoint = lastSpan.endPoint
+		if pythonBlockShouldPreserveOriginalEnd(node, out, lang) {
+			cloned.endByte = node.endByte
+			cloned.endPoint = node.endPoint
+		}
 	}
 	return cloned, true
 }
+
 func pythonBlockStartAnchor(children []*Node, lang *Language) *Node {
 	for _, child := range children {
 		if child == nil {
@@ -12966,6 +13244,65 @@ func pythonBlockEndAnchor(children []*Node) *Node {
 		}
 	}
 	return nil
+}
+
+func pythonBlockShouldPreserveOriginalEnd(node *Node, children []*Node, lang *Language) bool {
+	if node == nil || lang == nil || len(children) == 0 {
+		return false
+	}
+	lastSpan := pythonBlockEndAnchor(children)
+	if lastSpan == nil || node.endByte <= lastSpan.endByte {
+		return false
+	}
+	lastChild := children[len(children)-1]
+	return lastChild != nil && lastChild.Type(lang) == ";"
+}
+
+func pythonBlockEndsWithSemicolon(node *Node, lang *Language) bool {
+	if node == nil || lang == nil || len(node.children) == 0 {
+		return false
+	}
+	lastChild := node.children[len(node.children)-1]
+	return lastChild != nil && lastChild.Type(lang) == ";"
+}
+
+func pythonFunctionDefinitionNameNode(node *Node, lang *Language) (*Node, bool) {
+	if node == nil || lang == nil || node.Type(lang) != "function_definition" {
+		return nil, false
+	}
+	for _, child := range node.children {
+		if child != nil && child.Type(lang) == "identifier" {
+			return child, true
+		}
+	}
+	return nil, false
+}
+
+func pythonCallIdentifierNode(node *Node, lang *Language) (*Node, bool) {
+	if node == nil || lang == nil || node.Type(lang) != "call" || len(node.children) == 0 {
+		return nil, false
+	}
+	fn := node.children[0]
+	if fn != nil && fn.Type(lang) == "identifier" {
+		return fn, true
+	}
+	return nil, false
+}
+
+func pythonNodeTextEqual(a, b *Node, source []byte) bool {
+	if a == nil || b == nil || len(source) == 0 {
+		return false
+	}
+	if a.startByte >= a.endByte || b.startByte >= b.endByte {
+		return false
+	}
+	if int(a.endByte) > len(source) || int(b.endByte) > len(source) {
+		return false
+	}
+	if a.endByte-a.startByte != b.endByte-b.startByte {
+		return false
+	}
+	return string(source[a.startByte:a.endByte]) == string(source[b.startByte:b.endByte])
 }
 
 func flattenDPropertyTypeChain(n *Node, lang *Language) ([]*Node, bool) {
