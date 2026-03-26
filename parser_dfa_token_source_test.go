@@ -271,3 +271,122 @@ func TestNextDFATokenUsesAfterWhitespaceLexState(t *testing.T) {
 		t.Fatalf("token text after whitespace = %q, want %q", got, want)
 	}
 }
+
+func TestNextDFATokenAtWhitespacePrefersEarlierBaseLexStateToken(t *testing.T) {
+	lang := &Language{
+		SymbolNames: []string{"end", "base_word", "after_ws_quote"},
+		LexStates: []LexState{
+			{
+				Default: -1,
+				EOF:     -1,
+				Transitions: []LexTransition{
+					{Lo: ' ', Hi: ' ', NextState: 0, Skip: true},
+					{Lo: '"', Hi: '"', NextState: 1},
+					{Lo: 'a', Hi: 'z', NextState: 2},
+				},
+			},
+			{
+				AcceptToken: 2,
+				Default:     -1,
+				EOF:         -1,
+			},
+			{
+				AcceptToken: 1,
+				Default:     -1,
+				EOF:         -1,
+				Transitions: []LexTransition{{Lo: 'a', Hi: 'z', NextState: 2}},
+			},
+			{
+				Default: -1,
+				EOF:     -1,
+				Transitions: []LexTransition{
+					{Lo: ' ', Hi: ' ', NextState: 3, Skip: true},
+					{Lo: '"', Hi: '"', NextState: 4},
+				},
+			},
+			{
+				AcceptToken: 2,
+				Default:     -1,
+				EOF:         -1,
+			},
+		},
+		LexModes: []LexMode{
+			{LexState: 0},
+			{LexState: 0, AfterWhitespaceLexState: 3},
+		},
+	}
+
+	d := &dfaTokenSource{
+		lexer:    NewLexer(lang.LexStates, []byte(" from \"x\"")),
+		language: lang,
+		state:    1,
+	}
+
+	tok := d.nextDFAToken()
+	if got, want := tok.Symbol, Symbol(1); got != want {
+		t.Fatalf("token symbol at whitespace = %d (%q), want %d (%q)", got, lang.SymbolNames[got], want, lang.SymbolNames[want])
+	}
+	if got, want := tok.Text, "from"; got != want {
+		t.Fatalf("token text at whitespace = %q, want %q", got, want)
+	}
+}
+
+func TestNextDFATokenAfterWhitespacePrefersEarlierBaseLexStateToken(t *testing.T) {
+	lang := &Language{
+		SymbolNames: []string{"end", "base_word", "after_ws_quote"},
+		LexStates: []LexState{
+			{
+				Default: -1,
+				EOF:     -1,
+				Transitions: []LexTransition{
+					{Lo: ' ', Hi: ' ', NextState: 0, Skip: true},
+					{Lo: '"', Hi: '"', NextState: 1},
+					{Lo: 'a', Hi: 'z', NextState: 2},
+				},
+			},
+			{
+				AcceptToken: 2,
+				Default:     -1,
+				EOF:         -1,
+			},
+			{
+				AcceptToken: 1,
+				Default:     -1,
+				EOF:         -1,
+				Transitions: []LexTransition{{Lo: 'a', Hi: 'z', NextState: 2}},
+			},
+			{
+				Default: -1,
+				EOF:     -1,
+				Transitions: []LexTransition{
+					{Lo: ' ', Hi: ' ', NextState: 3, Skip: true},
+					{Lo: '"', Hi: '"', NextState: 4},
+				},
+			},
+			{
+				AcceptToken: 2,
+				Default:     -1,
+				EOF:         -1,
+			},
+		},
+		LexModes: []LexMode{
+			{LexState: 0},
+			{LexState: 0, AfterWhitespaceLexState: 3},
+		},
+	}
+
+	d := &dfaTokenSource{
+		lexer:    NewLexer(lang.LexStates, []byte(" from \"x\"")),
+		language: lang,
+		state:    1,
+	}
+	d.lexer.pos = 1
+
+	tok := d.nextDFAToken()
+	if got, want := tok.Symbol, Symbol(1); got != want {
+		t.Fatalf("token symbol after whitespace = %d (%q), want %d (%q)", got, lang.SymbolNames[got], want, lang.SymbolNames[want])
+	}
+	if got, want := tok.Text, "from"; got != want {
+		t.Fatalf("token text after whitespace = %q, want %q", got, want)
+	}
+}

@@ -31,6 +31,7 @@ func TestCSSFunctionValueParity(t *testing.T) {
 	samples := []string{
 		"body { color: rgba(255, 255, 255, 0.9); }",
 		"body { text-shadow: 0 1px 0 rgba(255, 255, 255, 0.9); }",
+		"body { box-shadow: inset 1px 0 0 rgba(255, 255, 255, 0.2); }",
 		"body { color: hsla(0, 0%, 100%, 0.5); }",
 	}
 

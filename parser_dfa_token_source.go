@@ -74,6 +74,10 @@ func acquireDFATokenSource(lexer *Lexer, language *Language, lookupActionIndex f
 	ts.state = 0
 	ts.lookupActionIndex = lookupActionIndex
 	ts.hasKeywordState = hasKeywordState
+	if lexer != nil && language != nil {
+		ts.lexer.states = language.LexStates
+		ts.lexer.immediateTokens = language.ImmediateTokens
+	}
 	if language != nil && language.ExternalScanner != nil {
 		ts.externalPayload = language.ExternalScanner.Create()
 	}
@@ -291,10 +295,7 @@ func (d *dfaTokenSource) nextDFAToken() Token {
 	if d == nil || d.lexer == nil || d.language == nil {
 		return Token{}
 	}
-	lexState := d.lexStateForState(d.state)
-	tok := d.nextTokenForLexState(lexState)
-	tok = d.promoteKeyword(tok)
-	tok, endPos, endRow, endCol := d.normalizeDFAToken(tok, d.lexer.pos, d.lexer.row, d.lexer.col)
+	tok, endPos, endRow, endCol := d.scanPreferredTokenForState(d.state)
 	d.lexer.pos = endPos
 	d.lexer.row = endRow
 	d.lexer.col = endCol
@@ -336,12 +337,16 @@ func (d *dfaTokenSource) nextGLRUnionDFAToken() (Token, bool) {
 		return Token{}, false
 	}
 
-	// Check if all GLR states share the same lex mode — if so, no union needed.
-	primaryLexState := d.lexStateForState(d.state)
+	// Check if all GLR states share the same lex mode pair — if so, no union needed.
+	primaryMode := d.language.LexModes[d.state]
 	allSame := true
 	for _, st := range d.glrStates {
-		ls := d.lexStateForState(st)
-		if ls != primaryLexState {
+		if int(st) >= len(d.language.LexModes) {
+			allSame = false
+			break
+		}
+		mode := d.language.LexModes[st]
+		if mode.LexState != primaryMode.LexState || mode.AfterWhitespaceLexState != primaryMode.AfterWhitespaceLexState {
 			allSame = false
 			break
 		}
@@ -363,28 +368,28 @@ func (d *dfaTokenSource) nextGLRUnionDFAToken() (Token, bool) {
 	bestVisible := false
 	bestOriginActions := 0
 
-	// Deduplicate lex states to avoid redundant scans.
-	seen := make(map[uint16]struct{}, len(d.glrStates))
+	type lexModeKey struct {
+		lexState                uint16
+		afterWhitespaceLexState uint16
+	}
+
+	// Deduplicate equivalent lex mode pairs to avoid redundant scans.
+	seen := make(map[lexModeKey]struct{}, len(d.glrStates))
 	for _, st := range d.glrStates {
-		lexState := d.lexStateForState(st)
-		if _, ok := seen[lexState]; ok {
+		if int(st) >= len(d.language.LexModes) {
 			continue
 		}
-		seen[lexState] = struct{}{}
+		mode := d.language.LexModes[st]
+		key := lexModeKey{
+			lexState:                mode.LexState,
+			afterWhitespaceLexState: mode.AfterWhitespaceLexState,
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
 
-		d.lexer.pos = startPos
-		d.lexer.row = startRow
-		d.lexer.col = startCol
-
-		prevState := d.state
-		d.state = st
-		candTok := d.nextTokenForLexState(lexState)
-		candTok = d.promoteKeyword(candTok)
-		candTok, candEndPos, candEndRow, candEndCol := d.normalizeDFAToken(candTok, d.lexer.pos, d.lexer.row, d.lexer.col)
-		d.lexer.pos = candEndPos
-		d.lexer.row = candEndRow
-		d.lexer.col = candEndCol
-		d.state = prevState
+		candTok, candEndPos, candEndRow, candEndCol := d.scanPreferredTokenForState(st)
 
 		score := 0
 		for _, liveState := range d.glrStates {
@@ -451,17 +456,68 @@ func (d *dfaTokenSource) lexStateForState(state StateID) uint16 {
 	return mode.LexState
 }
 
-func (d *dfaTokenSource) isAfterWhitespacePosition() bool {
+func (d *dfaTokenSource) scanPreferredTokenForState(state StateID) (Token, int, uint32, uint32) {
+	if d == nil || d.lexer == nil || d.language == nil || int(state) >= len(d.language.LexModes) {
+		return Token{}, d.lexer.pos, d.lexer.row, d.lexer.col
+	}
+	mode := d.language.LexModes[state]
+	if mode.AfterWhitespaceLexState == 0 {
+		return d.scanDFATokenForState(state, mode.LexState)
+	}
+	if !d.isAtWhitespacePosition() && !d.isAfterWhitespacePosition() {
+		return d.scanDFATokenForState(state, mode.LexState)
+	}
+
+	baseTok, baseEndPos, baseEndRow, baseEndCol := d.scanDFATokenForState(state, mode.LexState)
+	afterTok, afterEndPos, afterEndRow, afterEndCol := d.scanDFATokenForState(state, mode.AfterWhitespaceLexState)
+	if d.shouldPreferBaseLexStateToken(baseTok, afterTok) {
+		return baseTok, baseEndPos, baseEndRow, baseEndCol
+	}
+	return afterTok, afterEndPos, afterEndRow, afterEndCol
+}
+
+func (d *dfaTokenSource) scanDFATokenForState(state StateID, lexState uint16) (Token, int, uint32, uint32) {
 	if d == nil || d.lexer == nil {
+		return Token{}, 0, 0, 0
+	}
+	savedPos := d.lexer.pos
+	savedRow := d.lexer.row
+	savedCol := d.lexer.col
+	savedState := d.state
+
+	d.state = state
+	tok := d.nextTokenForLexState(lexState)
+	tok = d.promoteKeyword(tok)
+	tok, endPos, endRow, endCol := d.normalizeDFAToken(tok, d.lexer.pos, d.lexer.row, d.lexer.col)
+
+	d.lexer.pos = savedPos
+	d.lexer.row = savedRow
+	d.lexer.col = savedCol
+	d.state = savedState
+
+	return tok, endPos, endRow, endCol
+}
+
+func (d *dfaTokenSource) shouldPreferBaseLexStateToken(baseTok, afterTok Token) bool {
+	if baseTok.Symbol == 0 {
 		return false
 	}
-	if d.lexer.pos < len(d.lexer.source) {
-		r, _ := utf8.DecodeRune(d.lexer.source[d.lexer.pos:])
-		if unicode.IsSpace(r) {
-			return true
-		}
+	if afterTok.Symbol == 0 {
+		return true
 	}
-	if d.lexer.pos <= 0 || d.lexer.pos > len(d.lexer.source) {
+	return baseTok.StartByte < afterTok.StartByte
+}
+
+func (d *dfaTokenSource) isAtWhitespacePosition() bool {
+	if d == nil || d.lexer == nil || d.lexer.pos < 0 || d.lexer.pos >= len(d.lexer.source) {
+		return false
+	}
+	r, _ := utf8.DecodeRune(d.lexer.source[d.lexer.pos:])
+	return unicode.IsSpace(r)
+}
+
+func (d *dfaTokenSource) isAfterWhitespacePosition() bool {
+	if d == nil || d.lexer == nil || d.lexer.pos <= 0 || d.lexer.pos > len(d.lexer.source) {
 		return false
 	}
 	r, _ := utf8.DecodeLastRune(d.lexer.source[:d.lexer.pos])

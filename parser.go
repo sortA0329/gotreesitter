@@ -473,7 +473,7 @@ func (p *Parser) tryRelexCurrentStateDFA(tok Token, parserState StateID, ts Toke
 		return Token{}, false
 	}
 	dts, ok := ts.(*dfaTokenSource)
-	if !ok || dts == nil || dts.lexer == nil || dts.language == nil || dts.language.ExternalScanner != nil {
+	if !ok || dts == nil || dts.lexer == nil || dts.language == nil {
 		return Token{}, false
 	}
 	if tok.Symbol == 0 && tok.StartByte >= uint32(len(dts.lexer.source)) {
@@ -482,12 +482,14 @@ func (p *Parser) tryRelexCurrentStateDFA(tok Token, parserState StateID, ts Toke
 	if int(parserState) >= len(p.language.LexModes) {
 		return Token{}, false
 	}
-	lexState := p.language.LexModes[parserState].LexState
+	if dts.language.ExternalScanner != nil && p.language.LexModes[parserState].ExternalLexState != 0 {
+		return Token{}, false
+	}
 	savedPos, savedRow, savedCol := dts.lexer.pos, dts.lexer.row, dts.lexer.col
 	dts.lexer.pos = int(tok.StartByte)
-	tok2 := dts.nextTokenForLexState(lexState)
-	tok2 = dts.promoteKeyword(tok2)
-	tok2, endPos, endRow, endCol := dts.normalizeDFAToken(tok2, dts.lexer.pos, dts.lexer.row, dts.lexer.col)
+	dts.lexer.row = tok.StartPoint.Row
+	dts.lexer.col = tok.StartPoint.Column
+	tok2, endPos, endRow, endCol := dts.scanPreferredTokenForState(parserState)
 	if tok2.Symbol == 0 {
 		dts.lexer.pos, dts.lexer.row, dts.lexer.col = savedPos, savedRow, savedCol
 		return Token{}, false
