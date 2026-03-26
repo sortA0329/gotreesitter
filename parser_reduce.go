@@ -2028,11 +2028,11 @@ func (p *Parser) collapsibleUnarySelfReduction(act ParseAction, tok Token, arena
 	if p.reduceProductionHasFields(act.ProductionID) || len(p.reduceAliasSequence(act.ProductionID)) != 0 {
 		return nil
 	}
-	if !p.isSingleTokenWrapperSymbol(act.Symbol) {
-		return nil
-	}
 	if child.symbol != act.Symbol {
 		if child.ChildCount() != 0 || !p.canCollapseNamedLeafWrapper(act.Symbol, child.symbol) {
+			return nil
+		}
+		if !p.isSingleTokenWrapperSymbol(act.Symbol) && !p.sameSymbolName(act.Symbol, child.symbol) {
 			return nil
 		}
 		return aliasedNodeInArena(arena, p.language, child, act.Symbol)
@@ -2070,6 +2070,25 @@ func (p *Parser) isSingleTokenWrapperSymbol(sym Symbol) bool {
 		return false
 	}
 	return p.singleTokenWrapperSymbol[sym]
+}
+
+func (p *Parser) sameSymbolName(a, b Symbol) bool {
+	if p == nil || p.language == nil {
+		return false
+	}
+	meta := p.language.SymbolMetadata
+	if int(a) < len(meta) && int(b) < len(meta) {
+		an := meta[a].Name
+		bn := meta[b].Name
+		if an != "" && bn != "" {
+			return an == bn
+		}
+	}
+	names := p.language.SymbolNames
+	if int(a) >= len(names) || int(b) >= len(names) {
+		return false
+	}
+	return names[a] == names[b]
 }
 
 func recoverAction(entry *ParseActionEntry) (ParseAction, bool) {

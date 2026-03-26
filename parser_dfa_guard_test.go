@@ -161,8 +161,8 @@ func TestNextGLRUnionDFATokenPrefersVisibleTokenOnExactTie(t *testing.T) {
 		},
 		SymbolCount:     3,
 		TokenCount:      3,
-		StateCount:      2,
-		LargeStateCount: 2,
+		StateCount:      3,
+		LargeStateCount: 3,
 		InitialState:    1,
 		LexStates: []LexState{
 			{Default: -1, EOF: -1},
