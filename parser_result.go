@@ -3,6 +3,8 @@ package gotreesitter
 import (
 	"bytes"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // buildResultFromGLR picks the best stack and constructs the final tree.
@@ -556,6 +558,9 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, p *Parser) {
 		normalizeCPreprocNewlineSpans(root, source, lang)
 		normalizeCPointerAssignmentPrecedence(root, lang)
 	case "c_sharp":
+		normalizeCSharpRecoveredNamespaces(root, source, lang)
+		normalizeCSharpRecoveredTypeDeclarations(root, source, lang)
+		normalizeCSharpUnicodeIdentifierSpans(root, source, lang)
 		normalizeCSharpQueryExpressions(root, source, p)
 		normalizeCSharpInvocationStatements(root, source, lang)
 		normalizeCSharpTypeConstraintKeywords(root, lang)
@@ -9853,6 +9858,393 @@ func findMatchingBraceByte(source []byte, openPos, limit int) int {
 		}
 	}
 	return -1
+}
+
+func normalizeCSharpRecoveredNamespaces(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "c_sharp" || len(source) == 0 || root.ownerArena == nil {
+		return
+	}
+	rootType := root.Type(lang)
+	if rootType != "ERROR" && rootType != "compilation_unit" {
+		return
+	}
+	recoveredChildren := make([]*Node, 0, len(root.children))
+	changed := false
+	for i := 0; i < len(root.children); {
+		if recovered, next, ok := csharpRecoverNamespaceFromChildren(root.children, i, source, lang, root.ownerArena); ok {
+			recoveredChildren = append(recoveredChildren, recovered)
+			i = next
+			changed = true
+			continue
+		}
+		if child := root.children[i]; child != nil {
+			if recovered, ok := csharpRecoverWrappedTopLevelDeclaration(child, lang, root.ownerArena); ok {
+				recoveredChildren = append(recoveredChildren, recovered)
+				changed = true
+			} else {
+				recoveredChildren = append(recoveredChildren, child)
+			}
+		}
+		i++
+	}
+	if !changed {
+		return
+	}
+	if root.ownerArena != nil {
+		buf := root.ownerArena.allocNodeSlice(len(recoveredChildren))
+		copy(buf, recoveredChildren)
+		recoveredChildren = buf
+	}
+	root.children = recoveredChildren
+	root.hasError = false
+	populateParentNode(root, root.children)
+	if root.Type(lang) == "ERROR" && csharpCanRecoverCompilationUnitRoot(root, lang) {
+		if sym, ok := lang.SymbolByName("compilation_unit"); ok {
+			root.symbol = sym
+			root.isNamed = int(sym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[sym].Named
+			root.hasError = false
+			populateParentNode(root, root.children)
+		}
+	}
+}
+
+func csharpRecoverNamespaceFromChildren(children []*Node, startIdx int, source []byte, lang *Language, arena *nodeArena) (*Node, int, bool) {
+	if startIdx < 0 || startIdx >= len(children) || lang == nil || arena == nil {
+		return nil, startIdx, false
+	}
+	startNode := children[startIdx]
+	if startNode == nil || int(startNode.startByte) >= len(source) {
+		return nil, startIdx, false
+	}
+	switch startNode.Type(lang) {
+	case "ERROR", "global_statement", "statement":
+	default:
+		return nil, startIdx, false
+	}
+	nsStart := csharpSkipSpaceBytes(source, startNode.startByte)
+	if int(nsStart)+len("namespace") > len(source) || !bytes.HasPrefix(source[nsStart:], []byte("namespace")) {
+		return nil, startIdx, false
+	}
+	openRel := bytes.IndexByte(source[nsStart:], '{')
+	if openRel < 0 {
+		return nil, startIdx, false
+	}
+	openBrace := int(nsStart) + openRel
+	closeBrace := findMatchingBraceByte(source, openBrace, len(source))
+	if closeBrace < 0 {
+		return nil, startIdx, false
+	}
+	nsEnd := uint32(closeBrace + 1)
+	recovered, ok := csharpRecoverNamespaceNodeFromRange(source, nsStart, nsEnd, lang, arena)
+	if !ok {
+		return nil, startIdx, false
+	}
+	nextIdx := startIdx + 1
+	for nextIdx < len(children) {
+		child := children[nextIdx]
+		if child == nil {
+			nextIdx++
+			continue
+		}
+		if child.startByte >= nsEnd {
+			break
+		}
+		nextIdx++
+	}
+	return recovered, nextIdx, true
+}
+
+func csharpRecoverNamespaceNodeFromRange(source []byte, start, end uint32, lang *Language, arena *nodeArena) (*Node, bool) {
+	if lang == nil || arena == nil || start >= end || int(end) > len(source) {
+		return nil, false
+	}
+	tree, err := parseWithSnippetParser(lang, source[start:end])
+	if err != nil || tree == nil || tree.RootNode() == nil {
+		if tree != nil {
+			tree.Release()
+		}
+		return nil, false
+	}
+	defer tree.Release()
+	startPoint := advancePointByBytes(Point{}, source[:start])
+	offsetRoot := tree.RootNodeWithOffset(start, startPoint)
+	if offsetRoot == nil {
+		return nil, false
+	}
+	return csharpExtractRecoveredTopLevelNode(offsetRoot, lang, arena, end, "namespace_declaration")
+}
+
+func csharpRecoverWrappedTopLevelDeclaration(n *Node, lang *Language, arena *nodeArena) (*Node, bool) {
+	if n == nil || lang == nil || arena == nil || n.Type(lang) != "ERROR" {
+		return nil, false
+	}
+	var candidate *Node
+	for _, child := range n.children {
+		if child == nil {
+			continue
+		}
+		cur := child
+		if cur.Type(lang) == "declaration" && len(cur.children) == 1 && cur.children[0] != nil {
+			cur = cur.children[0]
+		}
+		if !csharpIsRecoveredTopLevelDeclaration(cur, lang) {
+			continue
+		}
+		if candidate != nil {
+			return nil, false
+		}
+		candidate = cur
+	}
+	if candidate == nil {
+		return nil, false
+	}
+	return cloneTreeNodesIntoArena(candidate, arena), true
+}
+
+func csharpExtractRecoveredTopLevelNode(root *Node, lang *Language, arena *nodeArena, wantEnd uint32, wantType string) (*Node, bool) {
+	if root == nil || lang == nil || arena == nil {
+		return nil, false
+	}
+	var walk func(*Node) *Node
+	walk = func(n *Node) *Node {
+		if n == nil {
+			return nil
+		}
+		if n.Type(lang) == wantType && !n.HasError() && n.endByte == wantEnd {
+			return n
+		}
+		for i := 0; i < n.ChildCount(); i++ {
+			if got := walk(n.Child(i)); got != nil {
+				return got
+			}
+		}
+		return nil
+	}
+	node := walk(root)
+	if node == nil {
+		return nil, false
+	}
+	return cloneTreeNodesIntoArena(node, arena), true
+}
+
+func normalizeCSharpUnicodeIdentifierSpans(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "c_sharp" || len(source) == 0 {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type(lang) == "identifier" && len(n.children) == 0 {
+			if end := csharpUnicodeIdentifierEnd(source, n.startByte); end > n.endByte && csharpCanExtendLeafNodeTo(n, end) {
+				n.endByte = end
+				n.endPoint = advancePointByBytes(Point{}, source[:end])
+			}
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+
+func csharpUnicodeIdentifierEnd(source []byte, start uint32) uint32 {
+	if int(start) >= len(source) {
+		return start
+	}
+	r, size := utf8.DecodeRune(source[start:])
+	if size == 0 || r == utf8.RuneError && size == 1 || !csharpIdentifierStartRune(r) {
+		return start
+	}
+	pos := start + uint32(size)
+	for int(pos) < len(source) {
+		r, size = utf8.DecodeRune(source[pos:])
+		if size == 0 || r == utf8.RuneError && size == 1 || !csharpIdentifierContinueRune(r) {
+			break
+		}
+		pos += uint32(size)
+	}
+	return pos
+}
+
+func csharpIdentifierStartRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.In(r, unicode.Nl)
+}
+
+func csharpIdentifierContinueRune(r rune) bool {
+	return csharpIdentifierStartRune(r) ||
+		unicode.IsDigit(r) ||
+		unicode.In(r, unicode.Mn, unicode.Mc, unicode.Pc, unicode.Cf)
+}
+
+func csharpCanExtendLeafNodeTo(n *Node, end uint32) bool {
+	if n == nil || end <= n.endByte {
+		return false
+	}
+	if n.parent == nil {
+		return true
+	}
+	for _, sibling := range n.parent.children {
+		if sibling == nil || sibling == n {
+			continue
+		}
+		if sibling.startByte >= n.endByte && sibling.startByte < end {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeCSharpRecoveredTypeDeclarations(root *Node, source []byte, lang *Language) {
+	if root == nil || lang == nil || lang.Name != "c_sharp" || root.Type(lang) != "ERROR" || len(source) == 0 || root.ownerArena == nil {
+		return
+	}
+	compilationUnitSym, ok := lang.SymbolByName("compilation_unit")
+	if !ok {
+		return
+	}
+	compilationUnitNamed := int(compilationUnitSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[compilationUnitSym].Named
+	recoveredChildren := make([]*Node, 0, len(root.children))
+	for _, child := range root.children {
+		if child == nil {
+			continue
+		}
+		if csharpIsRecoveredTopLevelDeclaration(child, lang) {
+			recoveredChildren = append(recoveredChildren, child)
+			continue
+		}
+		recovered, ok := csharpRecoverEmptyTypeDeclarationFromError(child, source, lang, root.ownerArena)
+		if !ok {
+			return
+		}
+		recoveredChildren = append(recoveredChildren, recovered)
+	}
+	if len(recoveredChildren) == 0 {
+		return
+	}
+	if root.ownerArena != nil {
+		buf := root.ownerArena.allocNodeSlice(len(recoveredChildren))
+		copy(buf, recoveredChildren)
+		recoveredChildren = buf
+	}
+	root.symbol = compilationUnitSym
+	root.isNamed = compilationUnitNamed
+	root.children = recoveredChildren
+	root.fieldIDs = nil
+	root.fieldSources = nil
+	root.productionID = 0
+	root.hasError = false
+	populateParentNode(root, root.children)
+}
+
+func csharpCanRecoverCompilationUnitRoot(root *Node, lang *Language) bool {
+	if root == nil || lang == nil {
+		return false
+	}
+	sawTopLevel := false
+	for _, child := range root.children {
+		if child == nil {
+			continue
+		}
+		if !csharpIsRecoveredTopLevelDeclaration(child, lang) {
+			return false
+		}
+		sawTopLevel = true
+	}
+	return sawTopLevel
+}
+
+func csharpIsRecoveredTopLevelDeclaration(n *Node, lang *Language) bool {
+	if n == nil || lang == nil {
+		return false
+	}
+	switch n.Type(lang) {
+	case "class_declaration", "struct_declaration", "record_declaration", "interface_declaration", "enum_declaration", "delegate_declaration", "namespace_declaration", "file_scoped_namespace_declaration", "using_directive", "extern_alias_directive", "global_statement", "comment":
+		return true
+	default:
+		return false
+	}
+}
+
+func csharpRecoverEmptyTypeDeclarationFromError(n *Node, source []byte, lang *Language, arena *nodeArena) (*Node, bool) {
+	if n == nil || lang == nil || arena == nil || n.Type(lang) != "ERROR" || len(n.children) == 0 {
+		return nil, false
+	}
+	type recoverySpec struct {
+		initName string
+		declName string
+	}
+	specs := []recoverySpec{
+		{initName: "_class_declaration_initializer", declName: "class_declaration"},
+		{initName: "_struct_declaration_initializer", declName: "struct_declaration"},
+		{initName: "_record_declaration_initializer", declName: "record_declaration"},
+	}
+	for _, spec := range specs {
+		for _, child := range n.children {
+			if child == nil || child.Type(lang) != spec.initName {
+				continue
+			}
+			return csharpBuildRecoveredEmptyTypeDeclaration(n, child, source, lang, arena, spec.declName)
+		}
+	}
+	return nil, false
+}
+
+func csharpBuildRecoveredEmptyTypeDeclaration(errNode, initNode *Node, source []byte, lang *Language, arena *nodeArena, declName string) (*Node, bool) {
+	if errNode == nil || initNode == nil || lang == nil || arena == nil || int(errNode.endByte) > len(source) {
+		return nil, false
+	}
+	openRel := bytes.IndexByte(source[initNode.endByte:errNode.endByte], '{')
+	if openRel < 0 {
+		return nil, false
+	}
+	openBrace := int(initNode.endByte) + openRel
+	closeBrace := findMatchingBraceByte(source, openBrace, int(errNode.endByte))
+	if closeBrace < 0 || closeBrace <= openBrace || !bytesAreTrivia(source[openBrace+1:closeBrace]) {
+		return nil, false
+	}
+	declSym, ok := lang.SymbolByName(declName)
+	if !ok {
+		return nil, false
+	}
+	declNamed := int(declSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[declSym].Named
+	declList, ok := csharpBuildEmptyDeclarationListNode(arena, source, lang, uint32(openBrace), uint32(closeBrace))
+	if !ok {
+		return nil, false
+	}
+	children := make([]*Node, 0, len(initNode.children)+1)
+	for _, child := range initNode.children {
+		if child != nil {
+			children = append(children, child)
+		}
+	}
+	children = append(children, declList)
+	if arena != nil {
+		buf := arena.allocNodeSlice(len(children))
+		copy(buf, children)
+		children = buf
+	}
+	recovered := newParentNodeInArena(arena, declSym, declNamed, children, nil, 0)
+	recovered.hasError = false
+	return recovered, true
+}
+
+func csharpBuildEmptyDeclarationListNode(arena *nodeArena, source []byte, lang *Language, openBrace, closeBrace uint32) (*Node, bool) {
+	sym, ok := lang.SymbolByName("declaration_list")
+	if !ok {
+		return nil, false
+	}
+	openTok, ok := csharpBuildLeafNodeByName(arena, source, lang, "{", openBrace, openBrace+1)
+	if !ok {
+		return nil, false
+	}
+	closeTok, ok := csharpBuildLeafNodeByName(arena, source, lang, "}", closeBrace, closeBrace+1)
+	if !ok {
+		return nil, false
+	}
+	named := int(sym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[sym].Named
+	return newParentNodeInArena(arena, sym, named, []*Node{openTok, closeTok}, nil, 0), true
 }
 
 func normalizeCSharpTypeConstraintKeywords(root *Node, lang *Language) {

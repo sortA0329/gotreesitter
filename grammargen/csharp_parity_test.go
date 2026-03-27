@@ -104,6 +104,76 @@ func TestCSharpQuerySyntaxClauseParity(t *testing.T) {
 	}
 }
 
+func TestCSharpConstrainedTypeDeclarationParity(t *testing.T) {
+	genLang := loadGeneratedCSharpLanguageForParity(t)
+	refLang := grammars.CSharpLanguage()
+	adaptExternalScanner(refLang, genLang)
+
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			name: "class_constraint",
+			src:  "public class F<T> where T:struct {}\n",
+		},
+		{
+			name: "struct_constraint",
+			src:  "public struct F<T> where T:struct {}\n",
+		},
+		{
+			name: "record_constraints",
+			src:  "private record F<T1, T2> where T1 : I1, I2, new() where T2 : I2 { }\n",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertGeneratedAndReferenceDeepParity(t, genLang, refLang, tc.src)
+		})
+	}
+}
+
+func TestCSharpSourceFileStructureParity(t *testing.T) {
+	genLang := loadGeneratedCSharpLanguageForParity(t)
+	refLang := grammars.CSharpLanguage()
+	adaptExternalScanner(refLang, genLang)
+
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			name: "namespace_with_using",
+			src: "namespace Foo {\n" +
+				"  using A;\n" +
+				"}\n",
+		},
+		{
+			name: "extern_alias_then_namespace",
+			src: "extern alias A;\n" +
+				"namespace Foo {\n" +
+				"  using A;\n" +
+				"}\n",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertGeneratedAndReferenceDeepParity(t, genLang, refLang, tc.src)
+		})
+	}
+}
+
+func TestCSharpUnicodeIdentifierParity(t *testing.T) {
+	genLang := loadGeneratedCSharpLanguageForParity(t)
+	refLang := grammars.CSharpLanguage()
+	adaptExternalScanner(refLang, genLang)
+
+	sample := "int ග්‍රහලෝකය = 0;\n"
+	assertGeneratedAndReferenceDeepParity(t, genLang, refLang, sample)
+}
+
 func loadGeneratedCSharpLanguageForParity(t *testing.T) *gotreesitter.Language {
 	t.Helper()
 
