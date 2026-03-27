@@ -591,6 +591,11 @@ func normalizeCSharpRecoveredTypeDeclarations(root *Node, source []byte, lang *L
 			i = next
 			continue
 		}
+		if recovered, next, ok := csharpRecoverNonEmptyTopLevelTypeDeclarationFromChildren(root.children, i, source, lang, root.ownerArena); ok {
+			recoveredChildren = append(recoveredChildren, recovered)
+			i = next
+			continue
+		}
 		if csharpIsRecoveredTopLevelDeclaration(child, lang) {
 			recoveredChildren = append(recoveredChildren, child)
 			i++
@@ -599,6 +604,12 @@ func normalizeCSharpRecoveredTypeDeclarations(root *Node, source []byte, lang *L
 		attributed, ok := csharpRecoverAttributedTopLevelTypeDeclarationFromError(child, source, lang, root.ownerArena)
 		if ok {
 			recoveredChildren = append(recoveredChildren, attributed)
+			i++
+			continue
+		}
+		nonEmpty, ok := csharpRecoverNonEmptyTypeDeclarationFromError(child, source, lang, root.ownerArena)
+		if ok {
+			recoveredChildren = append(recoveredChildren, nonEmpty)
 			i++
 			continue
 		}

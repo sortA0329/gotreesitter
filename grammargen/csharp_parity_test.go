@@ -247,6 +247,128 @@ func TestCSharpAttributeDeclarationParity(t *testing.T) {
 	}
 }
 
+func TestCSharpTypeDeclarationBodyParity(t *testing.T) {
+	genLang := loadGeneratedCSharpLanguageForParity(t)
+	refLang := grammars.CSharpLanguage()
+	adaptExternalScanner(refLang, genLang)
+
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			name: "using_declaration_method",
+			src: "class A {\n" +
+				"  void Sample() {\n" +
+				"    using var a = new A();\n" +
+				"  }\n" +
+				"}\n",
+		},
+		{
+			name: "local_function_tuple_method",
+			src: "class A {\n" +
+				"  void Sample() {\n" +
+				"    (bool a, bool b) M2() {\n" +
+				"      return (true, false);\n" +
+				"    }\n" +
+				"  }\n" +
+				"}\n",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertGeneratedAndReferenceDeepParity(t, genLang, refLang, tc.src)
+		})
+	}
+}
+
+func TestGeneratedCSharpTypeDeclarationBodyRecovery(t *testing.T) {
+	genLang := loadGeneratedCSharpLanguageForParity(t)
+	refLang := grammars.CSharpLanguage()
+	adaptExternalScanner(refLang, genLang)
+	parser := gotreesitter.NewParser(genLang)
+
+	cases := []struct {
+		name     string
+		src      string
+		wantStmt string
+	}{
+		{
+			name: "initializers_prefix_method",
+			src: "class A {\n" +
+				"  void Sample() {\n" +
+				"    int a;\n" +
+				"    int a = 1, b = 2;\n" +
+				"    const int a = 1;\n" +
+				"    const int a = 1, b = 2;\n" +
+				"    ref var value = ref data[i];\n" +
+				"    var g = args[0].Length;\n" +
+				"  }\n" +
+				"}\n",
+			wantStmt: "local_declaration_statement",
+		},
+		{
+			name: "using_prefix_method",
+			src: "class A {\n" +
+				"  void Sample() {\n" +
+				"    using (var a = b) {\n" +
+				"      return;\n" +
+				"    }\n" +
+				"\n" +
+				"    using (Stream a = File.OpenRead(\"a\"), b = new BinaryReader(a)) {\n" +
+				"      return;\n" +
+				"    }\n" +
+				"  }\n" +
+				"}\n",
+			wantStmt: "using_statement",
+		},
+		{
+			name: "variable_declarations_prefix_method",
+			src: "class A\n" +
+				"{\n" +
+				"    public void M()\n" +
+				"    {\n" +
+				"        foreach (int i in new[] { 1 })\n" +
+				"        {\n" +
+				"            int j = i;\n" +
+				"        }\n" +
+				"\n" +
+				"        var x = from a in sourceA\n" +
+				"                join b in sourceB on a.FK equals b.PK\n" +
+				"                group a by a.X into g\n" +
+				"                orderby g ascending\n" +
+				"                select new { A.A, B.B };\n" +
+				"    }\n" +
+				"}\n",
+			wantStmt: "foreach_statement",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tree, err := parser.Parse([]byte(tc.src))
+			if err != nil {
+				t.Fatalf("parse failed: %v", err)
+			}
+			root := tree.RootNode()
+			if root == nil || root.HasError() {
+				t.Fatalf("expected no-error tree, got %s", root.SExpr(genLang))
+			}
+			if got := findFirstNamedDescendantOfType(root, genLang, "class_declaration"); got == nil {
+				t.Fatalf("missing class_declaration: %s", root.SExpr(genLang))
+			}
+			method := findFirstNamedDescendantOfType(root, genLang, "method_declaration")
+			if method == nil {
+				t.Fatalf("missing method_declaration: %s", root.SExpr(genLang))
+			}
+			if got := findFirstNamedDescendantOfType(method, genLang, tc.wantStmt); got == nil {
+				t.Fatalf("missing %s in recovered method: %s", tc.wantStmt, method.SExpr(genLang))
+			}
+		})
+	}
+}
+
 func TestCSharpUnicodeIdentifierParity(t *testing.T) {
 	genLang := loadGeneratedCSharpLanguageForParity(t)
 	refLang := grammars.CSharpLanguage()
@@ -289,4 +411,19 @@ func loadGeneratedCSharpLanguageForParity(t *testing.T) *gotreesitter.Language {
 		t.Fatalf("generate C# language: %v", err)
 	}
 	return genLang
+}
+
+func findFirstNamedDescendantOfType(node *gotreesitter.Node, lang *gotreesitter.Language, typ string) *gotreesitter.Node {
+	if node == nil {
+		return nil
+	}
+	if node.IsNamed() && node.Type(lang) == typ {
+		return node
+	}
+	for i := 0; i < node.NamedChildCount(); i++ {
+		if got := findFirstNamedDescendantOfType(node.NamedChild(i), lang, typ); got != nil {
+			return got
+		}
+	}
+	return nil
 }
