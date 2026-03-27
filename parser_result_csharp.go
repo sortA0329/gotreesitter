@@ -580,12 +580,26 @@ func normalizeCSharpRecoveredTypeDeclarations(root *Node, source []byte, lang *L
 	}
 	compilationUnitNamed := int(compilationUnitSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[compilationUnitSym].Named
 	recoveredChildren := make([]*Node, 0, len(root.children))
-	for _, child := range root.children {
+	for i := 0; i < len(root.children); {
+		child := root.children[i]
 		if child == nil {
+			i++
+			continue
+		}
+		if recovered, next, ok := csharpRecoverAttributedTopLevelTypeDeclarationFromChildren(root.children, i, source, lang, root.ownerArena); ok {
+			recoveredChildren = append(recoveredChildren, recovered)
+			i = next
 			continue
 		}
 		if csharpIsRecoveredTopLevelDeclaration(child, lang) {
 			recoveredChildren = append(recoveredChildren, child)
+			i++
+			continue
+		}
+		attributed, ok := csharpRecoverAttributedTopLevelTypeDeclarationFromError(child, source, lang, root.ownerArena)
+		if ok {
+			recoveredChildren = append(recoveredChildren, attributed)
+			i++
 			continue
 		}
 		recovered, ok := csharpRecoverEmptyTypeDeclarationFromError(child, source, lang, root.ownerArena)
@@ -593,6 +607,7 @@ func normalizeCSharpRecoveredTypeDeclarations(root *Node, source []byte, lang *L
 			return
 		}
 		recoveredChildren = append(recoveredChildren, recovered)
+		i++
 	}
 	if len(recoveredChildren) == 0 {
 		return

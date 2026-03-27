@@ -211,6 +211,42 @@ func TestCSharpTopLevelChunkParity(t *testing.T) {
 	}
 }
 
+func TestCSharpAttributeDeclarationParity(t *testing.T) {
+	genLang := loadGeneratedCSharpLanguageForParity(t)
+	refLang := grammars.CSharpLanguage()
+	adaptExternalScanner(refLang, genLang)
+
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			name: "attribute_member_access_argument",
+			src:  "[A(B.C)] class D {}\n",
+		},
+		{
+			name: "qualified_attribute_member_access_argument",
+			src:  "[NS.A(B.C)] class D {}\n",
+		},
+		{
+			name: "stacked_attribute_lists",
+			src: "[One][Two]\n" +
+				"[Three]\n" +
+				"class A { }\n",
+		},
+		{
+			name: "multi_attribute_struct",
+			src:  "[A,B()][C] struct A { }\n",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertGeneratedAndReferenceDeepParity(t, genLang, refLang, tc.src)
+		})
+	}
+}
+
 func TestCSharpUnicodeIdentifierParity(t *testing.T) {
 	genLang := loadGeneratedCSharpLanguageForParity(t)
 	refLang := grammars.CSharpLanguage()
