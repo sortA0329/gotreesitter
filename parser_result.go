@@ -554,6 +554,7 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, p *Parser) {
 		normalizeCSharpRecoveredTopLevelChunks(root, source, p)
 		normalizeCSharpRecoveredNamespaces(root, source, lang)
 		normalizeCSharpRecoveredTypeDeclarations(root, source, lang)
+		normalizeCollapsedNamedLeafChildren(root, lang, "implicit_type", "var")
 		normalizeCSharpUnicodeIdentifierSpans(root, source, lang)
 		normalizeCSharpQueryExpressions(root, source, p)
 		normalizeCSharpInvocationStatements(root, source, lang)
