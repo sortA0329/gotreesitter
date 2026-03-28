@@ -23,6 +23,15 @@ func TestCSharpInterfaceDefaultMethodInvocationParity(t *testing.T) {
 	assertGeneratedAndReferenceDeepParity(t, genLang, refLang, sample)
 }
 
+func TestCSharpContextualFileInvocationParity(t *testing.T) {
+	genLang := loadGeneratedCSharpLanguageForParity(t)
+	refLang := grammars.CSharpLanguage()
+	adaptExternalScanner(refLang, genLang)
+
+	sample := "file.Method(1, 2);\n"
+	assertGeneratedAndReferenceDeepParity(t, genLang, refLang, sample)
+}
+
 func TestCSharpQueryJoinClauseParity(t *testing.T) {
 	genLang := loadGeneratedCSharpLanguageForParity(t)
 	refLang := grammars.CSharpLanguage()

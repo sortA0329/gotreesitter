@@ -89,6 +89,60 @@ func normalizeCSharpInvocationStatements(root *Node, source []byte, lang *Langua
 	walk(root)
 }
 
+func csharpRecoverTopLevelInvocationStatementFromRange(source []byte, start, end uint32, lang *Language, arena *nodeArena) (*Node, bool) {
+	if lang == nil || arena == nil || start >= end || int(end) > len(source) {
+		return nil, false
+	}
+	start, end = csharpTrimSpaceBounds(source, start, end)
+	if start >= end || source[end-1] != ';' {
+		return nil, false
+	}
+	exprEnd := csharpTrimRightSpaceBytes(source, end-1)
+	if exprEnd <= start {
+		return nil, false
+	}
+	invocation, ok := csharpBuildInvocationExpressionNode(arena, source, lang, start, exprEnd)
+	if !ok || invocation == nil {
+		return nil, false
+	}
+	if invocation.Type(lang) != "invocation_expression" || len(invocation.children) == 0 || invocation.children[0] == nil {
+		return nil, false
+	}
+	semiTok, ok := csharpBuildLeafNodeByName(arena, source, lang, ";", end-1, end)
+	if !ok {
+		return nil, false
+	}
+	exprStmtSym, ok := symbolByName(lang, "expression_statement")
+	if !ok {
+		return nil, false
+	}
+	globalSym, ok := symbolByName(lang, "global_statement")
+	if !ok {
+		return nil, false
+	}
+	exprStmtNamed := int(exprStmtSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[exprStmtSym].Named
+	globalNamed := int(globalSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[globalSym].Named
+	expressionFieldID, _ := lang.FieldByName("expression")
+	exprChildren := []*Node{invocation, semiTok}
+	if arena != nil {
+		buf := arena.allocNodeSlice(len(exprChildren))
+		copy(buf, exprChildren)
+		exprChildren = buf
+	}
+	exprFieldIDs := csharpFieldIDsInArena(arena, []FieldID{expressionFieldID, 0})
+	exprStmt := newParentNodeInArena(arena, exprStmtSym, exprStmtNamed, exprChildren, exprFieldIDs, 0)
+	exprStmt.hasError = false
+	globalChildren := []*Node{exprStmt}
+	if arena != nil {
+		buf := arena.allocNodeSlice(len(globalChildren))
+		copy(buf, globalChildren)
+		globalChildren = buf
+	}
+	global := newParentNodeInArena(arena, globalSym, globalNamed, globalChildren, nil, 0)
+	global.hasError = false
+	return global, true
+}
+
 func csharpRewriteQualifiedNameAsMemberAccess(node *Node, lang *Language, memberAccessSym Symbol, memberAccessNamed bool, expressionFieldID, nameFieldID FieldID) *Node {
 	if node == nil || lang == nil || node.Type(lang) != "qualified_name" {
 		return node

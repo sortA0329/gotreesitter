@@ -63,9 +63,12 @@ func TestCSharpGrammargenCGORegressionCases(t *testing.T) {
 		name string
 		src  string
 	}{
+		{name: "contextual_file_invocation", src: "file.Method(1, 2);\n"},
 		{name: "collection_expression_trailing_comma", src: "var x = [ y, ];\n"},
 		{name: "conditional_access_in_if", src: "if (a?.B != 1) { }\n"},
 		{name: "conditional_element_access", src: "var x = dict?[\"a\"];\n"},
+		{name: "dereference_vs_logical_and", src: "bool c = (a) && b;\n"},
+		{name: "is_operator_vs_conditional_expression", src: "int a = 1 is Object ? 1 : 2;\n"},
 	}
 
 	for _, tc := range cases {

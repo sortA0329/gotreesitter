@@ -315,7 +315,7 @@ func csharpBuildAttributeArgumentValueNode(source []byte, start, end uint32, lan
 	if node, ok := csharpBuildMemberAccessNodeFromSource(source, start, end, lang, arena); ok {
 		return node, true
 	}
-	return csharpBuildLeafNodeByName(arena, source, lang, "identifier", start, end)
+	return csharpBuildIdentifierNodeFromSource(source, start, end, lang, arena)
 }
 
 func csharpBuildQualifiedNameNode(source []byte, start, end uint32, lang *Language, arena *nodeArena) (*Node, bool) {
@@ -334,7 +334,7 @@ func csharpBuildQualifiedNameNode(source []byte, start, end uint32, lang *Langua
 	if !ok || segStart != start {
 		return nil, false
 	}
-	current, ok := csharpBuildLeafNodeByName(arena, source, lang, "identifier", segStart, segEnd)
+	current, ok := csharpBuildIdentifierNodeFromSource(source, segStart, segEnd, lang, arena)
 	if !ok {
 		return nil, false
 	}
@@ -355,7 +355,7 @@ func csharpBuildQualifiedNameNode(source []byte, start, end uint32, lang *Langua
 		if !ok {
 			return nil, false
 		}
-		ident, ok := csharpBuildLeafNodeByName(arena, source, lang, "identifier", segStart, segEnd)
+		ident, ok := csharpBuildIdentifierNodeFromSource(source, segStart, segEnd, lang, arena)
 		if !ok {
 			return nil, false
 		}
@@ -385,7 +385,7 @@ func csharpBuildMemberAccessNodeFromSource(source []byte, start, end uint32, lan
 	if !ok || leftStart != start {
 		return nil, false
 	}
-	current, ok := csharpBuildLeafNodeByName(arena, source, lang, "identifier", leftStart, leftEnd)
+	current, ok := csharpBuildIdentifierNodeFromSource(source, leftStart, leftEnd, lang, arena)
 	if !ok {
 		return nil, false
 	}
@@ -408,7 +408,7 @@ func csharpBuildMemberAccessNodeFromSource(source []byte, start, end uint32, lan
 		if !ok {
 			return nil, false
 		}
-		nameNode, ok := csharpBuildLeafNodeByName(arena, source, lang, "identifier", nameStart, nameEnd)
+		nameNode, ok := csharpBuildIdentifierNodeFromSource(source, nameStart, nameEnd, lang, arena)
 		if !ok {
 			return nil, false
 		}

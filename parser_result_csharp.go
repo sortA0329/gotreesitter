@@ -44,6 +44,7 @@ func normalizeCSharpRecoveredTopLevelChunks(root *Node, source []byte, p *Parser
 	root.productionID = 0
 	root.hasError = false
 	populateParentNode(root, root.children)
+	extendNodeToTrailingWhitespace(root, source)
 }
 
 func csharpRecoverTopLevelChunks(source []byte, p *Parser, arena *nodeArena) ([]*Node, bool) {
@@ -249,6 +250,9 @@ func csharpRecoverTopLevelChunkNodesFromRange(source []byte, start, end uint32, 
 			}
 		}
 		tree.Release()
+	}
+	if invocation, ok := csharpRecoverTopLevelInvocationStatementFromRange(source, start, end, p.language, arena); ok {
+		return []*Node{invocation}, true
 	}
 	return nil, false
 }

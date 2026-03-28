@@ -646,6 +646,36 @@ func csharpScanIdentifierAt(source []byte, start uint32) (uint32, uint32, bool) 
 	return start, end, true
 }
 
+func csharpBuildIdentifierNodeFromSource(source []byte, start, end uint32, lang *Language, arena *nodeArena) (*Node, bool) {
+	ident, ok := csharpBuildLeafNodeByName(arena, source, lang, "identifier", start, end)
+	if !ok || lang == nil || int(end) > len(source) || start >= end {
+		return ident, ok
+	}
+	keyword := string(source[start:end])
+	keywordSym, ok := symbolByName(lang, keyword)
+	if !ok || int(keywordSym) >= len(lang.SymbolMetadata) || lang.SymbolMetadata[keywordSym].Named {
+		return ident, true
+	}
+	keywordLeaf, ok := csharpBuildLeafNodeByName(arena, source, lang, keyword, start, end)
+	if !ok {
+		return ident, true
+	}
+	identSym, ok := symbolByName(lang, "identifier")
+	if !ok {
+		return ident, true
+	}
+	identNamed := int(identSym) < len(lang.SymbolMetadata) && lang.SymbolMetadata[identSym].Named
+	children := []*Node{keywordLeaf}
+	if arena != nil {
+		buf := arena.allocNodeSlice(len(children))
+		copy(buf, children)
+		children = buf
+	}
+	node := newParentNodeInArena(arena, identSym, identNamed, children, nil, 0)
+	node.hasError = false
+	return node, true
+}
+
 func csharpIdentifierStartByte(b byte) bool {
 	return b == '_' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z'
 }

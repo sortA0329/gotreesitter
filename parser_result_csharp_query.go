@@ -736,7 +736,7 @@ func csharpRecoverQueryExpressionNodeFromRange(source []byte, start, end uint32,
 		return csharpBuildLeafNodeByName(arena, source, lang, "integer_literal", start, end)
 	}
 	if identStart, identEnd, ok := csharpScanIdentifierAt(source, start); ok && identStart == start && identEnd == end {
-		return csharpBuildLeafNodeByName(arena, source, lang, "identifier", start, end)
+		return csharpBuildIdentifierNodeFromSource(source, start, end, lang, arena)
 	}
 	return nil, false
 }
@@ -756,7 +756,7 @@ func csharpRecoverSimpleQueryAtomNodeFromRange(source []byte, start, end uint32,
 		return csharpBuildLeafNodeByName(arena, source, lang, "integer_literal", start, end)
 	}
 	if identStart, identEnd, ok := csharpScanIdentifierAt(source, start); ok && identStart == start && identEnd == end {
-		return csharpBuildLeafNodeByName(arena, source, lang, "identifier", start, end)
+		return csharpBuildIdentifierNodeFromSource(source, start, end, lang, arena)
 	}
 	if dotPos, ok := csharpFindTopLevelOperator(source, start, end, "."); ok {
 		return csharpBuildMemberAccessExpressionNode(arena, source, lang, start, dotPos, end)
@@ -927,7 +927,7 @@ func csharpBuildMemberAccessExpressionNode(arena *nodeArena, source []byte, lang
 	if !ok {
 		return nil, false
 	}
-	nameNode, ok := csharpBuildLeafNodeByName(arena, source, lang, "identifier", rightStart, rightEnd)
+	nameNode, ok := csharpBuildIdentifierNodeFromSource(source, rightStart, rightEnd, lang, arena)
 	if !ok {
 		return nil, false
 	}
@@ -971,7 +971,7 @@ func csharpBuildAnonymousObjectCreationNode(arena *nodeArena, source []byte, lan
 			if !ok {
 				return nil, false
 			}
-			nameNode, ok := csharpBuildLeafNodeByName(arena, source, lang, "identifier", nameStart, nameEnd)
+			nameNode, ok := csharpBuildIdentifierNodeFromSource(source, nameStart, nameEnd, lang, arena)
 			if !ok {
 				return nil, false
 			}

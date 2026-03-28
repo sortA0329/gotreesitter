@@ -558,6 +558,8 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, p *Parser) {
 		normalizeCSharpUnicodeIdentifierSpans(root, source, lang)
 		normalizeCSharpQueryExpressions(root, source, p)
 		normalizeCSharpInvocationStatements(root, source, lang)
+		normalizeCSharpDereferenceLogicalAndCasts(root, source, lang)
+		normalizeCSharpConditionalIsPatternExpressions(root, lang)
 		normalizeCSharpTypeConstraintKeywords(root, lang)
 		normalizeCSharpSwitchTupleCasePatterns(root, lang)
 	case "caddy":
