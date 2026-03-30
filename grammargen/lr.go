@@ -17,17 +17,22 @@ type coreEntry struct {
 	lookaheads bitset
 }
 
-// lr0CoreEntry packs the retained LR(0) core down to 6 bytes instead of the
+// lr0CoreEntry packs the retained LR(0) core down to 5 bytes instead of the
 // 8-byte uint32/uint32 pair. Large LALR builds keep hundreds of millions of
-// these entries live until lookahead materialization, so even a 2-byte saving
-// per entry materially lowers peak heap usage.
-type lr0CoreEntry [6]byte
+// these entries live until lookahead materialization, so even a 1-byte saving
+// per entry materially lowers peak heap usage at Fortran-scale core counts.
+//
+// The LR(0) path only needs the production index and dot position. Production
+// indices can still use the full uint32 range; dot positions are stored in one
+// byte and guarded at pack time so oversize RHS lengths fail loudly instead of
+// silently corrupting state identity.
+type lr0CoreEntry [5]byte
 
 func packLR0CoreEntry(prodIdx, dot int) lr0CoreEntry {
 	if prodIdx < 0 || uint64(prodIdx) > uint64(^uint32(0)) {
 		panic(fmt.Sprintf("lr0 prodIdx out of range: %d", prodIdx))
 	}
-	if dot < 0 || dot > 0xFFFF {
+	if dot < 0 || dot > 0xFF {
 		panic(fmt.Sprintf("lr0 dot out of range: %d", dot))
 	}
 	return lr0CoreEntry{
@@ -36,7 +41,6 @@ func packLR0CoreEntry(prodIdx, dot int) lr0CoreEntry {
 		byte(prodIdx >> 16),
 		byte(prodIdx >> 24),
 		byte(dot),
-		byte(dot >> 8),
 	}
 }
 
@@ -48,7 +52,7 @@ func (ce lr0CoreEntry) prodIdx() uint32 {
 }
 
 func (ce lr0CoreEntry) dot() uint16 {
-	return uint16(ce[4]) | uint16(ce[5])<<8
+	return uint16(ce[4])
 }
 
 // lrItemSet is a set of LR(1) items stored in core-based representation.
