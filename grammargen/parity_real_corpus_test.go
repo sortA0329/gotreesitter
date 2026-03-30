@@ -19,24 +19,25 @@ import (
 )
 
 const (
-	realCorpusEnableEnv         = "GTS_GRAMMARGEN_REAL_CORPUS_ENABLE"
-	realCorpusRootEnv           = "GTS_GRAMMARGEN_REAL_CORPUS_ROOT"
-	realCorpusProfileEnv        = "GTS_GRAMMARGEN_REAL_CORPUS_PROFILE"
-	realCorpusMaxCasesEnv       = "GTS_GRAMMARGEN_REAL_CORPUS_MAX_CASES"
-	realCorpusMaxSampleBytesEnv = "GTS_GRAMMARGEN_REAL_CORPUS_MAX_SAMPLE_BYTES"
-	realCorpusCandidateMultEnv  = "GTS_GRAMMARGEN_REAL_CORPUS_CANDIDATE_MULTIPLIER"
-	realCorpusMaxSecsPerGramEnv = "GTS_GRAMMARGEN_REAL_CORPUS_MAX_SECONDS_PER_GRAMMAR"
-	realCorpusMaxGrammarsEnv    = "GTS_GRAMMARGEN_REAL_CORPUS_MAX_GRAMMARS"
-	realCorpusRequireParityEnv  = "GTS_GRAMMARGEN_REAL_CORPUS_REQUIRE_PARITY"
-	realCorpusRatchetUpdateEnv  = "GTS_GRAMMARGEN_REAL_CORPUS_RATCHET_UPDATE"
-	realCorpusRatchetRebaseEnv  = "GTS_GRAMMARGEN_REAL_CORPUS_RATCHET_REBASE"
-	realCorpusFloorsPathEnv     = "GTS_GRAMMARGEN_REAL_CORPUS_FLOORS_PATH"
-	realCorpusAllowPartialEnv   = "GTS_GRAMMARGEN_REAL_CORPUS_ALLOW_PARTIAL"
-	realCorpusSkipEnv           = "GTS_GRAMMARGEN_REAL_CORPUS_SKIP"
-	realCorpusOnlyEnv           = "GTS_GRAMMARGEN_REAL_CORPUS_ONLY"
-	realCorpusDiagEnv           = "GTS_GRAMMARGEN_REAL_CORPUS_DIAG"
-	realCorpusFloorsFileVersion = 3
-	maxRealCorpusWalkFiles      = 6000
+	realCorpusEnableEnv          = "GTS_GRAMMARGEN_REAL_CORPUS_ENABLE"
+	realCorpusRootEnv            = "GTS_GRAMMARGEN_REAL_CORPUS_ROOT"
+	realCorpusProfileEnv         = "GTS_GRAMMARGEN_REAL_CORPUS_PROFILE"
+	realCorpusMaxCasesEnv        = "GTS_GRAMMARGEN_REAL_CORPUS_MAX_CASES"
+	realCorpusMaxSampleBytesEnv  = "GTS_GRAMMARGEN_REAL_CORPUS_MAX_SAMPLE_BYTES"
+	realCorpusCandidateMultEnv   = "GTS_GRAMMARGEN_REAL_CORPUS_CANDIDATE_MULTIPLIER"
+	realCorpusMaxSecsPerGramEnv  = "GTS_GRAMMARGEN_REAL_CORPUS_MAX_SECONDS_PER_GRAMMAR"
+	realCorpusMaxGrammarsEnv     = "GTS_GRAMMARGEN_REAL_CORPUS_MAX_GRAMMARS"
+	realCorpusRequireParityEnv   = "GTS_GRAMMARGEN_REAL_CORPUS_REQUIRE_PARITY"
+	realCorpusRatchetUpdateEnv   = "GTS_GRAMMARGEN_REAL_CORPUS_RATCHET_UPDATE"
+	realCorpusRatchetRebaseEnv   = "GTS_GRAMMARGEN_REAL_CORPUS_RATCHET_REBASE"
+	realCorpusFloorsPathEnv      = "GTS_GRAMMARGEN_REAL_CORPUS_FLOORS_PATH"
+	realCorpusAllowPartialEnv    = "GTS_GRAMMARGEN_REAL_CORPUS_ALLOW_PARTIAL"
+	realCorpusSkipEnv            = "GTS_GRAMMARGEN_REAL_CORPUS_SKIP"
+	realCorpusOnlyEnv            = "GTS_GRAMMARGEN_REAL_CORPUS_ONLY"
+	realCorpusDiagEnv            = "GTS_GRAMMARGEN_REAL_CORPUS_DIAG"
+	realCorpusGenerateTimeoutEnv = "GTS_GRAMMARGEN_REAL_CORPUS_GENERATE_TIMEOUT"
+	realCorpusFloorsFileVersion  = 3
+	maxRealCorpusWalkFiles       = 6000
 )
 
 type realCorpusMetrics struct {
@@ -198,7 +199,15 @@ func TestMultiGrammarImportRealCorpusParity(t *testing.T) {
 		testedGrammars++
 		g := g
 		t.Run(g.name, func(t *testing.T) {
-			logRealCorpusDiag("subtest_start", g.name, "timeout=%s jsonPath=%s path=%s", g.genTimeout, g.jsonPath, g.path)
+			timeout := g.genTimeout
+			if timeout == 0 {
+				timeout = 30 * time.Second
+			}
+			timeout, err := realCorpusGenerateTimeout(g.name, timeout)
+			if err != nil {
+				t.Fatalf("generate timeout override: %v", err)
+			}
+			logRealCorpusDiag("subtest_start", g.name, "timeout=%s jsonPath=%s path=%s", timeout, g.jsonPath, g.path)
 			gram, err := importParityGrammarSource(g)
 			if err != nil {
 				t.Fatalf("import failed: %v", err)
@@ -229,10 +238,6 @@ func TestMultiGrammarImportRealCorpusParity(t *testing.T) {
 				gram.BinaryRepeatMode = true
 			}
 
-			timeout := g.genTimeout
-			if timeout == 0 {
-				timeout = 30 * time.Second
-			}
 			logRealCorpusDiag("before_generate", g.name, "timeout=%s", timeout)
 			genLang, err := generateWithTimeout(gram, timeout)
 			if err != nil {
@@ -576,6 +581,17 @@ func enforceRealCorpusRatchet(t *testing.T, floor, cur realCorpusMetrics) {
 			t.Errorf("ratchet regression deep parity ratio: %d/%d < floor %d/%d", cur.DeepParity, cur.Eligible, floor.DeepParity, floor.Eligible)
 		}
 	}
+}
+
+func realCorpusGenerateTimeout(grammarName string, base time.Duration) (time.Duration, error) {
+	if raw := strings.TrimSpace(os.Getenv(realCorpusGenerateTimeoutEnv)); raw != "" {
+		override, err := time.ParseDuration(raw)
+		if err != nil {
+			return 0, fmt.Errorf("parse %s=%q: %w", realCorpusGenerateTimeoutEnv, raw, err)
+		}
+		return override, nil
+	}
+	return base, nil
 }
 
 func parseRealCorpusProfile(raw string) realCorpusProfile {

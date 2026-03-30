@@ -812,11 +812,8 @@ type lrContext struct {
 
 	// GOTO scratch reuses transient symbol and advanced-kernel slices while
 	// building successor states.
-	gotoSymbolsScratch   []int
-	gotoSymbolMarks      []uint32
-	gotoSymbolGen        uint32
-	gotoKernelLR0Scratch []coreItem
-	gotoAdvancedScratch  []coreEntry
+	gotoSymbolsScratch  []int
+	gotoAdvancedScratch []coreEntry
 
 	// Lookahead bitset scratch reuses word buffers for temporary closed sets that
 	// are discarded after exact-match or merge lookups.
@@ -903,24 +900,6 @@ func (ctx *lrContext) ensureClosureQueueCapacity(size int) {
 	ctx.closureQueuedGen = append(ctx.closureQueuedGen, make([]uint32, size-len(ctx.closureQueuedGen))...)
 }
 
-func (ctx *lrContext) nextGotoSymbolGen() uint32 {
-	ctx.gotoSymbolGen++
-	if ctx.gotoSymbolGen == 0 {
-		for i := range ctx.gotoSymbolMarks {
-			ctx.gotoSymbolMarks[i] = 0
-		}
-		ctx.gotoSymbolGen = 1
-	}
-	return ctx.gotoSymbolGen
-}
-
-func (ctx *lrContext) ensureGotoSymbolCapacity(size int) {
-	if size <= len(ctx.gotoSymbolMarks) {
-		return
-	}
-	ctx.gotoSymbolMarks = append(ctx.gotoSymbolMarks, make([]uint32, size-len(ctx.gotoSymbolMarks))...)
-}
-
 func (ctx *lrContext) ensureProvenance() {
 	if !ctx.trackProvenance || ctx.provenance != nil {
 		return
@@ -967,8 +946,6 @@ func (ctx *lrContext) releaseScratch() {
 	ctx.allTerminals = bitset{}
 	ctx.boundaryLookaheads = bitset{}
 	ctx.gotoSymbolsScratch = nil
-	ctx.gotoSymbolMarks = nil
-	ctx.gotoKernelLR0Scratch = nil
 	ctx.gotoAdvancedScratch = nil
 	ctx.lookaheadWordPool = nil
 	ctx.repeatWrapperStateSymCache = nil

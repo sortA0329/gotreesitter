@@ -72,7 +72,6 @@ func (ctx *lrContext) buildLR0() {
 	ng := ctx.ng
 	tokenCount := ctx.tokenCount
 	debugLALR := os.Getenv("GOT_DEBUG_LALR") == "1"
-	ctx.ensureGotoSymbolCapacity(len(ng.Symbols))
 
 	// Hash map for state dedup: coreHash → chain of state indices.
 	coreMap := make(map[uint64]*stateHashEntry)
@@ -116,14 +115,14 @@ func (ctx *lrContext) buildLR0() {
 		}
 
 		// Collect all symbols after the dot.
-		symGen := ctx.nextGotoSymbolGen()
-		syms := ctx.gotoSymbolsScratch[:0]
+		symsSeen := make(map[int]bool)
+		var syms []int
 		for _, ce := range itemSet.cores {
 			prod := &ng.Productions[int(ce.prodIdx)]
 			if int(ce.dot) < len(prod.RHS) {
 				sym := prod.RHS[ce.dot]
-				if ctx.gotoSymbolMarks[sym] != symGen {
-					ctx.gotoSymbolMarks[sym] = symGen
+				if !symsSeen[sym] {
+					symsSeen[sym] = true
 					syms = append(syms, sym)
 				}
 			}
@@ -131,7 +130,7 @@ func (ctx *lrContext) buildLR0() {
 
 		for _, sym := range syms {
 			// Compute GOTO(state, sym): advance dot past sym, then close.
-			kernel := ctx.gotoKernelLR0Scratch[:0]
+			var kernel []coreItem
 			for _, ce := range itemSet.cores {
 				prod := &ng.Productions[int(ce.prodIdx)]
 				if int(ce.dot) < len(prod.RHS) && prod.RHS[ce.dot] == sym {
@@ -195,10 +194,8 @@ func (ctx *lrContext) buildLR0() {
 
 			// After appending to itemSets, re-read pointer in case of slice realloc.
 			itemSet = &ctx.lalrLR0ItemSets[stateIdx]
-			ctx.gotoKernelLR0Scratch = kernel[:0]
 		}
 
-		ctx.gotoSymbolsScratch = syms[:0]
 		_ = tokenCount // used implicitly via lr0Closure
 	}
 }

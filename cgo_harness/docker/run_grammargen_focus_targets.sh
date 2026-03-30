@@ -25,6 +25,7 @@ OFFLINE=0
 BUILD_IMAGE=1
 LR_SPLIT=0
 REAL_LR0_CORE_BUDGET=""
+REAL_GENERATE_TIMEOUT=""
 
 usage() {
   cat <<'EOF'
@@ -47,6 +48,8 @@ Options:
   --gomaxprocs <n>       Export GOMAXPROCS inside both containers (default: 1)
   --goflags <value>      Export GOFLAGS inside both containers (default: -p=1)
   --lr0-core-budget <n>  Export GOT_LALR_LR0_CORE_BUDGET for real-corpus runs
+  --generate-timeout <d> Export GTS_GRAMMARGEN_REAL_CORPUS_GENERATE_TIMEOUT
+                         for real-corpus runs
   --real-timeout <dur>   Real-corpus timeout per grammar (default: 15m)
   --real-max-cases <n>   Real-corpus max cases per grammar (default: 25)
   --profile <name>       smoke|balanced|aggressive (default: aggressive)
@@ -116,6 +119,7 @@ while [[ $# -gt 0 ]]; do
     --gomaxprocs) GOMAXPROCS_VALUE="$2"; shift 2 ;;
     --goflags) GOFLAGS_VALUE="$2"; shift 2 ;;
     --lr0-core-budget) REAL_LR0_CORE_BUDGET="$2"; shift 2 ;;
+    --generate-timeout) REAL_GENERATE_TIMEOUT="$2"; shift 2 ;;
     --real-timeout) REAL_TIMEOUT="$2"; shift 2 ;;
     --real-max-cases) REAL_MAX_CASES="$2"; shift 2 ;;
     --profile) REAL_PROFILE="$2"; shift 2 ;;
@@ -241,6 +245,9 @@ run_real_corpus_lang() {
   fi
   if [[ -n "$REAL_LR0_CORE_BUDGET" ]]; then
     args+=(--lr0-core-budget "$REAL_LR0_CORE_BUDGET")
+  fi
+  if [[ -n "$REAL_GENERATE_TIMEOUT" ]]; then
+    args+=(--generate-timeout "$REAL_GENERATE_TIMEOUT")
   fi
   if [[ -n "$SEED_DIR" ]]; then
     args+=(--seed-dir "$SEED_DIR")

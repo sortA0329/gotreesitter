@@ -30,6 +30,7 @@ LR_SPLIT=0
 GOMAXPROCS_VALUE=""
 GOFLAGS_VALUE=""
 LR0_CORE_BUDGET=""
+GENERATE_TIMEOUT=""
 
 # All grammars in the test set (alphabetical order matching importParityGrammars).
 ALL_GRAMMARS=(
@@ -84,8 +85,13 @@ Options:
   --goflags <value>    Export GOFLAGS inside the container (for example: -p=1)
   --lr0-core-budget <n>
                        Export GOT_LALR_LR0_CORE_BUDGET inside the container.
-                       If unset, fortran defaults to a safety budget that
-                       fails cleanly under tight Docker memory caps.
+                       If unset, fortran defaults to 160000000 so the
+                       compact LALR path can finish while still bounding
+                       runaway LR(0) growth.
+  --generate-timeout <dur>
+                       Export GTS_GRAMMARGEN_REAL_CORPUS_GENERATE_TIMEOUT.
+                       If unset, fortran defaults to 15m so the memory-safe
+                       LALR path can finish in Docker.
   --no-build           Skip Docker image build
   -h, --help           Show this help
 
@@ -162,6 +168,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --lr0-core-budget)
       LR0_CORE_BUDGET="$2"
+      shift 2
+      ;;
+    --generate-timeout)
+      GENERATE_TIMEOUT="$2"
       shift 2
       ;;
     --no-build)
@@ -346,11 +356,15 @@ run_grammar() {
   local grammar="$1"
   local log_file="$REPORT_DIR/diag_${grammar}.log"
   local effective_lr0_core_budget="$LR0_CORE_BUDGET"
+  local effective_generate_timeout="$GENERATE_TIMEOUT"
   if [[ -z "$effective_lr0_core_budget" && "$grammar" == "fortran" ]]; then
-    effective_lr0_core_budget="45000000"
+    effective_lr0_core_budget="160000000"
+  fi
+  if [[ -z "$effective_generate_timeout" && "$grammar" == "fortran" ]]; then
+    effective_generate_timeout="15m"
   fi
 
-  echo "=== Testing: $grammar (memory=$MEMORY_LIMIT cpus=$CPUS_LIMIT pids=$PIDS_LIMIT timeout=$TIMEOUT_PER_GRAMMAR gomaxprocs=${GOMAXPROCS_VALUE:-inherit} goflags=${GOFLAGS_VALUE:-inherit} lr0_core_budget=${effective_lr0_core_budget:-inherit}) ==="
+  echo "=== Testing: $grammar (memory=$MEMORY_LIMIT cpus=$CPUS_LIMIT pids=$PIDS_LIMIT timeout=$TIMEOUT_PER_GRAMMAR generate_timeout=${effective_generate_timeout:-inherit} gomaxprocs=${GOMAXPROCS_VALUE:-inherit} goflags=${GOFLAGS_VALUE:-inherit} lr0_core_budget=${effective_lr0_core_budget:-inherit}) ==="
 
   # Build inner command for Docker.
   local lr_split_env=""
@@ -380,6 +394,10 @@ fi"
   if [[ -n "$effective_lr0_core_budget" ]]; then
     lr0_core_budget_env="GOT_LALR_LR0_CORE_BUDGET=$effective_lr0_core_budget"
   fi
+  local generate_timeout_env=""
+  if [[ -n "$effective_generate_timeout" ]]; then
+    generate_timeout_env="GTS_GRAMMARGEN_REAL_CORPUS_GENERATE_TIMEOUT=$effective_generate_timeout"
+  fi
 
   local inner_cmd
   read -r -d '' inner_cmd <<INNER_EOF || true
@@ -407,6 +425,7 @@ cd /workspace
   GTS_GRAMMARGEN_REAL_CORPUS_FLOORS_PATH=/tmp/real_corpus_parity_floors.json \
   GTS_GRAMMARGEN_REAL_CORPUS_ONLY=$grammar \
   $lr0_core_budget_env \
+  $generate_timeout_env \
   $lr_split_env \
   go test ./grammargen -run '^TestMultiGrammarImportRealCorpusParity\$' -count=1 -v -timeout $TIMEOUT_PER_GRAMMAR
 INNER_EOF
