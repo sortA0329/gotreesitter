@@ -126,7 +126,7 @@ func TestDiagYAMLImplicitMapping(t *testing.T) {
 			}
 			t.Logf("  resolved=%s", diagFormatActions(ng, resolved))
 			for _, ce := range ctx.itemSets[state].cores {
-				prod := &ng.Productions[ce.prodIdx]
+				prod := &ng.Productions[int(ce.prodIdx)]
 				if !diagProductionMentionsNames(ng, prod, interestingNames) {
 					continue
 				}
@@ -134,7 +134,7 @@ func TestDiagYAMLImplicitMapping(t *testing.T) {
 				if ce.lookaheads.contains(colonSym) {
 					la = " LA(:)"
 				}
-				t.Logf("  item%s %s", la, diagFormatProd(ng, ce.prodIdx, ce.dot))
+				t.Logf("  item%s %s", la, diagFormatProd(ng, int(ce.prodIdx), int(ce.dot)))
 			}
 			for _, act := range acts {
 				if act.kind != lrShift {
@@ -149,9 +149,9 @@ func TestDiagYAMLImplicitMapping(t *testing.T) {
 				}
 				t.Logf("  shift-target=%d", target)
 				for _, ce := range ctx.itemSets[target].cores {
-					prod := &ng.Productions[ce.prodIdx]
+					prod := &ng.Productions[int(ce.prodIdx)]
 					if diagProductionMentionsNames(ng, prod, interestingNames) {
-						t.Logf("    %s", diagFormatProd(ng, ce.prodIdx, ce.dot))
+						t.Logf("    %s", diagFormatProd(ng, int(ce.prodIdx), int(ce.dot)))
 					}
 				}
 			}

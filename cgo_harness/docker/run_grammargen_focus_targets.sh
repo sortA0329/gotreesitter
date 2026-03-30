@@ -24,6 +24,7 @@ SEED_DIR=""
 OFFLINE=0
 BUILD_IMAGE=1
 LR_SPLIT=0
+REAL_LR0_CORE_BUDGET=""
 
 usage() {
   cat <<'EOF'
@@ -45,6 +46,7 @@ Options:
   --pids <count>         Docker PID limit for both paths (default: 512)
   --gomaxprocs <n>       Export GOMAXPROCS inside both containers (default: 1)
   --goflags <value>      Export GOFLAGS inside both containers (default: -p=1)
+  --lr0-core-budget <n>  Export GOT_LALR_LR0_CORE_BUDGET for real-corpus runs
   --real-timeout <dur>   Real-corpus timeout per grammar (default: 15m)
   --real-max-cases <n>   Real-corpus max cases per grammar (default: 25)
   --profile <name>       smoke|balanced|aggressive (default: aggressive)
@@ -113,6 +115,7 @@ while [[ $# -gt 0 ]]; do
     --pids) PIDS_LIMIT="$2"; shift 2 ;;
     --gomaxprocs) GOMAXPROCS_VALUE="$2"; shift 2 ;;
     --goflags) GOFLAGS_VALUE="$2"; shift 2 ;;
+    --lr0-core-budget) REAL_LR0_CORE_BUDGET="$2"; shift 2 ;;
     --real-timeout) REAL_TIMEOUT="$2"; shift 2 ;;
     --real-max-cases) REAL_MAX_CASES="$2"; shift 2 ;;
     --profile) REAL_PROFILE="$2"; shift 2 ;;
@@ -236,6 +239,9 @@ run_real_corpus_lang() {
   if [[ -n "$GOFLAGS_VALUE" ]]; then
     args+=(--goflags "$GOFLAGS_VALUE")
   fi
+  if [[ -n "$REAL_LR0_CORE_BUDGET" ]]; then
+    args+=(--lr0-core-budget "$REAL_LR0_CORE_BUDGET")
+  fi
   if [[ -n "$SEED_DIR" ]]; then
     args+=(--seed-dir "$SEED_DIR")
   fi
@@ -337,7 +343,7 @@ run_cgo_lang() {
 }
 
 echo "Focused grammargen targets: ${TARGET_LANGS[*]}"
-echo "mode=$MODE memory=$MEMORY_LIMIT cpus=$CPUS_LIMIT pids=$PIDS_LIMIT gomaxprocs=${GOMAXPROCS_VALUE:-inherit} goflags=${GOFLAGS_VALUE:-inherit} offline=$OFFLINE lr_split=$LR_SPLIT"
+echo "mode=$MODE memory=$MEMORY_LIMIT cpus=$CPUS_LIMIT pids=$PIDS_LIMIT gomaxprocs=${GOMAXPROCS_VALUE:-inherit} goflags=${GOFLAGS_VALUE:-inherit} lr0_core_budget=${REAL_LR0_CORE_BUDGET:-inherit} offline=$OFFLINE lr_split=$LR_SPLIT"
 echo ""
 
 if [[ "$MODE" == "all" || "$MODE" == "real-corpus" ]]; then

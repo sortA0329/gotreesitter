@@ -29,6 +29,7 @@ OFFLINE=0
 LR_SPLIT=0
 GOMAXPROCS_VALUE=""
 GOFLAGS_VALUE=""
+LR0_CORE_BUDGET=""
 
 # All grammars in the test set (alphabetical order matching importParityGrammars).
 ALL_GRAMMARS=(
@@ -81,6 +82,10 @@ Options:
   --lr-split           Enable LR(1) splitting (GTS_GRAMMARGEN_LR_SPLIT=1)
   --gomaxprocs <n>     Export GOMAXPROCS inside the container
   --goflags <value>    Export GOFLAGS inside the container (for example: -p=1)
+  --lr0-core-budget <n>
+                       Export GOT_LALR_LR0_CORE_BUDGET inside the container.
+                       If unset, fortran defaults to a safety budget that
+                       fails cleanly under tight Docker memory caps.
   --no-build           Skip Docker image build
   -h, --help           Show this help
 
@@ -153,6 +158,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --goflags)
       GOFLAGS_VALUE="$2"
+      shift 2
+      ;;
+    --lr0-core-budget)
+      LR0_CORE_BUDGET="$2"
       shift 2
       ;;
     --no-build)
@@ -336,8 +345,12 @@ CLONE_EOF
 run_grammar() {
   local grammar="$1"
   local log_file="$REPORT_DIR/diag_${grammar}.log"
+  local effective_lr0_core_budget="$LR0_CORE_BUDGET"
+  if [[ -z "$effective_lr0_core_budget" && "$grammar" == "fortran" ]]; then
+    effective_lr0_core_budget="45000000"
+  fi
 
-  echo "=== Testing: $grammar (memory=$MEMORY_LIMIT cpus=$CPUS_LIMIT pids=$PIDS_LIMIT timeout=$TIMEOUT_PER_GRAMMAR gomaxprocs=${GOMAXPROCS_VALUE:-inherit} goflags=${GOFLAGS_VALUE:-inherit}) ==="
+  echo "=== Testing: $grammar (memory=$MEMORY_LIMIT cpus=$CPUS_LIMIT pids=$PIDS_LIMIT timeout=$TIMEOUT_PER_GRAMMAR gomaxprocs=${GOMAXPROCS_VALUE:-inherit} goflags=${GOFLAGS_VALUE:-inherit} lr0_core_budget=${effective_lr0_core_budget:-inherit}) ==="
 
   # Build inner command for Docker.
   local lr_split_env=""
@@ -361,6 +374,11 @@ fi"
   local clone_block=""
   if [[ "$OFFLINE" != "1" ]]; then
     clone_block="$(make_clone_block "$grammar")"
+  fi
+
+  local lr0_core_budget_env=""
+  if [[ -n "$effective_lr0_core_budget" ]]; then
+    lr0_core_budget_env="GOT_LALR_LR0_CORE_BUDGET=$effective_lr0_core_budget"
   fi
 
   local inner_cmd
@@ -388,6 +406,7 @@ cd /workspace
   GTS_GRAMMARGEN_REAL_CORPUS_ALLOW_PARTIAL=1 \
   GTS_GRAMMARGEN_REAL_CORPUS_FLOORS_PATH=/tmp/real_corpus_parity_floors.json \
   GTS_GRAMMARGEN_REAL_CORPUS_ONLY=$grammar \
+  $lr0_core_budget_env \
   $lr_split_env \
   go test ./grammargen -run '^TestMultiGrammarImportRealCorpusParity\$' -count=1 -v -timeout $TIMEOUT_PER_GRAMMAR
 INNER_EOF

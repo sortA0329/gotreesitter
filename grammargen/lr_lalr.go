@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"time"
 )
@@ -40,15 +42,20 @@ func (ctx *lrContext) buildItemSetsLALR() []lrItemSet {
 	t0 := time.Now()
 	ctx.buildLR0()
 	if debugLALR {
-		fmt.Fprintf(os.Stderr, "[LALR] buildLR0: %v, %d states, %d productions\n",
-			time.Since(t0), len(ctx.itemSets), len(ctx.ng.Productions))
+		debugLALRProgress("buildLR0",
+			"dur=%v states=%d productions=%d transitions=%d",
+			time.Since(t0), len(ctx.lalrLR0ItemSets), len(ctx.ng.Productions), countTransitionEdges(ctx.transitions))
 	}
+	if ctx.lalrLR0StateBudgetExceeded || ctx.lalrLR0CoreBudgetExceeded {
+		return ctx.itemSets
+	}
+	ctx.maybeGCForLargeLALR()
 
 	// Phase 2: Compute LALR(1) lookaheads via DeRemer/Pennello.
 	t1 := time.Now()
 	ctx.computeLALRLookaheads()
 	if debugLALR {
-		fmt.Fprintf(os.Stderr, "[LALR] computeLALRLookaheads: %v\n", time.Since(t1))
+		debugLALRProgress("computeLALRLookaheads", "dur=%v", time.Since(t1))
 	}
 
 	return ctx.itemSets
@@ -59,21 +66,40 @@ func (ctx *lrContext) buildItemSetsLALR() []lrItemSet {
 // propagation, merging, or worklist re-processing.
 func (ctx *lrContext) buildLR0() {
 	ctx.transitions = make(map[int]map[int]int)
+	ctx.itemSets = nil
+	ctx.lalrLR0ItemSets = nil
 	ctx.ensureProvenance()
 	ng := ctx.ng
 	tokenCount := ctx.tokenCount
+	debugLALR := os.Getenv("GOT_DEBUG_LALR") == "1"
+	ctx.ensureGotoSymbolCapacity(len(ng.Symbols))
 
 	// Hash map for state dedup: coreHash → chain of state indices.
 	coreMap := make(map[uint64]*stateHashEntry)
 
 	// Build initial state: closure of [S' → .S]
 	initialSet := ctx.lr0Closure([]coreItem{{prodIdx: ng.AugmentProdID, dot: 0}})
-	ctx.itemSets = []lrItemSet{initialSet}
+	ctx.lalrLR0ItemSets = []lr0ItemSet{initialSet}
 	addToHashMap(coreMap, initialSet.coreHash, 0)
 	ctx.recordFreshState(0)
+	totalCoreEntries := len(initialSet.cores)
+	ctx.lalrLR0CoreEntries = totalCoreEntries
+	if debugLALR {
+		debugLALRProgress("buildLR0_initial",
+			"states=%d initial_cores=%d productions=%d",
+			len(ctx.lalrLR0ItemSets), len(initialSet.cores), len(ng.Productions))
+	}
+	if ctx.lalrLR0StateBudget > 0 && len(ctx.lalrLR0ItemSets) > ctx.lalrLR0StateBudget {
+		ctx.lalrLR0StateBudgetExceeded = true
+		return
+	}
+	if ctx.lalrLR0CoreBudget > 0 && totalCoreEntries > ctx.lalrLR0CoreBudget {
+		ctx.lalrLR0CoreBudgetExceeded = true
+		return
+	}
 
 	// BFS through states.
-	for stateIdx := 0; stateIdx < len(ctx.itemSets); stateIdx++ {
+	for stateIdx := 0; stateIdx < len(ctx.lalrLR0ItemSets); stateIdx++ {
 		// Check for cancellation periodically (every 64 iterations).
 		if ctx.bgCtx != nil && stateIdx&63 == 0 {
 			select {
@@ -82,17 +108,22 @@ func (ctx *lrContext) buildLR0() {
 			default:
 			}
 		}
-		itemSet := &ctx.itemSets[stateIdx]
+		itemSet := &ctx.lalrLR0ItemSets[stateIdx]
+		if debugLALR && stateIdx > 0 && stateIdx%128 == 0 {
+			debugLALRProgress("buildLR0_progress",
+				"state=%d states=%d total_core_entries=%d transitions=%d current_cores=%d",
+				stateIdx, len(ctx.lalrLR0ItemSets), totalCoreEntries, countTransitionEdges(ctx.transitions), len(itemSet.cores))
+		}
 
 		// Collect all symbols after the dot.
-		symsSeen := make(map[int]bool)
-		var syms []int
+		symGen := ctx.nextGotoSymbolGen()
+		syms := ctx.gotoSymbolsScratch[:0]
 		for _, ce := range itemSet.cores {
-			prod := &ng.Productions[ce.prodIdx]
-			if ce.dot < len(prod.RHS) {
+			prod := &ng.Productions[int(ce.prodIdx)]
+			if int(ce.dot) < len(prod.RHS) {
 				sym := prod.RHS[ce.dot]
-				if !symsSeen[sym] {
-					symsSeen[sym] = true
+				if ctx.gotoSymbolMarks[sym] != symGen {
+					ctx.gotoSymbolMarks[sym] = symGen
 					syms = append(syms, sym)
 				}
 			}
@@ -100,11 +131,11 @@ func (ctx *lrContext) buildLR0() {
 
 		for _, sym := range syms {
 			// Compute GOTO(state, sym): advance dot past sym, then close.
-			var kernel []coreItem
+			kernel := ctx.gotoKernelLR0Scratch[:0]
 			for _, ce := range itemSet.cores {
-				prod := &ng.Productions[ce.prodIdx]
-				if ce.dot < len(prod.RHS) && prod.RHS[ce.dot] == sym {
-					kernel = append(kernel, coreItem{ce.prodIdx, ce.dot + 1})
+				prod := &ng.Productions[int(ce.prodIdx)]
+				if int(ce.dot) < len(prod.RHS) && prod.RHS[ce.dot] == sym {
+					kernel = append(kernel, coreItem{prodIdx: int(ce.prodIdx), dot: int(ce.dot) + 1})
 				}
 			}
 			if len(kernel) == 0 {
@@ -112,17 +143,15 @@ func (ctx *lrContext) buildLR0() {
 			}
 
 			closedSet := ctx.lr0Closure(kernel)
-			closedSet.annotationArgTag = ctx.annotationArgTagForTransition(stateIdx, &closedSet)
-			closedSet.annotationArgTag |= ctx.templateContextTagForTransition(stateIdx, sym, &closedSet)
-			closedSet.annotationArgTag |= ctx.repeatWrapperSourceTagForTransition(stateIdx, sym, &closedSet)
-			closedSet.annotationArgTag |= ctx.conditionalTypeContextTagForTransition(stateIdx, sym, &closedSet)
-			closedSet.annotationArgTag |= ctx.operatorLiteralMergeTag(&closedSet)
+			closedSet.annotationArgTag = ctx.templateContextTagForLR0Transition(stateIdx, sym, &closedSet)
+			closedSet.annotationArgTag |= ctx.repeatWrapperSourceTagForLR0Transition(stateIdx, sym, &closedSet)
+			closedSet.annotationArgTag |= ctx.conditionalTypeContextTagForLR0Transition(stateIdx, sym, &closedSet)
 
 			// Find existing state with same core, or create new.
 			targetIdx := -1
 			for entry := coreMap[closedSet.coreHash]; entry != nil; entry = entry.next {
-				if sameAnnotationArgTag(&ctx.itemSets[entry.stateIdx], &closedSet) &&
-					sameCoresUsingIndexed(&ctx.itemSets[entry.stateIdx], &closedSet) {
+				if sameAnnotationArgTagLR0(&ctx.lalrLR0ItemSets[entry.stateIdx], &closedSet) &&
+					sameSortedLR0CoreEntries(ctx.lalrLR0ItemSets[entry.stateIdx].cores, closedSet.cores) {
 					targetIdx = entry.stateIdx
 					ctx.recordMergedState(targetIdx, mergeOrigin{
 						kernelHash:  closedSet.coreHash,
@@ -132,10 +161,30 @@ func (ctx *lrContext) buildLR0() {
 				}
 			}
 			if targetIdx < 0 {
-				targetIdx = len(ctx.itemSets)
-				ctx.itemSets = append(ctx.itemSets, closedSet)
+				targetIdx = len(ctx.lalrLR0ItemSets)
+				ctx.lalrLR0ItemSets = append(ctx.lalrLR0ItemSets, closedSet)
+				totalCoreEntries += len(closedSet.cores)
+				ctx.lalrLR0CoreEntries = totalCoreEntries
 				addToHashMap(coreMap, closedSet.coreHash, targetIdx)
 				ctx.recordFreshState(targetIdx)
+				if ctx.lalrLR0StateBudget > 0 && len(ctx.lalrLR0ItemSets) > ctx.lalrLR0StateBudget {
+					ctx.lalrLR0StateBudgetExceeded = true
+					if debugLALR {
+						debugLALRProgress("buildLR0_budget_exceeded",
+							"kind=states states=%d state_budget=%d core_entries=%d",
+							len(ctx.lalrLR0ItemSets), ctx.lalrLR0StateBudget, totalCoreEntries)
+					}
+					return
+				}
+				if ctx.lalrLR0CoreBudget > 0 && totalCoreEntries > ctx.lalrLR0CoreBudget {
+					ctx.lalrLR0CoreBudgetExceeded = true
+					if debugLALR {
+						debugLALRProgress("buildLR0_budget_exceeded",
+							"kind=cores core_entries=%d core_budget=%d states=%d",
+							totalCoreEntries, ctx.lalrLR0CoreBudget, len(ctx.lalrLR0ItemSets))
+					}
+					return
+				}
 			}
 
 			// Record transition.
@@ -145,16 +194,18 @@ func (ctx *lrContext) buildLR0() {
 			ctx.transitions[stateIdx][sym] = targetIdx
 
 			// After appending to itemSets, re-read pointer in case of slice realloc.
-			itemSet = &ctx.itemSets[stateIdx]
+			itemSet = &ctx.lalrLR0ItemSets[stateIdx]
+			ctx.gotoKernelLR0Scratch = kernel[:0]
 		}
 
+		ctx.gotoSymbolsScratch = syms[:0]
 		_ = tokenCount // used implicitly via lr0Closure
 	}
 }
 
 // lr0Closure computes the LR(0) closure of a set of kernel items.
 // No lookaheads are involved — just expands nonterminals to their productions.
-func (ctx *lrContext) lr0Closure(kernel []coreItem) lrItemSet {
+func (ctx *lrContext) lr0Closure(kernel []coreItem) lr0ItemSet {
 	ng := ctx.ng
 	tokenCount := ctx.tokenCount
 
@@ -164,7 +215,7 @@ func (ctx *lrContext) lr0Closure(kernel []coreItem) lrItemSet {
 	ctx.dot0Dirty = ctx.dot0Dirty[:0]
 
 	kernelSeen := make(map[uint64]int, len(kernel))
-	cores := make([]coreEntry, 0, len(kernel)*2)
+	cores := make([]lr0CoreEntry, 0, len(kernel)*2)
 
 	// Add kernel items.
 	for _, ki := range kernel {
@@ -174,10 +225,9 @@ func (ctx *lrContext) lr0Closure(kernel []coreItem) lrItemSet {
 		}
 		idx := len(cores)
 		kernelSeen[key] = idx
-		cores = append(cores, coreEntry{
-			prodIdx:    ki.prodIdx,
-			dot:        ki.dot,
-			lookaheads: newBitset(tokenCount), // empty, will be filled in phase 2
+		cores = append(cores, lr0CoreEntry{
+			prodIdx: uint32(ki.prodIdx),
+			dot:     uint32(ki.dot),
 		})
 		if ki.dot == 0 {
 			ctx.dot0Index[ki.prodIdx] = idx
@@ -190,8 +240,8 @@ func (ctx *lrContext) lr0Closure(kernel []coreItem) lrItemSet {
 	// since LR(0) closure doesn't change — there are no lookaheads to propagate).
 	for i := 0; i < len(cores); i++ {
 		ce := &cores[i]
-		prod := &ng.Productions[ce.prodIdx]
-		if ce.dot >= len(prod.RHS) {
+		prod := &ng.Productions[int(ce.prodIdx)]
+		if int(ce.dot) >= len(prod.RHS) {
 			continue
 		}
 
@@ -207,31 +257,31 @@ func (ctx *lrContext) lr0Closure(kernel []coreItem) lrItemSet {
 			idx := len(cores)
 			ctx.dot0Index[prodIdx] = idx
 			ctx.dot0Dirty = append(ctx.dot0Dirty, prodIdx)
-			cores = append(cores, coreEntry{
-				prodIdx:    prodIdx,
-				dot:        0,
-				lookaheads: newBitset(tokenCount),
+			cores = append(cores, lr0CoreEntry{
+				prodIdx: uint32(prodIdx),
+				dot:     0,
 			})
 		}
 	}
 
-	packedCoreIndex := make(map[uint64]int, len(cores))
-	for idx, ce := range cores {
-		packedCoreIndex[packCoreItemKey(ce.prodIdx, ce.dot)] = idx
+	if len(cores) > 1 {
+		sort.Slice(cores, func(i, j int) bool {
+			if cores[i].prodIdx != cores[j].prodIdx {
+				return cores[i].prodIdx < cores[j].prodIdx
+			}
+			return cores[i].dot < cores[j].dot
+		})
 	}
 
-	set := lrItemSet{
-		cores:           cores,
-		packedCoreIndex: packedCoreIndex,
+	set := lr0ItemSet{
+		cores: cores,
 	}
 	// Compute only coreHash (fullHash and completionLAHash will be set after lookaheads).
 	var ch uint64
 	for _, c := range cores {
-		ch += mixCoreItem(c.prodIdx, c.dot)
+		ch += mixCoreItem(int(c.prodIdx), int(c.dot))
 	}
 	set.coreHash = ch
-	set.fullHash = ch // temporary, will be recomputed
-	set.completionLAHash = ch
 
 	return set
 }
@@ -245,6 +295,7 @@ func packCoreItemKey(prodIdx, dot int) uint64 {
 func (ctx *lrContext) computeLALRLookaheads() {
 	ng := ctx.ng
 	tokenCount := ctx.tokenCount
+	debugLALR := os.Getenv("GOT_DEBUG_LALR") == "1"
 
 	// Step 1: Index all nonterminal transitions.
 	var ntTrans []ntTransition
@@ -273,6 +324,11 @@ func (ctx *lrContext) computeLALRLookaheads() {
 			nonterm: p.sym,
 			target:  p.target,
 		})
+	}
+	if debugLALR {
+		debugLALRProgress("lalr_nt_transitions",
+			"num_trans=%d transition_edges=%d",
+			len(ntTrans), countTransitionEdges(ctx.transitions))
 	}
 	if ctx.trackLookaheadContributors {
 		ctx.lalrNTTransitions = append(ctx.lalrNTTransitions[:0], ntTrans...)
@@ -311,7 +367,7 @@ func (ctx *lrContext) computeLALRLookaheads() {
 	// (p, A) reads (q, C) iff GOTO(p, A) = q and C is nullable.
 	// This means: from the target state of (p,A), if we can read a nullable
 	// nonterminal C, then whatever C reads also contributes to Read(p,A).
-	reads := make([][]int, numTrans)
+	reads := make([][]uint32, numTrans)
 	for i, nt := range ntTrans {
 		q := nt.target
 		if trans, ok := ctx.transitions[q]; ok {
@@ -324,7 +380,7 @@ func (ctx *lrContext) computeLALRLookaheads() {
 			sort.Ints(nullableSyms)
 			for _, sym := range nullableSyms {
 				if j, ok := ntTransIndex[[2]int{q, sym}]; ok {
-					reads[i] = append(reads[i], j)
+					reads[i] = append(reads[i], uint32(j))
 				}
 			}
 		}
@@ -333,6 +389,14 @@ func (ctx *lrContext) computeLALRLookaheads() {
 	// Step 4: Compute Read sets = Digraph(DR, READS).
 	// Read(p, A) = DR(p, A) ∪ ∪{ Read(q, C) | (p,A) reads (q,C) }
 	readSets := digraph(numTrans, dr, reads)
+	if debugLALR {
+		debugLALRProgress("lalr_reads",
+			"num_trans=%d read_edges=%d",
+			numTrans, countAdjacencyEdges(reads))
+	}
+	dr = nil
+	reads = nil
+	ctx.maybeGCForLargeLALR()
 
 	// Step 5: Compute INCLUDES relation.
 	// (p, A) includes (p', B) iff B → βAγ is a production, p' --β--> p,
@@ -348,91 +412,73 @@ func (ctx *lrContext) computeLALRLookaheads() {
 	// (q, A → ω) lookback (p, A) iff p --ω--> q
 	// i.e., from state p, reading the entire RHS of production "A → ω" leads to q.
 	type lookbackEntry struct {
-		stateIdx int // state q where reduce happens
-		prodIdx  int // production A → ω
-		ntIdx    int // index into ntTrans for (p, A)
+		stateIdx uint32 // state q where reduce happens
+		coreIdx  uint32 // completed core entry for A → ω in state q
+		ntIdx    uint32 // index into ntTrans for (p, A)
 	}
 	var lookbacks []lookbackEntry
 
-	includes := make([][]int, numTrans)
-
-	// Build inverted index: prodIdx → list of states that contain (prodIdx, dot=0).
-	// This avoids the O(productions × states) scan of the original loop; instead we
-	// do a single O(total_core_entries) pass and then iterate only over the relevant
-	// (production, state) pairs.
-	prodDot0States := make(map[int][]int, len(ng.Productions))
-	for stateIdx := range ctx.itemSets {
-		itemSet := &ctx.itemSets[stateIdx]
-		for _, ce := range itemSet.cores {
-			if ce.dot == 0 {
-				prodDot0States[ce.prodIdx] = append(prodDot0States[ce.prodIdx], stateIdx)
+	includes := make([][]uint32, numTrans)
+	includePositionsByProd := make([][]int, len(ng.Productions))
+	for pi := range ng.Productions {
+		rhs := ng.Productions[pi].RHS
+		if len(rhs) == 0 {
+			continue
+		}
+		var positions []int
+		suffixNullable := true
+		for dot := len(rhs) - 1; dot >= 0; dot-- {
+			sym := rhs[dot]
+			if sym >= tokenCount && suffixNullable {
+				positions = append(positions, dot)
+			}
+			if sym < tokenCount || !ctx.nullables[sym] {
+				suffixNullable = false
 			}
 		}
+		if len(positions) > 1 {
+			for i, j := 0, len(positions)-1; i < j; i, j = i+1, j-1 {
+				positions[i], positions[j] = positions[j], positions[i]
+			}
+		}
+		includePositionsByProd[pi] = positions
 	}
 
-	for pi := range ng.Productions {
-		// Check for cancellation every 256 productions.
-		if ctx.bgCtx != nil && pi&255 == 0 {
+	includeEdgeCount := 0
+	for stateIdx := range ctx.lalrLR0ItemSets {
+		// Check for cancellation every 64 states.
+		if ctx.bgCtx != nil && stateIdx&63 == 0 {
 			select {
 			case <-ctx.bgCtx.Done():
 				return
 			default:
 			}
 		}
-
-		prod := &ng.Productions[pi]
-		lhs := prod.LHS
-		rhs := prod.RHS
-
-		statesWithProd := prodDot0States[pi]
-		if len(statesWithProd) == 0 {
-			continue
-		}
-
-		// Pre-compute suffix nullability for each RHS position.
-		// suffixNullableFrom[dot] = true iff rhs[dot+1:] are all nullable nonterminals.
-		var suffixNullableFrom []bool
-		hasNTInRHS := false
-		if len(rhs) > 0 {
-			suffixNullableFrom = make([]bool, len(rhs))
-			suffixNullableFrom[len(rhs)-1] = true // empty suffix is nullable
-			for i := len(rhs) - 2; i >= 0; i-- {
-				s := rhs[i+1]
-				if s < tokenCount || !ctx.nullables[s] {
-					suffixNullableFrom[i] = false
-				} else {
-					suffixNullableFrom[i] = suffixNullableFrom[i+1]
-				}
+		itemSet := &ctx.lalrLR0ItemSets[stateIdx]
+		for _, ce := range itemSet.cores {
+			if ce.dot != 0 {
+				continue
 			}
-			for _, s := range rhs {
-				if s >= tokenCount {
-					hasNTInRHS = true
-					break
-				}
-			}
-		}
-
-		for _, stateIdx := range statesWithProd {
-			// Trace path p' → p₁ → ... → pₙ through the automaton.
+			pi := int(ce.prodIdx)
+			prod := &ng.Productions[pi]
+			lhs := prod.LHS
+			rhs := prod.RHS
 			curState := stateIdx
 			valid := true
-			for dot := 0; dot < len(rhs); dot++ {
-				sym := rhs[dot]
-
-				// Before moving past sym, check if this position contributes.
-				// If sym is a nonterminal A and the suffix rhs[dot+1:] is nullable,
-				// then (curState, A) includes (stateIdx, lhs).
-				if hasNTInRHS && sym >= tokenCount && suffixNullableFrom[dot] {
+			includePos := includePositionsByProd[pi]
+			nextIncludeIdx := 0
+			for dot, sym := range rhs {
+				if nextIncludeIdx < len(includePos) && includePos[nextIncludeIdx] == dot {
 					srcKey := [2]int{stateIdx, lhs}
 					tgtKey := [2]int{curState, sym}
 					if srcIdx, ok := ntTransIndex[srcKey]; ok {
 						if tgtIdx, ok := ntTransIndex[tgtKey]; ok {
-							includes[tgtIdx] = append(includes[tgtIdx], srcIdx)
+							includes[tgtIdx] = append(includes[tgtIdx], uint32(srcIdx))
+							includeEdgeCount++
 						}
 					}
+					nextIncludeIdx++
 				}
-
-				// Advance: curState = GOTO(curState, sym)
 				if trans, ok := ctx.transitions[curState]; ok {
 					if next, ok := trans[sym]; ok {
 						curState = next
@@ -445,56 +491,73 @@ func (ctx *lrContext) computeLALRLookaheads() {
 					break
 				}
 			}
-
-			if valid && len(rhs) > 0 {
-				// curState is the state q where we can reduce A → ω.
-				// lookback: (q, A → ω) lookback (stateIdx, A)
-				srcKey := [2]int{stateIdx, lhs}
-				if srcIdx, ok := ntTransIndex[srcKey]; ok {
-					lookbacks = append(lookbacks, lookbackEntry{
-						stateIdx: curState,
-						prodIdx:  pi,
-						ntIdx:    srcIdx,
-					})
-				}
+			if !valid {
+				continue
 			}
-
-			// Also handle epsilon productions: if rhs is empty, the reduce
-			// state is stateIdx itself.
-			if valid && len(rhs) == 0 {
-				srcKey := [2]int{stateIdx, lhs}
-				if srcIdx, ok := ntTransIndex[srcKey]; ok {
-					lookbacks = append(lookbacks, lookbackEntry{
-						stateIdx: stateIdx,
-						prodIdx:  pi,
-						ntIdx:    srcIdx,
-					})
-				}
+			srcIdx, ok := ntTransIndex[[2]int{stateIdx, lhs}]
+			if !ok {
+				continue
+			}
+			if coreIdx, ok := ctx.lalrLR0ItemSets[curState].coreLookup(pi, len(rhs)); ok {
+				lookbacks = append(lookbacks, lookbackEntry{
+					stateIdx: uint32(curState),
+					coreIdx:  uint32(coreIdx),
+					ntIdx:    uint32(srcIdx),
+				})
 			}
 		}
+		if debugLALR && stateIdx > 0 && stateIdx%256 == 0 {
+			debugLALRProgress("lalr_includes_progress",
+				"state=%d states=%d includes_edges=%d lookbacks=%d",
+				stateIdx, len(ctx.lalrLR0ItemSets), includeEdgeCount, len(lookbacks))
+		}
 	}
+	if debugLALR {
+		debugLALRProgress("lalr_includes_lookbacks",
+			"includes_edges=%d lookbacks=%d productions=%d",
+			includeEdgeCount, len(lookbacks), len(ng.Productions))
+	}
+	includePositionsByProd = nil
+	ctx.maybeGCForLargeLALR()
 
 	// Step 6: Compute Follow sets = Digraph(Read, INCLUDES).
 	// Follow(p, A) = Read(p, A) ∪ ∪{ Follow(p', B) | (p,A) includes (p',B) }
 	followSets := digraph(numTrans, readSets, includes)
+	if debugLALR {
+		debugLALRProgress("lalr_follow",
+			"num_trans=%d includes_edges=%d",
+			numTrans, countAdjacencyEdges(includes))
+	}
 	ctx.lalrFollowByTransition = make(map[[2]int]bitset, numTrans)
 	for i, nt := range ntTrans {
-		ctx.lalrFollowByTransition[[2]int{nt.state, nt.nonterm}] = followSets[i].clone()
+		ctx.lalrFollowByTransition[[2]int{nt.state, nt.nonterm}] = followSets[i]
 	}
+	includes = nil
+	readSets = nil
+	ctx.maybeGCForLargeLALR()
 
 	// Step 7: Compute LA (lookahead) sets for reduce items via LOOKBACK.
 	// LA(q, A → ω) = ∪{ Follow(p, A) | (q, A → ω) lookback (p, A) }
 	//
-	// We attach lookaheads to the reduce core entries in each item set.
+	// Keep reduce lookaheads separate until the end so LR(0) item sets stay in
+	// their compact representation throughout phases 1 and 2.
+	reduceLookaheads := make([]map[int]bitset, len(ctx.lalrLR0ItemSets))
 	for _, lb := range lookbacks {
-		itemSet := &ctx.itemSets[lb.stateIdx]
-		prod := &ng.Productions[lb.prodIdx]
-		if idx, ok := itemSet.coreLookup(lb.prodIdx, len(prod.RHS)); ok {
-			itemSet.cores[idx].lookaheads.unionWith(&followSets[lb.ntIdx])
-			followSets[lb.ntIdx].forEach(func(la int) {
-				ctx.recordLookaheadContributor(lb.stateIdx, la, lb.ntIdx)
-			})
+		laByCore := reduceLookaheads[lb.stateIdx]
+		if laByCore == nil {
+			laByCore = make(map[int]bitset)
+			reduceLookaheads[lb.stateIdx] = laByCore
 		}
+		coreIdx := int(lb.coreIdx)
+		if existing, ok := laByCore[coreIdx]; ok {
+			existing.unionWith(&followSets[lb.ntIdx])
+			laByCore[coreIdx] = existing
+		} else {
+			laByCore[coreIdx] = ctx.cloneLookaheadBitset(&followSets[lb.ntIdx])
+		}
+		followSets[lb.ntIdx].forEach(func(la int) {
+			ctx.recordLookaheadContributor(int(lb.stateIdx), la, int(lb.ntIdx))
+		})
 	}
 
 	// Step 8: Handle augmented start production: S' → S has lookahead {$end}.
@@ -504,20 +567,70 @@ func (ctx *lrContext) computeLALRLookaheads() {
 		// Find the state reached from state 0 via the start symbol.
 		if trans, ok := ctx.transitions[0]; ok {
 			if targetState, ok := trans[augProd.RHS[0]]; ok {
-				augSet := &ctx.itemSets[targetState]
+				augSet := &ctx.lalrLR0ItemSets[targetState]
 				if idx, ok := augSet.coreLookup(ng.AugmentProdID, len(augProd.RHS)); ok {
-					augSet.cores[idx].lookaheads.add(0) // $end
+					laByCore := reduceLookaheads[targetState]
+					if laByCore == nil {
+						laByCore = make(map[int]bitset)
+						reduceLookaheads[targetState] = laByCore
+					}
+					if existing, ok := laByCore[idx]; ok {
+						existing.add(0)
+						laByCore[idx] = existing
+					} else {
+						la := ctx.allocLookaheadBitset()
+						la.add(0)
+						laByCore[idx] = la
+					}
 				}
 			}
 		}
 	}
 
+	ctx.materializeLALRItemSets(reduceLookaheads)
+	lookbacks = nil
+	followSets = nil
+	reduceLookaheads = nil
+	ctx.maybeGCForLargeLALR()
 	ctx.pruneConditionalTypeQmarkLookaheads()
 
 	// Recompute hashes now that lookaheads are populated.
 	for i := range ctx.itemSets {
 		ctx.itemSets[i].computeHashes(ng.Productions, &ctx.boundaryLookaheads, false)
 	}
+	if debugLALR {
+		debugLALRProgress("lalr_hash_recompute", "states=%d", len(ctx.itemSets))
+	}
+}
+
+func (ctx *lrContext) materializeLALRItemSets(reduceLookaheads []map[int]bitset) {
+	ctx.itemSets = make([]lrItemSet, len(ctx.lalrLR0ItemSets))
+	for i := range ctx.lalrLR0ItemSets {
+		lr0Set := &ctx.lalrLR0ItemSets[i]
+		cores := make([]coreEntry, len(lr0Set.cores))
+		laByCore := reduceLookaheads[i]
+		for ci, ce := range lr0Set.cores {
+			cores[ci] = coreEntry{
+				prodIdx: ce.prodIdx,
+				dot:     ce.dot,
+			}
+			if laByCore != nil {
+				if la, ok := laByCore[ci]; ok {
+					cores[ci].lookaheads = la
+				}
+			}
+		}
+		ctx.itemSets[i] = lrItemSet{
+			cores:            cores,
+			coreHash:         lr0Set.coreHash,
+			fullHash:         lr0Set.coreHash,
+			completionLAHash: lr0Set.coreHash,
+			boundaryLAHash:   lr0Set.coreHash,
+			annotationArgTag: lr0Set.annotationArgTag,
+		}
+		lr0Set.cores = nil
+	}
+	ctx.lalrLR0ItemSets = nil
 }
 
 func (ctx *lrContext) pruneConditionalTypeQmarkLookaheads() {
@@ -553,7 +666,7 @@ func (ctx *lrContext) pruneConditionalTypeQmarkLookaheads() {
 // bitcap: capacity for new bitsets
 //
 // Returns F(0..n-1).
-func digraph(n int, f []bitset, rel [][]int) []bitset {
+func digraph(n int, f []bitset, rel [][]uint32) []bitset {
 	result := make([]bitset, n)
 	for i := 0; i < n; i++ {
 		result[i] = f[i].clone()
@@ -571,7 +684,8 @@ func digraph(n int, f []bitset, rel [][]int) []bitset {
 		depth[x] = d
 		stack = append(stack, x)
 
-		for _, y := range rel[x] {
+		for _, y32 := range rel[x] {
+			y := int(y32)
 			if depth[y] == 0 {
 				traverse(y)
 			}
@@ -606,4 +720,44 @@ func digraph(n int, f []bitset, rel [][]int) []bitset {
 	}
 
 	return result
+}
+
+func debugLALRProgress(stage, format string, args ...any) {
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr,
+		"[LALR] stage=%s alloc=%.1fMi heap_alloc=%.1fMi heap_inuse=%.1fMi sys=%.1fMi objs=%d gc=%d %s\n",
+		stage,
+		float64(ms.Alloc)/(1024*1024),
+		float64(ms.HeapAlloc)/(1024*1024),
+		float64(ms.HeapInuse)/(1024*1024),
+		float64(ms.Sys)/(1024*1024),
+		ms.HeapObjects,
+		ms.NumGC,
+		msg,
+	)
+}
+
+func countAdjacencyEdges(rel [][]uint32) int {
+	total := 0
+	for _, edges := range rel {
+		total += len(edges)
+	}
+	return total
+}
+
+func countTransitionEdges(transitions map[int]map[int]int) int {
+	total := 0
+	for _, edges := range transitions {
+		total += len(edges)
+	}
+	return total
+}
+
+func (ctx *lrContext) maybeGCForLargeLALR() {
+	if ctx == nil || ctx.lalrLR0CoreEntries < 50_000_000 {
+		return
+	}
+	debug.FreeOSMemory()
 }

@@ -12,9 +12,14 @@ import (
 // coreEntry is a core item (prodIdx, dot) with a bitset of lookahead terminals.
 // This avoids expanding N lookaheads into N individual lrItems during closure.
 type coreEntry struct {
-	prodIdx    int
-	dot        int
+	prodIdx    uint32
+	dot        uint32
 	lookaheads bitset
+}
+
+type lr0CoreEntry struct {
+	prodIdx uint32
+	dot     uint32
 }
 
 // lrItemSet is a set of LR(1) items stored in core-based representation.
@@ -45,6 +50,12 @@ type lrItemSet struct {
 	annotationArgTag uint32
 }
 
+type lr0ItemSet struct {
+	cores            []lr0CoreEntry
+	coreHash         uint64
+	annotationArgTag uint32
+}
+
 const (
 	templateContextTagShift          = 16
 	templateContextTagMask    uint32 = 0x00ff0000
@@ -57,8 +68,51 @@ func (set *lrItemSet) coreLookup(prodIdx, dot int) (int, bool) {
 		idx, ok := set.packedCoreIndex[packCoreItemKey(prodIdx, dot)]
 		return idx, ok
 	}
-	idx, ok := set.coreIndex[coreItem{prodIdx: prodIdx, dot: dot}]
-	return idx, ok
+	if set.coreIndex != nil {
+		idx, ok := set.coreIndex[coreItem{prodIdx: prodIdx, dot: dot}]
+		return idx, ok
+	}
+	lo, hi := 0, len(set.cores)
+	prodIdx32 := uint32(prodIdx)
+	dot32 := uint32(dot)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		ce := set.cores[mid]
+		if ce.prodIdx < prodIdx32 || (ce.prodIdx == prodIdx32 && ce.dot < dot32) {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	if lo < len(set.cores) {
+		ce := set.cores[lo]
+		if ce.prodIdx == prodIdx32 && ce.dot == dot32 {
+			return lo, true
+		}
+	}
+	return 0, false
+}
+
+func (set *lr0ItemSet) coreLookup(prodIdx, dot int) (int, bool) {
+	lo, hi := 0, len(set.cores)
+	prodIdx32 := uint32(prodIdx)
+	dot32 := uint32(dot)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		ce := set.cores[mid]
+		if ce.prodIdx < prodIdx32 || (ce.prodIdx == prodIdx32 && ce.dot < dot32) {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	if lo < len(set.cores) {
+		ce := set.cores[lo]
+		if ce.prodIdx == prodIdx32 && ce.dot == dot32 {
+			return lo, true
+		}
+	}
+	return 0, false
 }
 
 func (set *lrItemSet) setCoreIndex(prodIdx, dot, idx int) {
@@ -75,10 +129,34 @@ func (set *lrItemSet) ensurePackedCoreIndex() {
 	}
 	packedCoreIndex := make(map[uint64]int, len(set.cores))
 	for idx, ce := range set.cores {
-		packedCoreIndex[packCoreItemKey(ce.prodIdx, ce.dot)] = idx
+		packedCoreIndex[packCoreItemKey(int(ce.prodIdx), int(ce.dot))] = idx
 	}
 	set.packedCoreIndex = packedCoreIndex
 	set.coreIndex = nil
+}
+
+func sameSortedCoreEntries(a, b []coreEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].prodIdx != b[i].prodIdx || a[i].dot != b[i].dot {
+			return false
+		}
+	}
+	return true
+}
+
+func sameSortedLR0CoreEntries(a, b []lr0CoreEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].prodIdx != b[i].prodIdx || a[i].dot != b[i].dot {
+			return false
+		}
+	}
+	return true
 }
 
 // lrAction is a parse table action.
@@ -142,6 +220,16 @@ func buildLRTablesInternal(bgCtx context.Context, ng *NormalizedGrammar, trackPr
 			prodsByLHS:      make(map[int][]int),
 			betaCache:       make(map[uint32]*betaResult),
 			trackProvenance: trackProvenance,
+		}
+		if v := os.Getenv("GOT_LALR_LR0_STATE_BUDGET"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				ctx.lalrLR0StateBudget = n
+			}
+		}
+		if v := os.Getenv("GOT_LALR_LR0_CORE_BUDGET"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				ctx.lalrLR0CoreBudget = n
+			}
 		}
 		if trackProvenance && os.Getenv("GOT_DEBUG_LALR_LOOKAHEADS") == "1" {
 			ctx.trackLookaheadContributors = true
@@ -443,6 +531,14 @@ func buildLRTablesInternal(bgCtx context.Context, ng *NormalizedGrammar, trackPr
 			itemSets = ctx.buildItemSetsLALR()
 		}
 	}
+	if ctx.lalrLR0StateBudgetExceeded {
+		return nil, ctx, fmt.Errorf("build LR tables: LALR LR0 state budget exceeded (%d states > budget %d, core entries=%d)",
+			len(ctx.lalrLR0ItemSets), ctx.lalrLR0StateBudget, ctx.lalrLR0CoreEntries)
+	}
+	if ctx.lalrLR0CoreBudgetExceeded {
+		return nil, ctx, fmt.Errorf("build LR tables: LALR LR0 core budget exceeded (%d core entries > budget %d, states=%d)",
+			ctx.lalrLR0CoreEntries, ctx.lalrLR0CoreBudget, len(ctx.lalrLR0ItemSets))
+	}
 	// Check for context cancellation after item set construction. If the
 	// context was cancelled mid-build, return immediately so the goroutine
 	// can release LR builder memory.
@@ -473,9 +569,9 @@ func buildLRTablesInternal(bgCtx context.Context, ng *NormalizedGrammar, trackPr
 		trans := ctx.transitions[stateIdx]
 
 		for _, ce := range itemSet.cores {
-			prod := &ng.Productions[ce.prodIdx]
+			prod := &ng.Productions[int(ce.prodIdx)]
 
-			if ce.dot < len(prod.RHS) {
+			if int(ce.dot) < len(prod.RHS) {
 				// Dot not at end → shift or goto
 				nextSym := prod.RHS[ce.dot]
 				targetState, ok := trans[nextSym]
@@ -516,7 +612,7 @@ func buildLRTablesInternal(bgCtx context.Context, ng *NormalizedGrammar, trackPr
 				}
 			} else {
 				// Dot at end → reduce or accept
-				if ce.prodIdx == ng.AugmentProdID {
+				if int(ce.prodIdx) == ng.AugmentProdID {
 					// Augmented start production → accept
 					tables.addAction(stateIdx, 0, lrAction{kind: lrAccept})
 				} else {
@@ -524,7 +620,7 @@ func buildLRTablesInternal(bgCtx context.Context, ng *NormalizedGrammar, trackPr
 					ce.lookaheads.forEach(func(la int) {
 						tables.addAction(stateIdx, la, lrAction{
 							kind:    lrReduce,
-							prodIdx: ce.prodIdx,
+							prodIdx: int(ce.prodIdx),
 							prec:    prod.Prec,
 							hasPrec: prod.HasExplicitPrec,
 							assoc:   prod.Assoc,
@@ -554,8 +650,8 @@ func propagateEntryShiftMetadata(tables *LRTables, itemSets []lrItemSet, ctx *lr
 	tokenCount := ctx.tokenCount
 	for stateIdx, itemSet := range itemSets {
 		for _, ce := range itemSet.cores {
-			prod := &ng.Productions[ce.prodIdx]
-			if ce.dot >= len(prod.RHS) {
+			prod := &ng.Productions[int(ce.prodIdx)]
+			if int(ce.dot) >= len(prod.RHS) {
 				continue
 			}
 			nextSym := prod.RHS[ce.dot]
@@ -655,8 +751,9 @@ type lrContext struct {
 	betaCache map[uint32]*betaResult
 
 	// Item set management
-	itemSets    []lrItemSet
-	transitions map[int]map[int]int
+	itemSets        []lrItemSet
+	lalrLR0ItemSets []lr0ItemSet
+	transitions     map[int]map[int]int
 	// LALR transition follow sets are retained so local LR(1) splitting can
 	// reconstruct nonterminal predecessor partitions with meaningful lookaheads
 	// instead of the empty LR(0) kernels emitted by DeRemer/Pennello.
@@ -715,8 +812,11 @@ type lrContext struct {
 
 	// GOTO scratch reuses transient symbol and advanced-kernel slices while
 	// building successor states.
-	gotoSymbolsScratch  []int
-	gotoAdvancedScratch []coreEntry
+	gotoSymbolsScratch   []int
+	gotoSymbolMarks      []uint32
+	gotoSymbolGen        uint32
+	gotoKernelLR0Scratch []coreItem
+	gotoAdvancedScratch  []coreEntry
 
 	// Lookahead bitset scratch reuses word buffers for temporary closed sets that
 	// are discarded after exact-match or merge lookups.
@@ -730,6 +830,11 @@ type lrContext struct {
 	// builder crossed its configured state budget and should be retried via the
 	// cheaper LALR path.
 	preciseStateBudgetExceeded bool
+	lalrLR0StateBudget         int
+	lalrLR0CoreBudget          int
+	lalrLR0StateBudgetExceeded bool
+	lalrLR0CoreBudgetExceeded  bool
+	lalrLR0CoreEntries         int
 }
 
 // conflictResolutionCache stores grammar-wide declared-conflict metadata that
@@ -798,6 +903,24 @@ func (ctx *lrContext) ensureClosureQueueCapacity(size int) {
 	ctx.closureQueuedGen = append(ctx.closureQueuedGen, make([]uint32, size-len(ctx.closureQueuedGen))...)
 }
 
+func (ctx *lrContext) nextGotoSymbolGen() uint32 {
+	ctx.gotoSymbolGen++
+	if ctx.gotoSymbolGen == 0 {
+		for i := range ctx.gotoSymbolMarks {
+			ctx.gotoSymbolMarks[i] = 0
+		}
+		ctx.gotoSymbolGen = 1
+	}
+	return ctx.gotoSymbolGen
+}
+
+func (ctx *lrContext) ensureGotoSymbolCapacity(size int) {
+	if size <= len(ctx.gotoSymbolMarks) {
+		return
+	}
+	ctx.gotoSymbolMarks = append(ctx.gotoSymbolMarks, make([]uint32, size-len(ctx.gotoSymbolMarks))...)
+}
+
 func (ctx *lrContext) ensureProvenance() {
 	if !ctx.trackProvenance || ctx.provenance != nil {
 		return
@@ -835,6 +958,7 @@ func (ctx *lrContext) releaseScratch() {
 	ctx.prodsByLHS = nil
 	ctx.betaCache = nil
 	ctx.itemSets = nil
+	ctx.lalrLR0ItemSets = nil
 	ctx.transitions = nil
 	ctx.provenance = nil
 	ctx.dot0Index = nil
@@ -843,6 +967,8 @@ func (ctx *lrContext) releaseScratch() {
 	ctx.allTerminals = bitset{}
 	ctx.boundaryLookaheads = bitset{}
 	ctx.gotoSymbolsScratch = nil
+	ctx.gotoSymbolMarks = nil
+	ctx.gotoKernelLR0Scratch = nil
 	ctx.gotoAdvancedScratch = nil
 	ctx.lookaheadWordPool = nil
 	ctx.repeatWrapperStateSymCache = nil
@@ -1564,7 +1690,7 @@ func (ctx *lrContext) closureToSet(kernel []coreEntry) lrItemSet {
 	seenKernelNTs := make(map[int]bool, len(kernel))
 	for _, ke := range kernel {
 		prod := &ng.Productions[ke.prodIdx]
-		if ke.dot >= len(prod.RHS) {
+		if int(ke.dot) >= len(prod.RHS) {
 			continue
 		}
 		nextSym := prod.RHS[ke.dot]
@@ -1577,21 +1703,21 @@ func (ctx *lrContext) closureToSet(kernel []coreEntry) lrItemSet {
 	kernelIdx := make(map[uint64]int, len(kernel)*2)
 	cores := make([]coreEntry, 0, capHint)
 	for _, ke := range kernel {
-		key := packCoreItemKey(ke.prodIdx, ke.dot)
+		key := packCoreItemKey(int(ke.prodIdx), int(ke.dot))
 		if idx, ok := kernelIdx[key]; ok {
 			cores[idx].lookaheads.unionWith(&ke.lookaheads)
 		} else {
 			idx := len(cores)
 			kernelIdx[key] = idx
 			cores = append(cores, coreEntry{
-				prodIdx:    ke.prodIdx,
-				dot:        ke.dot,
+				prodIdx:    uint32(ke.prodIdx),
+				dot:        uint32(ke.dot),
 				lookaheads: ctx.cloneLookaheadBitset(&ke.lookaheads),
 			})
 			// Populate dot0Index for kernel items at dot=0.
 			if ke.dot == 0 {
 				ctx.dot0Index[ke.prodIdx] = idx
-				ctx.dot0Dirty = append(ctx.dot0Dirty, ke.prodIdx)
+				ctx.dot0Dirty = append(ctx.dot0Dirty, int(ke.prodIdx))
 			}
 		}
 	}
@@ -1612,8 +1738,8 @@ func (ctx *lrContext) closureToSet(kernel []coreEntry) lrItemSet {
 		ctx.closureQueuedGen[ci] = 0
 
 		ce := &cores[ci]
-		prod := &ng.Productions[ce.prodIdx]
-		if ce.dot >= len(prod.RHS) {
+		prod := &ng.Productions[int(ce.prodIdx)]
+		if int(ce.dot) >= len(prod.RHS) {
 			continue
 		}
 
@@ -1622,7 +1748,7 @@ func (ctx *lrContext) closureToSet(kernel []coreEntry) lrItemSet {
 			continue
 		}
 
-		br := ctx.getBetaFirst(ce.prodIdx, ce.dot)
+		br := ctx.getBetaFirst(int(ce.prodIdx), int(ce.dot))
 
 		for _, prodIdx := range ctx.prodsByLHS[nextSym] {
 			// Fast path: dot=0 lookup via flat array.
@@ -1634,7 +1760,7 @@ func (ctx *lrContext) closureToSet(kernel []coreEntry) lrItemSet {
 				ctx.dot0Index[prodIdx] = tidx
 				ctx.dot0Dirty = append(ctx.dot0Dirty, prodIdx)
 				cores = append(cores, coreEntry{
-					prodIdx:    prodIdx,
+					prodIdx:    uint32(prodIdx),
 					dot:        0,
 					lookaheads: ctx.allocLookaheadBitset(),
 				})
@@ -1679,7 +1805,7 @@ func (ctx *lrContext) closureIncremental(set *lrItemSet, newEntries []coreEntry)
 	worklist := ctx.closureWorklist[:0]
 
 	for _, ne := range newEntries {
-		if idx, ok := set.coreLookup(ne.prodIdx, ne.dot); ok {
+		if idx, ok := set.coreLookup(int(ne.prodIdx), int(ne.dot)); ok {
 			if set.cores[idx].lookaheads.unionWith(&ne.lookaheads) {
 				if ctx.closureQueuedGen[idx] != queueGen {
 					worklist = append(worklist, idx)
@@ -1688,7 +1814,7 @@ func (ctx *lrContext) closureIncremental(set *lrItemSet, newEntries []coreEntry)
 			}
 		} else {
 			idx = len(set.cores)
-			set.setCoreIndex(ne.prodIdx, ne.dot, idx)
+			set.setCoreIndex(int(ne.prodIdx), int(ne.dot), idx)
 			set.cores = append(set.cores, coreEntry{
 				prodIdx:    ne.prodIdx,
 				dot:        ne.dot,
@@ -1707,8 +1833,8 @@ func (ctx *lrContext) closureIncremental(set *lrItemSet, newEntries []coreEntry)
 		ctx.closureQueuedGen[ci] = 0
 
 		ce := &set.cores[ci]
-		prod := &ng.Productions[ce.prodIdx]
-		if ce.dot >= len(prod.RHS) {
+		prod := &ng.Productions[int(ce.prodIdx)]
+		if int(ce.dot) >= len(prod.RHS) {
 			continue
 		}
 
@@ -1717,7 +1843,7 @@ func (ctx *lrContext) closureIncremental(set *lrItemSet, newEntries []coreEntry)
 			continue
 		}
 
-		br := ctx.getBetaFirst(ce.prodIdx, ce.dot)
+		br := ctx.getBetaFirst(int(ce.prodIdx), int(ce.dot))
 
 		for _, prodIdx := range ctx.prodsByLHS[nextSym] {
 			tidx, exists := set.coreLookup(prodIdx, 0)
@@ -1726,7 +1852,7 @@ func (ctx *lrContext) closureIncremental(set *lrItemSet, newEntries []coreEntry)
 				tidx = len(set.cores)
 				set.setCoreIndex(prodIdx, 0, tidx)
 				set.cores = append(set.cores, coreEntry{
-					prodIdx:    prodIdx,
+					prodIdx:    uint32(prodIdx),
 					dot:        0,
 					lookaheads: ctx.allocLookaheadBitset(),
 				})
@@ -1846,12 +1972,16 @@ func sameAnnotationArgTag(a, b *lrItemSet) bool {
 	return a.annotationArgTag == b.annotationArgTag
 }
 
+func sameAnnotationArgTagLR0(a, b *lr0ItemSet) bool {
+	return a.annotationArgTag == b.annotationArgTag
+}
+
 func (ctx *lrContext) isAnnotationArgumentEntrySet(set *lrItemSet) bool {
 	if ctx.annotationAtSym < 0 || ctx.annotationDefSym < 0 || ctx.annotationOpenParenSym < 0 {
 		return false
 	}
 	for _, ce := range set.cores {
-		prod := ctx.ng.Productions[ce.prodIdx]
+		prod := ctx.ng.Productions[int(ce.prodIdx)]
 		if ctx.ng.Symbols[prod.LHS].Name != "arguments" {
 			continue
 		}
@@ -1870,7 +2000,7 @@ func (ctx *lrContext) isAnnotationArgumentCarrierSet(set *lrItemSet) bool {
 		return false
 	}
 	for _, ce := range set.cores {
-		prod := ctx.ng.Productions[ce.prodIdx]
+		prod := ctx.ng.Productions[int(ce.prodIdx)]
 		if prod.LHS < 0 || prod.LHS >= len(ctx.annotationArgCarrierLHS) || !ctx.annotationArgCarrierLHS[prod.LHS] {
 			continue
 		}
@@ -1905,7 +2035,20 @@ func (ctx *lrContext) isBracedTemplateFamilySet(set *lrItemSet) bool {
 		return false
 	}
 	for _, ce := range set.cores {
-		switch ctx.ng.Productions[ce.prodIdx].LHS {
+		switch ctx.ng.Productions[int(ce.prodIdx)].LHS {
+		case ctx.bracedTemplateBodySym, ctx.bracedTemplateBody1Sym, ctx.bracedTemplateBody2Sym:
+			return true
+		}
+	}
+	return false
+}
+
+func (ctx *lrContext) isBracedTemplateFamilySetLR0(set *lr0ItemSet) bool {
+	if ctx.bracedTemplateBodySym < 0 {
+		return false
+	}
+	for _, ce := range set.cores {
+		switch ctx.ng.Productions[int(ce.prodIdx)].LHS {
 		case ctx.bracedTemplateBodySym, ctx.bracedTemplateBody1Sym, ctx.bracedTemplateBody2Sym:
 			return true
 		}
@@ -1955,7 +2098,20 @@ func (ctx *lrContext) isTemplateDefinitionCarrierSet(set *lrItemSet) bool {
 		return false
 	}
 	for _, ce := range set.cores {
-		prod := ctx.ng.Productions[ce.prodIdx]
+		prod := ctx.ng.Productions[int(ce.prodIdx)]
+		if prod.LHS >= 0 && prod.LHS < len(ctx.templateDefinitionCarrierLHS) && ctx.templateDefinitionCarrierLHS[prod.LHS] {
+			return true
+		}
+	}
+	return false
+}
+
+func (ctx *lrContext) isTemplateDefinitionCarrierSetLR0(set *lr0ItemSet) bool {
+	if len(ctx.templateDefinitionCarrierLHS) == 0 {
+		return false
+	}
+	for _, ce := range set.cores {
+		prod := ctx.ng.Productions[int(ce.prodIdx)]
 		if prod.LHS >= 0 && prod.LHS < len(ctx.templateDefinitionCarrierLHS) && ctx.templateDefinitionCarrierLHS[prod.LHS] {
 			return true
 		}
@@ -1971,6 +2127,10 @@ func (ctx *lrContext) completedRepeatWrapperLHS(set *lrItemSet, sym int) int {
 	return ctx.completedRepeatWrapperLHSAcrossTransitions(set, sym, false)
 }
 
+func (ctx *lrContext) isCompletedRepeatWrapperForSymbolLR0(set *lr0ItemSet, sym int) bool {
+	return ctx.completedRepeatWrapperLHSAcrossTransitionsLR0(set, sym, false) >= 0
+}
+
 func (ctx *lrContext) completedRepeatWrapperLHSAcrossTransitions(set *lrItemSet, sym int, allowTerminal bool) int {
 	ctx.ensureRepeatWrapperLHS()
 	if sym < ctx.tokenCount {
@@ -1979,8 +2139,28 @@ func (ctx *lrContext) completedRepeatWrapperLHSAcrossTransitions(set *lrItemSet,
 		}
 	}
 	for _, ce := range set.cores {
-		prod := ctx.ng.Productions[ce.prodIdx]
-		if ce.dot != len(prod.RHS) || len(prod.RHS) != 1 || prod.RHS[0] != sym {
+		prod := ctx.ng.Productions[int(ce.prodIdx)]
+		if int(ce.dot) != len(prod.RHS) || len(prod.RHS) != 1 || prod.RHS[0] != sym {
+			continue
+		}
+		if prod.LHS < 0 || prod.LHS >= len(ctx.ng.Symbols) {
+			continue
+		}
+		if ctx.repeatWrapperLHS[prod.LHS] {
+			return prod.LHS
+		}
+	}
+	return -1
+}
+
+func (ctx *lrContext) completedRepeatWrapperLHSAcrossTransitionsLR0(set *lr0ItemSet, sym int, allowTerminal bool) int {
+	ctx.ensureRepeatWrapperLHS()
+	if sym < ctx.tokenCount && !allowTerminal {
+		return -1
+	}
+	for _, ce := range set.cores {
+		prod := ctx.ng.Productions[int(ce.prodIdx)]
+		if int(ce.dot) != len(prod.RHS) || len(prod.RHS) != 1 || prod.RHS[0] != sym {
 			continue
 		}
 		if prod.LHS < 0 || prod.LHS >= len(ctx.ng.Symbols) {
@@ -2009,6 +2189,22 @@ func (ctx *lrContext) completedRepeatWrapperStateLHS(state, sym int) int {
 	return lhs
 }
 
+func (ctx *lrContext) completedRepeatWrapperStateLHSLR0(state, sym int) int {
+	if ctx == nil || state < 0 || state >= len(ctx.lalrLR0ItemSets) {
+		return -1
+	}
+	if ctx.repeatWrapperStateSymCache == nil {
+		ctx.repeatWrapperStateSymCache = make(map[uint64]int)
+	}
+	key := packCoreItemKey(state, sym)
+	if cached := ctx.repeatWrapperStateSymCache[key]; cached != 0 {
+		return cached - 2
+	}
+	lhs := ctx.completedRepeatWrapperLHSAcrossTransitionsLR0(&ctx.lalrLR0ItemSets[state], sym, true)
+	ctx.repeatWrapperStateSymCache[key] = lhs + 2
+	return lhs
+}
+
 func (ctx *lrContext) isRepetitionShift(sourceState, sym, targetState int) bool {
 	if ctx == nil || sourceState < 0 || targetState < 0 || sourceState >= len(ctx.itemSets) || targetState >= len(ctx.itemSets) {
 		return false
@@ -2025,8 +2221,26 @@ func (ctx *lrContext) stateHasRecursiveRepeatSource(set *lrItemSet, lhs int) boo
 		return false
 	}
 	for _, ce := range set.cores {
-		prod := ctx.ng.Productions[ce.prodIdx]
-		if prod.LHS != lhs || ce.dot != len(prod.RHS) {
+		prod := ctx.ng.Productions[int(ce.prodIdx)]
+		if prod.LHS != lhs || int(ce.dot) != len(prod.RHS) {
+			continue
+		}
+		for _, sym := range prod.RHS {
+			if sym == lhs {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (ctx *lrContext) stateHasRecursiveRepeatSourceLR0(set *lr0ItemSet, lhs int) bool {
+	if set == nil || lhs < 0 {
+		return false
+	}
+	for _, ce := range set.cores {
+		prod := ctx.ng.Productions[int(ce.prodIdx)]
+		if prod.LHS != lhs || int(ce.dot) != len(prod.RHS) {
 			continue
 		}
 		for _, sym := range prod.RHS {
@@ -2055,12 +2269,42 @@ func (ctx *lrContext) repeatWrapperSourceTagForTransition(sourceState, sym int, 
 	return 0
 }
 
+func (ctx *lrContext) repeatWrapperSourceTagForLR0Transition(sourceState, sym int, closedSet *lr0ItemSet) uint32 {
+	if os.Getenv("GOT_LR_DISABLE_CONTEXT_TAGS") == "1" {
+		return 0
+	}
+	if len(ctx.ng.Productions) < 2000 || sourceState < 0 || sourceState >= len(ctx.lalrLR0ItemSets) {
+		return 0
+	}
+	lhs := ctx.completedRepeatWrapperLHSAcrossTransitionsLR0(closedSet, sym, false)
+	if lhs < 0 {
+		return 0
+	}
+	if ctx.stateHasRecursiveRepeatSourceLR0(&ctx.lalrLR0ItemSets[sourceState], lhs) {
+		return 1 << 24
+	}
+	return 0
+}
+
 func (ctx *lrContext) isConditionalTypeCarrierSet(set *lrItemSet) bool {
 	if ctx == nil || len(ctx.conditionalTypeCarrierLHS) == 0 {
 		return false
 	}
 	for _, ce := range set.cores {
-		prod := ctx.ng.Productions[ce.prodIdx]
+		prod := ctx.ng.Productions[int(ce.prodIdx)]
+		if prod.LHS >= 0 && prod.LHS < len(ctx.conditionalTypeCarrierLHS) && ctx.conditionalTypeCarrierLHS[prod.LHS] {
+			return true
+		}
+	}
+	return false
+}
+
+func (ctx *lrContext) isConditionalTypeCarrierSetLR0(set *lr0ItemSet) bool {
+	if ctx == nil || len(ctx.conditionalTypeCarrierLHS) == 0 {
+		return false
+	}
+	for _, ce := range set.cores {
+		prod := ctx.ng.Productions[int(ce.prodIdx)]
 		if prod.LHS >= 0 && prod.LHS < len(ctx.conditionalTypeCarrierLHS) && ctx.conditionalTypeCarrierLHS[prod.LHS] {
 			return true
 		}
@@ -2079,14 +2323,39 @@ func (ctx *lrContext) stateEntersConditionalTypeRHS(state, sym int) bool {
 		return false
 	}
 	for _, ce := range ctx.itemSets[state].cores {
-		prod := ctx.ng.Productions[ce.prodIdx]
+		prod := ctx.ng.Productions[int(ce.prodIdx)]
 		if prod.LHS != ctx.conditionalTypeSym || len(prod.RHS) < 4 {
 			continue
 		}
 		if prod.RHS[1] != ctx.conditionalTypeExtendsSym || prod.RHS[3] != ctx.conditionalTypePlainQmarkSym {
 			continue
 		}
-		if ce.dot == 1 && ce.dot < len(prod.RHS) && prod.RHS[ce.dot] == ctx.conditionalTypeExtendsSym && sym == ctx.conditionalTypeExtendsSym {
+		if ce.dot == 1 && int(ce.dot) < len(prod.RHS) && prod.RHS[ce.dot] == ctx.conditionalTypeExtendsSym && sym == ctx.conditionalTypeExtendsSym {
+			return true
+		}
+	}
+	return false
+}
+
+func (ctx *lrContext) stateEntersConditionalTypeRHSLR0(state, sym int) bool {
+	if ctx == nil || state < 0 || state >= len(ctx.lalrLR0ItemSets) {
+		return false
+	}
+	if ctx.conditionalTypeSym < 0 || ctx.conditionalTypeExtendsSym < 0 || ctx.conditionalTypePlainQmarkSym < 0 {
+		return false
+	}
+	if sym == ctx.conditionalTypePlainQmarkSym {
+		return false
+	}
+	for _, ce := range ctx.lalrLR0ItemSets[state].cores {
+		prod := ctx.ng.Productions[int(ce.prodIdx)]
+		if prod.LHS != ctx.conditionalTypeSym || len(prod.RHS) < 4 {
+			continue
+		}
+		if prod.RHS[1] != ctx.conditionalTypeExtendsSym || prod.RHS[3] != ctx.conditionalTypePlainQmarkSym {
+			continue
+		}
+		if ce.dot == 1 && int(ce.dot) < len(prod.RHS) && prod.RHS[ce.dot] == ctx.conditionalTypeExtendsSym && sym == ctx.conditionalTypeExtendsSym {
 			return true
 		}
 	}
@@ -2107,6 +2376,25 @@ func (ctx *lrContext) conditionalTypeContextTagForTransition(sourceState, sym in
 		return conditionalTypeContextTag
 	}
 	if ctx.stateEntersConditionalTypeRHS(sourceState, sym) {
+		return conditionalTypeContextTag
+	}
+	return 0
+}
+
+func (ctx *lrContext) conditionalTypeContextTagForLR0Transition(sourceState, sym int, closedSet *lr0ItemSet) uint32 {
+	if os.Getenv("GOT_LR_DISABLE_CONTEXT_TAGS") == "1" {
+		return 0
+	}
+	if len(ctx.ng.Productions) < 2000 || sourceState < 0 || sourceState >= len(ctx.lalrLR0ItemSets) {
+		return 0
+	}
+	if !ctx.isConditionalTypeCarrierSetLR0(closedSet) {
+		return 0
+	}
+	if ctx.lalrLR0ItemSets[sourceState].annotationArgTag&conditionalTypeContextTag != 0 {
+		return conditionalTypeContextTag
+	}
+	if ctx.stateEntersConditionalTypeRHSLR0(sourceState, sym) {
 		return conditionalTypeContextTag
 	}
 	return 0
@@ -2149,6 +2437,43 @@ func (ctx *lrContext) templateContextTagForTransition(sourceState, sym int, clos
 	return 0
 }
 
+func (ctx *lrContext) templateContextTagForLR0Transition(sourceState, sym int, closedSet *lr0ItemSet) uint32 {
+	if os.Getenv("GOT_LR_DISABLE_CONTEXT_TAGS") == "1" {
+		return 0
+	}
+	if len(ctx.ng.Productions) < 2000 || sourceState < 0 || sourceState >= len(ctx.lalrLR0ItemSets) {
+		return 0
+	}
+
+	sourceCarrier := ctx.isBracedTemplateFamilySetLR0(&ctx.lalrLR0ItemSets[sourceState]) ||
+		ctx.isTemplateDefinitionCarrierSetLR0(&ctx.lalrLR0ItemSets[sourceState])
+	targetCarrier := ctx.isBracedTemplateFamilySetLR0(closedSet) ||
+		ctx.isTemplateDefinitionCarrierSetLR0(closedSet)
+
+	srcTag := ctx.lalrLR0ItemSets[sourceState].annotationArgTag & templateContextTagMask
+	if srcTag != 0 && ctx.isCompletedRepeatWrapperForSymbolLR0(closedSet, sym) {
+		return srcTag
+	}
+	if !sourceCarrier && !targetCarrier {
+		return 0
+	}
+	if ctx.annotationAtSym >= 0 && sym == ctx.annotationAtSym && targetCarrier {
+		if srcTag != 0 && srcTag != templateContextPendingTag {
+			return srcTag
+		}
+		return templateContextPendingTag
+	}
+	if sym >= 0 && sym < len(ctx.definitionBoundaryTagBySym) {
+		if tag := ctx.definitionBoundaryTagBySym[sym]; tag != 0 && (sourceCarrier || srcTag != 0 || targetCarrier) {
+			return tag
+		}
+	}
+	if srcTag != 0 && targetCarrier {
+		return srcTag
+	}
+	return 0
+}
+
 func (ctx *lrContext) operatorLiteralMergeTag(set *lrItemSet) uint32 {
 	if os.Getenv("GOT_LR_DISABLE_CONTEXT_TAGS") == "1" {
 		return 0
@@ -2163,8 +2488,8 @@ func (ctx *lrContext) operatorLiteralMergeTag(set *lrItemSet) uint32 {
 	var hasOpIdent bool
 	var hasStar bool
 	for _, ce := range set.cores {
-		prod := ctx.ng.Productions[ce.prodIdx]
-		if prod.LHS != ctx.nonNullLiteralSym || ce.dot < len(prod.RHS) {
+		prod := ctx.ng.Productions[int(ce.prodIdx)]
+		if prod.LHS != ctx.nonNullLiteralSym || int(ce.dot) < len(prod.RHS) {
 			continue
 		}
 		if ce.lookaheads.contains(ctx.operatorIdentSym) {
@@ -2196,13 +2521,13 @@ func completionFrontierItem(prods []Production, prodIdx, dot int) bool {
 func (set *lrItemSet) computeHashes(prods []Production, boundaryMask *bitset, includeCompletionHash bool) {
 	var ch, fh, completionHash, brh uint64
 	for _, c := range set.cores {
-		m := mixCoreItem(c.prodIdx, c.dot)
+		m := mixCoreItem(int(c.prodIdx), int(c.dot))
 		ch += m
 		fh += m ^ c.lookaheads.hash()
 		if boundaryMask != nil {
 			brh += maskedBitsetHash(&c.lookaheads, boundaryMask)
 		}
-		if includeCompletionHash && completionFrontierItem(prods, c.prodIdx, c.dot) {
+		if includeCompletionHash && completionFrontierItem(prods, int(c.prodIdx), int(c.dot)) {
 			completionHash += c.lookaheads.hash()
 		}
 	}
@@ -2223,7 +2548,7 @@ func sameCoresUsingIndexed(indexed, other *lrItemSet) bool {
 		return false
 	}
 	for _, oc := range other.cores {
-		if _, ok := indexed.coreLookup(oc.prodIdx, oc.dot); !ok {
+		if _, ok := indexed.coreLookup(int(oc.prodIdx), int(oc.dot)); !ok {
 			return false
 		}
 	}
@@ -2238,7 +2563,7 @@ func sameFullItemsUsingIndexed(indexed, other *lrItemSet) bool {
 		return false
 	}
 	for _, oc := range other.cores {
-		idx, ok := indexed.coreLookup(oc.prodIdx, oc.dot)
+		idx, ok := indexed.coreLookup(int(oc.prodIdx), int(oc.dot))
 		if !ok {
 			return false
 		}
@@ -2255,10 +2580,10 @@ func sameFullItemsUsingIndexed(indexed, other *lrItemSet) bool {
 func sameCompletionLookaheadsUsingIndexed(indexed, other *lrItemSet, prods []Production) bool {
 	indexed.ensurePackedCoreIndex()
 	for _, oc := range other.cores {
-		if !completionFrontierItem(prods, oc.prodIdx, oc.dot) {
+		if !completionFrontierItem(prods, int(oc.prodIdx), int(oc.dot)) {
 			continue
 		}
-		idx, ok := indexed.coreLookup(oc.prodIdx, oc.dot)
+		idx, ok := indexed.coreLookup(int(oc.prodIdx), int(oc.dot))
 		if !ok {
 			return false
 		}
@@ -2275,7 +2600,7 @@ func sameCompletionLookaheadsUsingIndexed(indexed, other *lrItemSet, prods []Pro
 func sameBoundaryLookaheadsUsingIndexed(indexed, other *lrItemSet, boundaryMask *bitset) bool {
 	indexed.ensurePackedCoreIndex()
 	for _, oc := range other.cores {
-		idx, ok := indexed.coreLookup(oc.prodIdx, oc.dot)
+		idx, ok := indexed.coreLookup(int(oc.prodIdx), int(oc.dot))
 		if !ok {
 			return false
 		}
@@ -2375,7 +2700,7 @@ func (ctx *lrContext) buildItemSets() []lrItemSet {
 	initialLA := newBitset(tokenCount)
 	initialLA.add(0) // $end
 	initialSet := ctx.closureToSet([]coreEntry{{
-		prodIdx:    ctx.ng.AugmentProdID,
+		prodIdx:    uint32(ctx.ng.AugmentProdID),
 		dot:        0,
 		lookaheads: initialLA,
 	}})
@@ -2417,8 +2742,8 @@ func (ctx *lrContext) buildItemSets() []lrItemSet {
 		symsSeen := make(map[int]bool)
 		syms := ctx.gotoSymbolsScratch[:0]
 		for _, ce := range itemSet.cores {
-			prod := &ctx.ng.Productions[ce.prodIdx]
-			if ce.dot < len(prod.RHS) {
+			prod := &ctx.ng.Productions[int(ce.prodIdx)]
+			if int(ce.dot) < len(prod.RHS) {
 				sym := prod.RHS[ce.dot]
 				if !symsSeen[sym] {
 					symsSeen[sym] = true
@@ -2431,8 +2756,8 @@ func (ctx *lrContext) buildItemSets() []lrItemSet {
 			// Compute GOTO(itemSet, sym): advance dot past sym.
 			advanced := ctx.gotoAdvancedScratch[:0]
 			for _, ce := range itemSet.cores {
-				prod := &ctx.ng.Productions[ce.prodIdx]
-				if ce.dot < len(prod.RHS) && prod.RHS[ce.dot] == sym {
+				prod := &ctx.ng.Productions[int(ce.prodIdx)]
+				if int(ce.dot) < len(prod.RHS) && prod.RHS[ce.dot] == sym {
 					advanced = append(advanced, coreEntry{
 						prodIdx:    ce.prodIdx,
 						dot:        ce.dot + 1,
@@ -2571,7 +2896,7 @@ func (ctx *lrContext) mergeInto(
 	var newEntries []coreEntry
 	existing := &ctx.itemSets[idx]
 	for _, ce := range closedSet.cores {
-		if eidx, ok := existing.coreLookup(ce.prodIdx, ce.dot); ok {
+		if eidx, ok := existing.coreLookup(int(ce.prodIdx), int(ce.dot)); ok {
 			// Check if any new lookaheads.
 			ec := &existing.cores[eidx]
 			for wi, w := range ce.lookaheads.words {

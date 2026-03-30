@@ -134,8 +134,8 @@ func localLR1Rebuild(
 			// Find items in predecessor where dot is before the transition symbol.
 			var kernel []coreEntry
 			for _, ce := range predItemSet.cores {
-				prod := &ng.Productions[ce.prodIdx]
-				if ce.dot < len(prod.RHS) && prod.RHS[ce.dot] == pred.transSym {
+				prod := &ng.Productions[int(ce.prodIdx)]
+				if int(ce.dot) < len(prod.RHS) && prod.RHS[ce.dot] == pred.transSym {
 					// Advance dot past the transition symbol.
 					lookaheads := ctx.splitKernelLookaheadsForTransition(pred.predState, pred.transSym, ce.lookaheads)
 					kernel = append(kernel, coreEntry{
@@ -156,16 +156,16 @@ func localLR1Rebuild(
 			// Build action table from the closed set.
 			actions := make(map[int][]lrAction)
 			for _, ce := range closedSet.cores {
-				prod := &ng.Productions[ce.prodIdx]
-				if ce.dot >= len(prod.RHS) {
+				prod := &ng.Productions[int(ce.prodIdx)]
+				if int(ce.dot) >= len(prod.RHS) {
 					// Reduce item.
-					if ce.prodIdx == ng.AugmentProdID {
+					if int(ce.prodIdx) == ng.AugmentProdID {
 						actions[0] = append(actions[0], lrAction{kind: lrAccept})
 					} else {
 						ce.lookaheads.forEach(func(la int) {
 							actions[la] = append(actions[la], lrAction{
 								kind:    lrReduce,
-								prodIdx: ce.prodIdx,
+								prodIdx: int(ce.prodIdx),
 								lhsSym:  prod.LHS,
 								isExtra: prod.IsExtra,
 							})

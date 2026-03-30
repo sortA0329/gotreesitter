@@ -34,6 +34,7 @@ const (
 	realCorpusAllowPartialEnv   = "GTS_GRAMMARGEN_REAL_CORPUS_ALLOW_PARTIAL"
 	realCorpusSkipEnv           = "GTS_GRAMMARGEN_REAL_CORPUS_SKIP"
 	realCorpusOnlyEnv           = "GTS_GRAMMARGEN_REAL_CORPUS_ONLY"
+	realCorpusDiagEnv           = "GTS_GRAMMARGEN_REAL_CORPUS_DIAG"
 	realCorpusFloorsFileVersion = 3
 	maxRealCorpusWalkFiles      = 6000
 )
@@ -190,14 +191,21 @@ func TestMultiGrammarImportRealCorpusParity(t *testing.T) {
 		if len(candidates) == 0 {
 			continue
 		}
+		logRealCorpusDiag("after_collect_candidates", g.name,
+			"repo=%s candidates=%d profile=%s maxCases=%d maxSampleBytes=%d",
+			repoRoot, len(candidates), profile, maxCases, maxSampleBytes)
 
 		testedGrammars++
 		g := g
 		t.Run(g.name, func(t *testing.T) {
+			logRealCorpusDiag("subtest_start", g.name, "timeout=%s jsonPath=%s path=%s", g.genTimeout, g.jsonPath, g.path)
 			gram, err := importParityGrammarSource(g)
 			if err != nil {
 				t.Fatalf("import failed: %v", err)
 			}
+			logRealCorpusDiag("after_import", g.name,
+				"rules=%d extras=%d externals=%d conflicts=%d inline=%d supertypes=%d",
+				len(gram.Rules), len(gram.Extras), len(gram.Externals), len(gram.Conflicts), len(gram.Inline), len(gram.Supertypes))
 
 			if getenvBool("GTS_GRAMMARGEN_LR_SPLIT") {
 				// LR splitting hurts JS/TS: the split states introduce new
@@ -225,15 +233,26 @@ func TestMultiGrammarImportRealCorpusParity(t *testing.T) {
 			if timeout == 0 {
 				timeout = 30 * time.Second
 			}
+			logRealCorpusDiag("before_generate", g.name, "timeout=%s", timeout)
 			genLang, err := generateWithTimeout(gram, timeout)
 			if err != nil {
 				t.Fatalf("generate failed: %v", err)
 			}
+			logRealCorpusDiag("after_generate", g.name,
+				"symbols=%d states=%d tokens=%d externalSymbols=%d parseActions=%d",
+				genLang.SymbolCount, genLang.StateCount, genLang.TokenCount, len(genLang.ExternalSymbols), len(genLang.ParseActions))
 			refLang := g.blobFunc()
+			logRealCorpusDiag("after_ref_blob", g.name,
+				"symbols=%d states=%d tokens=%d externalSymbols=%d parseActions=%d",
+				refLang.SymbolCount, refLang.StateCount, refLang.TokenCount, len(refLang.ExternalSymbols), len(refLang.ParseActions))
 			adaptExternalScanner(refLang, genLang)
+			logRealCorpusDiag("after_adapt_scanner", g.name,
+				"genExternalScanner=%t refExternalScanner=%t",
+				genLang.ExternalScanner != nil, refLang.ExternalScanner != nil)
 
 			genParser := gotreesitter.NewParser(genLang)
 			refParser := gotreesitter.NewParser(refLang)
+			logRealCorpusDiag("after_parser_init", g.name, "candidates=%d", len(candidates))
 
 			// Log root symbol inference for diagnostics.
 			if genRootSym, genHasRoot := genParser.InferredRootSymbol(); genHasRoot {
@@ -257,6 +276,11 @@ func TestMultiGrammarImportRealCorpusParity(t *testing.T) {
 			}
 
 			for i, cand := range candidates {
+				if i == 0 {
+					logRealCorpusDiag("before_first_parse", g.name,
+						"source=%s path=%s size=%d",
+						cand.Source, cand.Path, len(cand.Text))
+				}
 				if maxSecsPerGrammar > 0 && time.Now().After(grammarDeadline) && metrics.Eligible > 0 {
 					t.Logf("real-corpus: stopping early at sample %d due grammar time budget (%ds)", i, maxSecsPerGrammar)
 					break
@@ -442,6 +466,7 @@ func TestMultiGrammarImportRealCorpusParity(t *testing.T) {
 			refParser = nil
 			genLang = nil
 			refLang = nil
+			logRealCorpusDiag("after_release", g.name, "eligible=%d seen=%d", metrics.Eligible, seen)
 
 			t.Logf("real-corpus[%s]: no-error %d/%d, sexpr parity %d/%d, deep parity %d/%d%s (requireParity=%v, seen=%d/%d)",
 				profile,
@@ -623,6 +648,27 @@ func defaultMaxSecondsPerGrammar(p realCorpusProfile) int {
 	// exploratory runs.
 	_ = p
 	return 0
+}
+
+func logRealCorpusDiag(stage, grammar, format string, args ...any) {
+	if !getenvBool(realCorpusDiagEnv) {
+		return
+	}
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr,
+		"real-corpus-diag stage=%s grammar=%s heap_alloc_mb=%d heap_sys_mb=%d heap_objects=%d stack_sys_mb=%d sys_mb=%d gc=%d %s\n",
+		stage,
+		grammar,
+		ms.HeapAlloc/(1<<20),
+		ms.HeapSys/(1<<20),
+		ms.HeapObjects,
+		ms.StackSys/(1<<20),
+		ms.Sys/(1<<20),
+		ms.NumGC,
+		msg,
+	)
 }
 
 func defaultRealCorpusFloorsPath() string {

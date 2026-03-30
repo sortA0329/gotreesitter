@@ -239,7 +239,7 @@ func TestDiagScalaRootRuntime(t *testing.T) {
 				continue
 			}
 			for _, ce := range ctx.itemSets[target].cores {
-				if diagProductionMentionsNames(ng, &ng.Productions[ce.prodIdx], []string{"block_comment", "comment", "_comment_text"}) {
+				if diagProductionMentionsNames(ng, &ng.Productions[int(ce.prodIdx)], []string{"block_comment", "comment", "_comment_text"}) {
 					laPrefix := ""
 					if len(autoSemiSyms) > 0 && ce.lookaheads.contains(autoSemiSyms[0]) {
 						laPrefix += " LA(_automatic_semicolon)"
@@ -247,7 +247,7 @@ func TestDiagScalaRootRuntime(t *testing.T) {
 					if len(closeCommentSyms) > 0 && ce.lookaheads.contains(closeCommentSyms[0]) {
 						laPrefix += " LA(*/)"
 					}
-					t.Logf("scala-diag state=%d item%s %s", target, laPrefix, diagFormatProd(ng, ce.prodIdx, ce.dot))
+					t.Logf("scala-diag state=%d item%s %s", target, laPrefix, diagFormatProd(ng, int(ce.prodIdx), int(ce.dot)))
 				}
 			}
 			if len(slashStarSyms) > 0 {

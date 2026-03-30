@@ -159,8 +159,8 @@ func TestLALRBuildsStates(t *testing.T) {
 			// Check: every reduce item has at least one lookahead.
 			for si, set := range lalrSets {
 				for _, ce := range set.cores {
-					prod := &ng.Productions[ce.prodIdx]
-					if ce.dot >= len(prod.RHS) && ce.prodIdx != ng.AugmentProdID {
+					prod := &ng.Productions[int(ce.prodIdx)]
+					if int(ce.dot) >= len(prod.RHS) && int(ce.prodIdx) != ng.AugmentProdID {
 						if ce.lookaheads.empty() {
 							t.Errorf("state %d: reduce item prod %d (%s → ...) has no lookaheads",
 								si, ce.prodIdx, ng.Symbols[prod.LHS].Name)
@@ -175,7 +175,7 @@ func TestLALRBuildsStates(t *testing.T) {
 			}
 			found := false
 			for _, ce := range lalrSets[0].cores {
-				if ce.prodIdx == ng.AugmentProdID && ce.dot == 0 {
+				if int(ce.prodIdx) == ng.AugmentProdID && ce.dot == 0 {
 					found = true
 				}
 			}
@@ -188,7 +188,7 @@ func TestLALRBuildsStates(t *testing.T) {
 			augProd := &ng.Productions[ng.AugmentProdID]
 			for si, set := range lalrSets {
 				for _, ce := range set.cores {
-					if ce.prodIdx == ng.AugmentProdID && ce.dot == len(augProd.RHS) {
+					if int(ce.prodIdx) == ng.AugmentProdID && int(ce.dot) == len(augProd.RHS) {
 						if ce.lookaheads.contains(0) {
 							hasAccept = true
 							t.Logf("accept state: %d", si)

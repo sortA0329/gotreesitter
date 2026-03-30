@@ -124,13 +124,13 @@ func TestDiagYAMLRootEOFReduction(t *testing.T) {
 		}
 		t.Logf("state=%d eof-actions=%s", state, diagFormatActions(ng, acts))
 		for _, ce := range ctx.itemSets[state].cores {
-			prod := &ng.Productions[ce.prodIdx]
+			prod := &ng.Productions[int(ce.prodIdx)]
 			if diagProductionMentionsNames(ng, prod, wrapperNames) || containsSym(prod.RHS, pairSym) || prod.LHS == pairSym {
 				la := ""
 				if ce.lookaheads.contains(0) {
 					la = " LA($)"
 				}
-				t.Logf("  item%s %s", la, diagFormatProd(ng, ce.prodIdx, ce.dot))
+				t.Logf("  item%s %s", la, diagFormatProd(ng, int(ce.prodIdx), int(ce.dot)))
 			}
 		}
 	}
