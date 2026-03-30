@@ -73,16 +73,18 @@ func (ctx *lrContext) buildLR0() {
 	tokenCount := ctx.tokenCount
 	debugLALR := os.Getenv("GOT_DEBUG_LALR") == "1"
 	ctx.ensureLR0SymbolSeenCapacity(len(ng.Symbols))
+	ctx.ensureLR0SymbolBucketCapacity(len(ng.Symbols))
 	contextTagsEnabled := os.Getenv("GOT_LR_DISABLE_CONTEXT_TAGS") != "1" && len(ng.Productions) >= 2000
 	if contextTagsEnabled {
 		ctx.ensureRepeatWrapperLHS()
+		ctx.ensureLR0RepeatSourceCapacity(len(ng.Symbols))
 	}
 
 	// Hash map for state dedup: coreHash → chain of state indices.
 	coreMap := make(map[uint64]*stateHashEntry)
 
 	// Build initial state: closure of [S' → .S]
-	initialSet := ctx.lr0Closure([]coreItem{{prodIdx: ng.AugmentProdID, dot: 0}})
+	initialSet := ctx.retainLR0ItemSet(ctx.lr0Closure([]coreItem{{prodIdx: ng.AugmentProdID, dot: 0}}))
 	ctx.lalrLR0ItemSets = []lr0ItemSet{initialSet}
 	addToHashMap(coreMap, initialSet.coreHash, 0)
 	ctx.recordFreshState(0)
@@ -123,9 +125,12 @@ func (ctx *lrContext) buildLR0() {
 		symbolSeenEpoch := ctx.nextLR0SymbolSeenEpoch()
 		repeatRecursiveEpoch := uint32(0)
 		if contextTagsEnabled {
-			repeatRecursiveEpoch = ctx.nextLR0SymbolSeenEpoch()
+			repeatRecursiveEpoch = ctx.nextLR0RepeatSourceEpoch()
 		}
 		syms := ctx.gotoSymbolsScratch[:0]
+		bucketCounts := ctx.lr0SymbolBucketCount
+		bucketOffsets := ctx.lr0SymbolBucketOffset
+		targetRepeatWrapperLHSBySym := ctx.lr0TargetRepeatWrapper
 		sourceTemplateCarrier := false
 		sourceConditionalTypeEntry := false
 		for _, ce := range itemSet.cores {
@@ -134,9 +139,28 @@ func (ctx *lrContext) buildLR0() {
 			prod := &ng.Productions[prodIdx]
 			if dot < len(prod.RHS) {
 				sym := prod.RHS[dot]
+				bucketIdx := 0
 				if ctx.lr0SymbolSeenGen[sym] != symbolSeenEpoch {
 					ctx.lr0SymbolSeenGen[sym] = symbolSeenEpoch
+					bucketIdx = len(syms)
+					ctx.lr0SymbolBucketIdx[sym] = bucketIdx
 					syms = append(syms, sym)
+					bucketCounts[bucketIdx] = 1
+					targetRepeatWrapperLHSBySym[bucketIdx] = -1
+				} else {
+					bucketIdx = ctx.lr0SymbolBucketIdx[sym]
+					bucketCounts[bucketIdx]++
+				}
+				nextDot := dot + 1
+				if contextTagsEnabled &&
+					targetRepeatWrapperLHSBySym[bucketIdx] < 0 &&
+					sym >= tokenCount &&
+					nextDot == len(prod.RHS) &&
+					len(prod.RHS) == 1 &&
+					prod.LHS >= 0 &&
+					prod.LHS < len(ctx.repeatWrapperLHS) &&
+					ctx.repeatWrapperLHS[prod.LHS] {
+					targetRepeatWrapperLHSBySym[bucketIdx] = prod.LHS
 				}
 			}
 			if !contextTagsEnabled {
@@ -166,41 +190,47 @@ func (ctx *lrContext) buildLR0() {
 			}
 			for _, rhsSym := range prod.RHS {
 				if rhsSym == lhs {
-					ctx.lr0SymbolSeenGen[lhs] = repeatRecursiveEpoch
+					ctx.lr0RepeatSourceGen[lhs] = repeatRecursiveEpoch
 					break
 				}
 			}
 		}
 
-		for _, sym := range syms {
-			// Compute GOTO(state, sym): advance dot past sym, then close.
-			kernel := ctx.lr0KernelScratch[:0]
-			targetRepeatWrapperLHS := -1
+		totalKernelItems := 0
+		for idx := range syms {
+			bucketOffsets[idx] = totalKernelItems
+			totalKernelItems += bucketCounts[idx]
+			bucketCounts[idx] = bucketOffsets[idx]
+		}
+		if totalKernelItems > cap(ctx.lr0KernelScratch) {
+			ctx.lr0KernelScratch = make([]coreItem, totalKernelItems)
+		}
+		kernelScratch := ctx.lr0KernelScratch[:totalKernelItems]
+		if totalKernelItems > 0 {
 			for _, ce := range itemSet.cores {
 				prodIdx := int(ce.prodIdx())
 				dot := int(ce.dot())
 				prod := &ng.Productions[prodIdx]
-				if dot < len(prod.RHS) && prod.RHS[dot] == sym {
-					nextDot := dot + 1
-					kernel = append(kernel, coreItem{prodIdx: prodIdx, dot: nextDot})
-					if contextTagsEnabled &&
-						targetRepeatWrapperLHS < 0 &&
-						sym >= tokenCount &&
-						nextDot == len(prod.RHS) &&
-						len(prod.RHS) == 1 &&
-						prod.LHS >= 0 &&
-						prod.LHS < len(ctx.repeatWrapperLHS) &&
-						ctx.repeatWrapperLHS[prod.LHS] {
-						targetRepeatWrapperLHS = prod.LHS
-					}
+				if dot >= len(prod.RHS) {
+					continue
 				}
+				sym := prod.RHS[dot]
+				bucketIdx := ctx.lr0SymbolBucketIdx[sym]
+				writePos := bucketCounts[bucketIdx]
+				kernelScratch[writePos] = coreItem{prodIdx: prodIdx, dot: dot + 1}
+				bucketCounts[bucketIdx] = writePos + 1
 			}
+		}
+
+		for idx, sym := range syms {
+			// Compute GOTO(state, sym): advance dot past sym, then close.
+			kernel := kernelScratch[bucketOffsets[idx]:bucketCounts[idx]]
+			targetRepeatWrapperLHS := targetRepeatWrapperLHSBySym[idx]
 			if len(kernel) == 0 {
 				continue
 			}
 
 			closedSet := ctx.lr0Closure(kernel)
-			ctx.lr0KernelScratch = kernel[:0]
 			if contextTagsEnabled {
 				targetTemplateCarrier := false
 				targetConditionalCarrier := false
@@ -244,7 +274,7 @@ func (ctx *lrContext) buildLR0() {
 						closedSet.annotationArgTag = srcTemplateTag
 					}
 				}
-				if targetRepeatWrapperLHS >= 0 && ctx.lr0SymbolSeenGen[targetRepeatWrapperLHS] == repeatRecursiveEpoch {
+				if targetRepeatWrapperLHS >= 0 && ctx.lr0RepeatSourceGen[targetRepeatWrapperLHS] == repeatRecursiveEpoch {
 					closedSet.annotationArgTag |= 1 << 24
 				}
 				if targetConditionalCarrier &&
@@ -268,6 +298,7 @@ func (ctx *lrContext) buildLR0() {
 				}
 			}
 			if targetIdx < 0 {
+				closedSet = ctx.retainLR0ItemSet(closedSet)
 				targetIdx = len(ctx.lalrLR0ItemSets)
 				ctx.lalrLR0ItemSets = append(ctx.lalrLR0ItemSets, closedSet)
 				totalCoreEntries += len(closedSet.cores)
@@ -292,6 +323,8 @@ func (ctx *lrContext) buildLR0() {
 					}
 					return
 				}
+			} else {
+				ctx.lr0ClosureScratch = closedSet.cores[:0]
 			}
 
 			// Record transition.
@@ -318,7 +351,10 @@ func (ctx *lrContext) lr0Closure(kernel []coreItem) lr0ItemSet {
 	}
 	ctx.dot0Dirty = ctx.dot0Dirty[:0]
 
-	cores := make([]lr0CoreEntry, 0, len(kernel)*2)
+	cores := ctx.lr0ClosureScratch[:0]
+	if cap(cores) < len(kernel)*2 {
+		cores = make([]lr0CoreEntry, 0, len(kernel)*2)
+	}
 
 	// Add kernel items.
 	for _, ki := range kernel {
@@ -366,15 +402,6 @@ func (ctx *lrContext) lr0Closure(kernel []coreItem) lr0ItemSet {
 			return cores[i].dot() < cores[j].dot()
 		})
 	}
-	// LR0 states are retained until lookahead computation finishes. For large
-	// grammars, append growth leaves substantial spare capacity on these slices,
-	// so copy them down to exact size before storing them on the context.
-	if cap(cores) != len(cores) {
-		tight := make([]lr0CoreEntry, len(cores))
-		copy(tight, cores)
-		cores = tight
-	}
-
 	set := lr0ItemSet{
 		cores: cores,
 	}
@@ -385,6 +412,18 @@ func (ctx *lrContext) lr0Closure(kernel []coreItem) lr0ItemSet {
 	}
 	set.coreHash = ch
 
+	return set
+}
+
+func (ctx *lrContext) retainLR0ItemSet(set lr0ItemSet) lr0ItemSet {
+	if len(set.cores) == 0 {
+		ctx.lr0ClosureScratch = set.cores[:0]
+		return set
+	}
+	tight := make([]lr0CoreEntry, len(set.cores))
+	copy(tight, set.cores)
+	ctx.lr0ClosureScratch = set.cores[:0]
+	set.cores = tight
 	return set
 }
 

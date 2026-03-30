@@ -843,11 +843,18 @@ type lrContext struct {
 
 	// GOTO scratch reuses transient symbol and advanced-kernel slices while
 	// building successor states.
-	gotoSymbolsScratch  []int
-	gotoAdvancedScratch []coreEntry
-	lr0KernelScratch    []coreItem
-	lr0SymbolSeenGen    []uint32
-	lr0SymbolSeenEpoch  uint32
+	gotoSymbolsScratch     []int
+	gotoAdvancedScratch    []coreEntry
+	lr0KernelScratch       []coreItem
+	lr0ClosureScratch      []lr0CoreEntry
+	lr0SymbolBucketIdx     []int
+	lr0SymbolBucketCount   []int
+	lr0SymbolBucketOffset  []int
+	lr0TargetRepeatWrapper []int
+	lr0SymbolSeenGen       []uint32
+	lr0SymbolSeenEpoch     uint32
+	lr0RepeatSourceGen     []uint32
+	lr0RepeatSourceEpoch   uint32
 
 	// Lookahead bitset scratch reuses word buffers for temporary closed sets that
 	// are discarded after exact-match or merge lookups.
@@ -982,8 +989,15 @@ func (ctx *lrContext) releaseScratch() {
 	ctx.gotoSymbolsScratch = nil
 	ctx.gotoAdvancedScratch = nil
 	ctx.lr0KernelScratch = nil
+	ctx.lr0ClosureScratch = nil
+	ctx.lr0SymbolBucketIdx = nil
+	ctx.lr0SymbolBucketCount = nil
+	ctx.lr0SymbolBucketOffset = nil
+	ctx.lr0TargetRepeatWrapper = nil
 	ctx.lr0SymbolSeenGen = nil
 	ctx.lr0SymbolSeenEpoch = 0
+	ctx.lr0RepeatSourceGen = nil
+	ctx.lr0RepeatSourceEpoch = 0
 	ctx.lookaheadWordPool = nil
 	ctx.repeatWrapperStateSymCache = nil
 	ctx.lalrNTTransitions = nil
@@ -1005,6 +1019,39 @@ func (ctx *lrContext) ensureLR0SymbolSeenCapacity(size int) {
 		return
 	}
 	ctx.lr0SymbolSeenGen = append(ctx.lr0SymbolSeenGen, make([]uint32, size-len(ctx.lr0SymbolSeenGen))...)
+}
+
+func (ctx *lrContext) ensureLR0SymbolBucketCapacity(size int) {
+	if size > len(ctx.lr0SymbolBucketIdx) {
+		ctx.lr0SymbolBucketIdx = append(ctx.lr0SymbolBucketIdx, make([]int, size-len(ctx.lr0SymbolBucketIdx))...)
+	}
+	if size > len(ctx.lr0SymbolBucketCount) {
+		ctx.lr0SymbolBucketCount = append(ctx.lr0SymbolBucketCount, make([]int, size-len(ctx.lr0SymbolBucketCount))...)
+	}
+	if size > len(ctx.lr0SymbolBucketOffset) {
+		ctx.lr0SymbolBucketOffset = append(ctx.lr0SymbolBucketOffset, make([]int, size-len(ctx.lr0SymbolBucketOffset))...)
+	}
+	if size > len(ctx.lr0TargetRepeatWrapper) {
+		ctx.lr0TargetRepeatWrapper = append(ctx.lr0TargetRepeatWrapper, make([]int, size-len(ctx.lr0TargetRepeatWrapper))...)
+	}
+}
+
+func (ctx *lrContext) nextLR0RepeatSourceEpoch() uint32 {
+	ctx.lr0RepeatSourceEpoch++
+	if ctx.lr0RepeatSourceEpoch == 0 {
+		for i := range ctx.lr0RepeatSourceGen {
+			ctx.lr0RepeatSourceGen[i] = 0
+		}
+		ctx.lr0RepeatSourceEpoch = 1
+	}
+	return ctx.lr0RepeatSourceEpoch
+}
+
+func (ctx *lrContext) ensureLR0RepeatSourceCapacity(size int) {
+	if size <= len(ctx.lr0RepeatSourceGen) {
+		return
+	}
+	ctx.lr0RepeatSourceGen = append(ctx.lr0RepeatSourceGen, make([]uint32, size-len(ctx.lr0RepeatSourceGen))...)
 }
 
 func (ctx *lrContext) ensureTransitionState(state int) {
