@@ -295,6 +295,50 @@ func TestText(t *testing.T) {
 	}
 }
 
+func TestTextReturnsEmptyForNilNode(t *testing.T) {
+	var n *Node
+	if got := n.Text([]byte("hello")); got != "" {
+		t.Fatalf("Text(nil node) = %q, want empty", got)
+	}
+}
+
+func TestTextReturnsEmptyForOutOfBoundsRange(t *testing.T) {
+	tests := []struct {
+		name   string
+		node   *Node
+		source []byte
+	}{
+		{
+			name:   "end beyond source",
+			node:   NewLeafNode(Symbol(1), true, 2, 8, Point{}, Point{}),
+			source: []byte("hello"),
+		},
+		{
+			name:   "start beyond source",
+			node:   NewLeafNode(Symbol(1), true, 8, 8, Point{}, Point{}),
+			source: []byte("hello"),
+		},
+		{
+			name:   "end before start",
+			node:   NewLeafNode(Symbol(1), true, 4, 2, Point{}, Point{}),
+			source: []byte("hello"),
+		},
+		{
+			name:   "nil source with non-empty range",
+			node:   NewLeafNode(Symbol(1), true, 0, 1, Point{}, Point{}),
+			source: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.node.Text(tc.source); got != "" {
+				t.Fatalf("Text() = %q, want empty", got)
+			}
+		})
+	}
+}
+
 func TestTreeReleaseClearsRoot(t *testing.T) {
 	root := NewLeafNode(Symbol(1), true, 0, 1, Point{}, Point{Row: 0, Column: 1})
 	tree := NewTree(root, []byte("x"), testLanguage())

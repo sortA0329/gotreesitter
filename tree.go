@@ -361,8 +361,17 @@ func (n *Node) SExpr(lang *Language) string {
 }
 
 // Text returns the source text covered by this node.
+// Returns an empty string for nil nodes or invalid byte ranges.
 func (n *Node) Text(source []byte) string {
-	return string(source[n.startByte:n.endByte])
+	if n == nil {
+		return ""
+	}
+	start := int(n.startByte)
+	end := int(n.endByte)
+	if end < start || start > len(source) || end > len(source) {
+		return ""
+	}
+	return string(source[start:end])
 }
 
 // Type returns the node's type name from the language.
