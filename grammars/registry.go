@@ -41,6 +41,10 @@ type LangEntry struct {
 var registry []LangEntry
 var highlightInheritanceResolved bool
 
+// extIndex caches a suffix→LangEntry map for O(1) extension lookups in DetectLanguage.
+// Invalidated (set to nil) whenever Register is called.
+var extIndex map[string]*LangEntry
+
 var (
 	builtinRegistryOnce sync.Once
 	builtinRegistryBusy atomic.Bool
@@ -75,11 +79,13 @@ func Register(entry LangEntry) {
 		if registry[i].Name == entry.Name {
 			registry[i] = entry
 			highlightInheritanceResolved = false
+			extIndex = nil
 			return
 		}
 	}
 	registry = append(registry, entry)
 	highlightInheritanceResolved = false
+	extIndex = nil
 }
 
 // RegisterExtension registers a grammargen-based grammar extension with the
@@ -168,6 +174,21 @@ func resolveHighlightInheritance() {
 	}
 }
 
+// buildExtIndex builds a suffix→LangEntry map from the current registry.
+// Must be called while holding no locks; invalidated by Register.
+func buildExtIndex() {
+	idx := make(map[string]*LangEntry, len(registry)*2)
+	for i := range registry {
+		for _, ext := range registry[i].Extensions {
+			// First registration wins; mirrors the O(n²) loop behaviour.
+			if _, exists := idx[ext]; !exists {
+				idx[ext] = &registry[i]
+			}
+		}
+	}
+	extIndex = idx
+}
+
 // DetectLanguage returns the LangEntry for a filename, or nil if unknown.
 // Checks in order: exact filename match (linguist), registry extensions,
 // then linguist extended extensions. Exact filenames take priority over
@@ -175,6 +196,9 @@ func resolveHighlightInheritance() {
 // matching the generic ".conf" extension.
 func DetectLanguage(filename string) *LangEntry {
 	resolveHighlightInheritance()
+	if extIndex == nil {
+		buildExtIndex()
+	}
 	// 1. Exact filename match (e.g., "Makefile", "Dockerfile", ".bashrc",
 	//    "nginx.conf"). Most specific, so checked first.
 	base := path.Base(filename)
@@ -182,12 +206,21 @@ func DetectLanguage(filename string) *LangEntry {
 		return lookupByName(grammarName)
 	}
 
-	// 2. Match by registry extensions (from languages.manifest).
-	for i := range registry {
-		for _, ext := range registry[i].Extensions {
-			if strings.HasSuffix(filename, ext) {
-				return &registry[i]
-			}
+	// 2. Match by registry extensions — O(1) map lookup.
+	// Collect up to 4 dot-suffixes from longest to shortest using a stack
+	// array to avoid heap allocation (e.g. ".blade.php" before ".php").
+	var suffixes [4]string
+	nsuf := 0
+	for i := len(base) - 1; i > 0 && nsuf < len(suffixes); i-- {
+		if base[i] == '.' {
+			suffixes[nsuf] = base[i:]
+			nsuf++
+		}
+	}
+	// suffixes[0] is shortest; check longest (highest index) first.
+	for i := nsuf - 1; i >= 0; i-- {
+		if entry, ok := extIndex[suffixes[i]]; ok {
+			return entry
 		}
 	}
 
