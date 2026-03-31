@@ -232,23 +232,29 @@ func (ip *InjectionParser) findAndParseInjections(source []byte, parentLang stri
 		// bytes via ParseIncremental(rangeBytes, nil). This lets the parser use
 		// an incremental-class arena (16 KB slab vs 2 MB for full parse), which
 		// is orders of magnitude cheaper when there are many small injections.
-		// Multi-range injections fall back to the full-source path with
-		// SetIncludedRanges because the lexer needs non-contiguous byte ranges.
+		// Rebase the resulting tree back into document coordinates before
+		// exposing it so callers still see the same byte/point space as the
+		// included-range path. Multi-range injections fall back to the
+		// full-source path with SetIncludedRanges because the lexer needs
+		// non-contiguous byte ranges.
 		var childTree *Tree
-		var childSource []byte
 		if len(det.Ranges) == 1 {
 			r := det.Ranges[0]
 			if r.StartByte <= r.EndByte && int(r.EndByte) <= len(source) {
-				childSource = source[r.StartByte:r.EndByte]
-				childTree, err = childParser.ParseIncremental(childSource, nil)
+				rangeSource := source[r.StartByte:r.EndByte]
+				childTree, err = childParser.ParseIncremental(rangeSource, nil)
+				if err == nil && childTree != nil && !childTree.ParseStoppedEarly() {
+					rebaseInjectionTree(childTree, source, r)
+				} else {
+					childParser.SetIncludedRanges(det.Ranges)
+					childTree, err = childParser.Parse(source)
+				}
 			} else {
 				childParser.SetIncludedRanges(det.Ranges)
-				childSource = source
 				childTree, err = childParser.Parse(source)
 			}
 		} else {
 			childParser.SetIncludedRanges(det.Ranges)
-			childSource = source
 			childTree, err = childParser.Parse(source)
 		}
 		if err != nil {
@@ -259,7 +265,7 @@ func (ip *InjectionParser) findAndParseInjections(source []byte, parentLang stri
 
 		// Recurse: check if this child language has injection queries too.
 		if _, hasQuery := ip.injectionQueries[det.Language]; hasQuery {
-			nested, err := ip.findAndParseInjections(childSource, det.Language, childTree, depth+1)
+			nested, err := ip.findAndParseInjections(source, det.Language, childTree, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -367,6 +373,61 @@ func (ip *InjectionParser) findOldInjection(oldResult *InjectionResult, lang str
 		}
 	}
 	return nil
+}
+
+func rebaseInjectionTree(tree *Tree, source []byte, span Range) {
+	if tree == nil {
+		return
+	}
+	if tree.root != nil {
+		if !shiftNodeBytes(tree.root, int64(span.StartByte)) {
+			tree.root = tree.RootNodeWithOffset(span.StartByte, span.StartPoint)
+		} else {
+			shiftNodePoints(tree.root, span.StartPoint)
+		}
+	}
+	tree.source = source
+
+	rt := tree.ParseRuntime()
+	rt.SourceLen = uint32(len(source))
+	rt.ExpectedEOFByte = addUint32Delta(rt.ExpectedEOFByte, int64(span.StartByte))
+	if rt.LastTokenEndByte != 0 {
+		rt.LastTokenEndByte = addUint32Delta(rt.LastTokenEndByte, int64(span.StartByte))
+	}
+	if tree.root != nil {
+		rt.RootEndByte = tree.root.EndByte()
+	} else {
+		rt.RootEndByte = span.StartByte
+	}
+	rt.Truncated = rt.RootEndByte < rt.ExpectedEOFByte
+	tree.setParseRuntime(rt)
+}
+
+func shiftNodePoints(root *Node, offset Point) {
+	if root == nil || offset == (Point{}) {
+		return
+	}
+	baseRow := root.startPoint.Row
+	stack := []*Node{root}
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		n := stack[last]
+		stack = stack[:last]
+
+		startRow := n.startPoint.Row
+		n.startPoint.Row = addUint32Delta(n.startPoint.Row, int64(offset.Row))
+		if offset.Row == 0 || startRow == baseRow {
+			n.startPoint.Column = addUint32Delta(n.startPoint.Column, int64(offset.Column))
+		}
+
+		endRow := n.endPoint.Row
+		n.endPoint.Row = addUint32Delta(n.endPoint.Row, int64(offset.Row))
+		if offset.Row == 0 || endRow == baseRow {
+			n.endPoint.Column = addUint32Delta(n.endPoint.Column, int64(offset.Column))
+		}
+
+		stack = append(stack, n.children...)
+	}
 }
 
 // getParser returns a cached Parser for the language, creating one if needed.

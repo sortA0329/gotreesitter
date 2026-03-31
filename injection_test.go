@@ -161,6 +161,54 @@ func TestInjectionParserBasic(t *testing.T) {
 	}
 }
 
+func TestInjectionParserChildTreeCoordinatesStayDocumentRelative(t *testing.T) {
+	parentLang := buildContainerLanguage()
+	childLang := buildArithmeticLanguage()
+
+	ip := NewInjectionParser()
+	ip.RegisterLanguage("container", parentLang)
+	ip.RegisterLanguage("arithmetic", childLang)
+
+	err := ip.RegisterInjectionQuery("container",
+		`(content) @injection.content (#set! injection.language "arithmetic")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	source := []byte("\n[1+2]")
+	result, err := ip.Parse(source, "container")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Injections) != 1 {
+		t.Fatalf("expected 1 injection, got %d", len(result.Injections))
+	}
+
+	inj := result.Injections[0]
+	if inj.Tree == nil {
+		t.Fatal("injection tree is nil")
+	}
+	if len(inj.Ranges) != 1 {
+		t.Fatalf("expected 1 range, got %d", len(inj.Ranges))
+	}
+
+	root := inj.Tree.RootNode()
+	if root == nil {
+		t.Fatal("child root is nil")
+	}
+	if root.StartByte() != inj.Ranges[0].StartByte || root.EndByte() != inj.Ranges[0].EndByte {
+		t.Fatalf("child root bytes = [%d,%d), want [%d,%d)",
+			root.StartByte(), root.EndByte(), inj.Ranges[0].StartByte, inj.Ranges[0].EndByte)
+	}
+	if root.StartPoint() != inj.Ranges[0].StartPoint || root.EndPoint() != inj.Ranges[0].EndPoint {
+		t.Fatalf("child root points = [%v,%v), want [%v,%v)",
+			root.StartPoint(), root.EndPoint(), inj.Ranges[0].StartPoint, inj.Ranges[0].EndPoint)
+	}
+	if got := root.Text(source); got != "1+2" {
+		t.Fatalf("child root text from document source = %q, want %q", got, "1+2")
+	}
+}
+
 func TestInjectionParserUnregisteredChild(t *testing.T) {
 	parentLang := buildContainerLanguage()
 
