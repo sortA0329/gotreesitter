@@ -706,6 +706,116 @@ func TestWalkAndParse_ReadError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// SkipTreeParse hook
+// ---------------------------------------------------------------------------
+
+func TestWalkAndParse_SkipTreeParse(t *testing.T) {
+	dir := t.TempDir()
+
+	// Normal file — should get full parse (Tree non-nil).
+	writeFile(t, filepath.Join(dir, "normal.go"), "package main\n\nfunc main() {}\n")
+
+	// "Generated" file — should be read-only (Tree nil, Source non-nil).
+	writeFile(t, filepath.Join(dir, "service.pb.go"), "package main\n\ntype Service struct{}\n")
+
+	policy := DefaultPolicy()
+	policy.MaxConcurrent = 1
+	policy.ChannelBuffer = 2
+	policy.SkipTreeParse = func(path string, size int64) bool {
+		return strings.HasSuffix(path, ".pb.go")
+	}
+
+	ch, statsFn := WalkAndParse(context.Background(), dir, policy)
+
+	var normalPF, genPF *ParsedFile
+	for pf := range ch {
+		pfCopy := pf
+		if strings.HasSuffix(pf.Path, "normal.go") {
+			normalPF = &pfCopy
+		} else if strings.HasSuffix(pf.Path, "service.pb.go") {
+			genPF = &pfCopy
+		}
+	}
+
+	if normalPF == nil {
+		t.Fatal("normal.go not found in results")
+	}
+	if normalPF.Tree == nil {
+		t.Error("normal.go: expected Tree to be non-nil (full parse)")
+	}
+	if normalPF.Err != nil {
+		t.Errorf("normal.go: unexpected error: %v", normalPF.Err)
+	}
+	normalPF.Close()
+
+	if genPF == nil {
+		t.Fatal("service.pb.go not found in results")
+	}
+	if genPF.Tree != nil {
+		t.Error("service.pb.go: expected Tree to be nil (skip tree parse)")
+	}
+	if genPF.Source == nil {
+		t.Error("service.pb.go: expected Source to be non-nil (read-only)")
+	}
+	if genPF.Err != nil {
+		t.Errorf("service.pb.go: unexpected error: %v", genPF.Err)
+	}
+	if !genPF.IsRead {
+		t.Error("service.pb.go: expected IsRead=true")
+	}
+	genPF.Close()
+
+	stats := statsFn()
+	if stats.FilesParsed != 2 {
+		t.Errorf("FilesParsed = %d, want 2 (both count as parsed)", stats.FilesParsed)
+	}
+}
+
+func TestWalkAndParse_SkipTreeParseLargeFile(t *testing.T) {
+	dir := t.TempDir()
+
+	// Large file that should skip tree parse.
+	padding := strings.Repeat("x", 200)
+	writeFile(t, filepath.Join(dir, "big.pb.go"),
+		"package main\n\nfunc big() { /* "+padding+" */ }\n")
+
+	policy := DefaultPolicy()
+	policy.LargeFileThreshold = 50 // big.pb.go exceeds this
+	policy.MaxConcurrent = 1
+	policy.ChannelBuffer = 2
+	policy.SkipTreeParse = func(path string, size int64) bool {
+		return strings.HasSuffix(path, ".pb.go")
+	}
+
+	ch, statsFn := WalkAndParse(context.Background(), dir, policy)
+
+	var result *ParsedFile
+	for pf := range ch {
+		pfCopy := pf
+		result = &pfCopy
+	}
+
+	if result == nil {
+		t.Fatal("no results")
+	}
+	if result.Tree != nil {
+		t.Error("expected Tree to be nil for large skipped file")
+	}
+	if result.Source == nil {
+		t.Error("expected Source to be non-nil for large skipped file")
+	}
+	if result.Err != nil {
+		t.Errorf("unexpected error: %v", result.Err)
+	}
+	result.Close()
+
+	stats := statsFn()
+	if stats.LargeFiles != 1 {
+		t.Errorf("LargeFiles = %d, want 1", stats.LargeFiles)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // helper
 // ---------------------------------------------------------------------------
 

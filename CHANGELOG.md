@@ -9,6 +9,18 @@ for tags and release notes while still in `0.x`.
 
 - Nothing yet.
 
+## [0.13.0] - 2026-03-31
+
+### Added
+- `SkipTreeParse` hook on `ParsePolicy` — allows consumers to read file source bytes without paying for a full tree-sitter AST parse. When the hook returns true, the gateway populates `Source` but leaves `Tree` nil. Enables fast regex-based symbol extraction for large generated files (protobuf stubs, codegen output) that would otherwise stall the parser for minutes.
+
+### Changed
+- LR0/LALR construction uses packed 4-byte core entries, bucketed kernel maps, and inlined context-tag computation to reduce GC pressure and allocations during grammar generation.
+- Performance pass: reduced allocations across injection arenas, query execution, tagger, and sexp serialization.
+
+### Fixed
+- Injection fast-path now uses document-relative coordinates instead of node-relative.
+
 ## [0.12.2] - 2026-03-30
 
 ### Added

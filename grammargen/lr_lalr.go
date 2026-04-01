@@ -65,7 +65,7 @@ func (ctx *lrContext) buildItemSetsLALR() []lrItemSet {
 // This is much faster than the full LR(1) construction because there's no lookahead
 // propagation, merging, or worklist re-processing.
 func (ctx *lrContext) buildLR0() {
-	ctx.transitions = make(map[int]map[int]int)
+	ctx.transitions = nil
 	ctx.itemSets = nil
 	ctx.lalrLR0ItemSets = nil
 	ctx.ensureProvenance()
@@ -73,12 +73,18 @@ func (ctx *lrContext) buildLR0() {
 	tokenCount := ctx.tokenCount
 	debugLALR := os.Getenv("GOT_DEBUG_LALR") == "1"
 	ctx.ensureLR0SymbolSeenCapacity(len(ng.Symbols))
+	ctx.ensureLR0SymbolBucketCapacity(len(ng.Symbols))
+	contextTagsEnabled := os.Getenv("GOT_LR_DISABLE_CONTEXT_TAGS") != "1" && len(ng.Productions) >= 2000
+	if contextTagsEnabled {
+		ctx.ensureRepeatWrapperLHS()
+		ctx.ensureLR0RepeatSourceCapacity(len(ng.Symbols))
+	}
 
 	// Hash map for state dedup: coreHash → chain of state indices.
 	coreMap := make(map[uint64]*stateHashEntry)
 
 	// Build initial state: closure of [S' → .S]
-	initialSet := ctx.lr0Closure([]coreItem{{prodIdx: ng.AugmentProdID, dot: 0}})
+	initialSet := ctx.retainLR0ItemSet(ctx.lr0Closure([]coreItem{{prodIdx: ng.AugmentProdID, dot: 0}}))
 	ctx.lalrLR0ItemSets = []lr0ItemSet{initialSet}
 	addToHashMap(coreMap, initialSet.coreHash, 0)
 	ctx.recordFreshState(0)
@@ -117,40 +123,166 @@ func (ctx *lrContext) buildLR0() {
 
 		// Collect all symbols after the dot.
 		symbolSeenEpoch := ctx.nextLR0SymbolSeenEpoch()
+		repeatRecursiveEpoch := uint32(0)
+		if contextTagsEnabled {
+			repeatRecursiveEpoch = ctx.nextLR0RepeatSourceEpoch()
+		}
 		syms := ctx.gotoSymbolsScratch[:0]
+		bucketCounts := ctx.lr0SymbolBucketCount
+		bucketOffsets := ctx.lr0SymbolBucketOffset
+		targetRepeatWrapperLHSBySym := ctx.lr0TargetRepeatWrapper
+		sourceTemplateCarrier := false
+		sourceConditionalTypeEntry := false
 		for _, ce := range itemSet.cores {
 			prodIdx := int(ce.prodIdx())
 			dot := int(ce.dot())
 			prod := &ng.Productions[prodIdx]
 			if dot < len(prod.RHS) {
 				sym := prod.RHS[dot]
+				bucketIdx := 0
 				if ctx.lr0SymbolSeenGen[sym] != symbolSeenEpoch {
 					ctx.lr0SymbolSeenGen[sym] = symbolSeenEpoch
+					bucketIdx = len(syms)
+					ctx.lr0SymbolBucketIdx[sym] = bucketIdx
 					syms = append(syms, sym)
+					bucketCounts[bucketIdx] = 1
+					targetRepeatWrapperLHSBySym[bucketIdx] = -1
+				} else {
+					bucketIdx = ctx.lr0SymbolBucketIdx[sym]
+					bucketCounts[bucketIdx]++
+				}
+				nextDot := dot + 1
+				if contextTagsEnabled &&
+					targetRepeatWrapperLHSBySym[bucketIdx] < 0 &&
+					sym >= tokenCount &&
+					nextDot == len(prod.RHS) &&
+					len(prod.RHS) == 1 &&
+					prod.LHS >= 0 &&
+					prod.LHS < len(ctx.repeatWrapperLHS) &&
+					ctx.repeatWrapperLHS[prod.LHS] {
+					targetRepeatWrapperLHSBySym[bucketIdx] = prod.LHS
+				}
+			}
+			if !contextTagsEnabled {
+				continue
+			}
+			lhs := prod.LHS
+			if !sourceTemplateCarrier {
+				switch lhs {
+				case ctx.bracedTemplateBodySym, ctx.bracedTemplateBody1Sym, ctx.bracedTemplateBody2Sym:
+					sourceTemplateCarrier = true
+				default:
+					if lhs >= 0 && lhs < len(ctx.templateDefinitionCarrierLHS) && ctx.templateDefinitionCarrierLHS[lhs] {
+						sourceTemplateCarrier = true
+					}
+				}
+			}
+			if !sourceConditionalTypeEntry &&
+				lhs == ctx.conditionalTypeSym &&
+				len(prod.RHS) >= 4 &&
+				prod.RHS[1] == ctx.conditionalTypeExtendsSym &&
+				prod.RHS[3] == ctx.conditionalTypePlainQmarkSym &&
+				dot == 1 {
+				sourceConditionalTypeEntry = true
+			}
+			if lhs < 0 || lhs >= len(ctx.repeatWrapperLHS) || !ctx.repeatWrapperLHS[lhs] || dot != len(prod.RHS) {
+				continue
+			}
+			for _, rhsSym := range prod.RHS {
+				if rhsSym == lhs {
+					ctx.lr0RepeatSourceGen[lhs] = repeatRecursiveEpoch
+					break
 				}
 			}
 		}
 
-		for _, sym := range syms {
-			// Compute GOTO(state, sym): advance dot past sym, then close.
-			kernel := ctx.lr0KernelScratch[:0]
+		totalKernelItems := 0
+		for idx := range syms {
+			bucketOffsets[idx] = totalKernelItems
+			totalKernelItems += bucketCounts[idx]
+			bucketCounts[idx] = bucketOffsets[idx]
+		}
+		if totalKernelItems > cap(ctx.lr0KernelScratch) {
+			ctx.lr0KernelScratch = make([]coreItem, totalKernelItems)
+		}
+		kernelScratch := ctx.lr0KernelScratch[:totalKernelItems]
+		if totalKernelItems > 0 {
 			for _, ce := range itemSet.cores {
 				prodIdx := int(ce.prodIdx())
 				dot := int(ce.dot())
 				prod := &ng.Productions[prodIdx]
-				if dot < len(prod.RHS) && prod.RHS[dot] == sym {
-					kernel = append(kernel, coreItem{prodIdx: prodIdx, dot: dot + 1})
+				if dot >= len(prod.RHS) {
+					continue
 				}
+				sym := prod.RHS[dot]
+				bucketIdx := ctx.lr0SymbolBucketIdx[sym]
+				writePos := bucketCounts[bucketIdx]
+				kernelScratch[writePos] = coreItem{prodIdx: prodIdx, dot: dot + 1}
+				bucketCounts[bucketIdx] = writePos + 1
 			}
+		}
+
+		for idx, sym := range syms {
+			// Compute GOTO(state, sym): advance dot past sym, then close.
+			kernel := kernelScratch[bucketOffsets[idx]:bucketCounts[idx]]
+			targetRepeatWrapperLHS := targetRepeatWrapperLHSBySym[idx]
 			if len(kernel) == 0 {
 				continue
 			}
 
 			closedSet := ctx.lr0Closure(kernel)
-			ctx.lr0KernelScratch = kernel[:0]
-			closedSet.annotationArgTag = ctx.templateContextTagForLR0Transition(stateIdx, sym, &closedSet)
-			closedSet.annotationArgTag |= ctx.repeatWrapperSourceTagForLR0Transition(stateIdx, sym, &closedSet)
-			closedSet.annotationArgTag |= ctx.conditionalTypeContextTagForLR0Transition(stateIdx, sym, &closedSet)
+			if contextTagsEnabled {
+				targetTemplateCarrier := false
+				targetConditionalCarrier := false
+				for _, ce := range closedSet.cores {
+					lhs := ng.Productions[int(ce.prodIdx())].LHS
+					if !targetTemplateCarrier {
+						switch lhs {
+						case ctx.bracedTemplateBodySym, ctx.bracedTemplateBody1Sym, ctx.bracedTemplateBody2Sym:
+							targetTemplateCarrier = true
+						default:
+							if lhs >= 0 && lhs < len(ctx.templateDefinitionCarrierLHS) && ctx.templateDefinitionCarrierLHS[lhs] {
+								targetTemplateCarrier = true
+							}
+						}
+					}
+					if !targetConditionalCarrier &&
+						lhs >= 0 &&
+						lhs < len(ctx.conditionalTypeCarrierLHS) &&
+						ctx.conditionalTypeCarrierLHS[lhs] {
+						targetConditionalCarrier = true
+					}
+					if targetTemplateCarrier && targetConditionalCarrier {
+						break
+					}
+				}
+				srcTemplateTag := itemSet.annotationArgTag & templateContextTagMask
+				if srcTemplateTag != 0 && targetRepeatWrapperLHS >= 0 {
+					closedSet.annotationArgTag = srcTemplateTag
+				} else if sourceTemplateCarrier || targetTemplateCarrier {
+					if ctx.annotationAtSym >= 0 && sym == ctx.annotationAtSym && targetTemplateCarrier {
+						if srcTemplateTag != 0 && srcTemplateTag != templateContextPendingTag {
+							closedSet.annotationArgTag = srcTemplateTag
+						} else {
+							closedSet.annotationArgTag = templateContextPendingTag
+						}
+					} else if sym >= 0 && sym < len(ctx.definitionBoundaryTagBySym) {
+						if tag := ctx.definitionBoundaryTagBySym[sym]; tag != 0 && (sourceTemplateCarrier || srcTemplateTag != 0 || targetTemplateCarrier) {
+							closedSet.annotationArgTag = tag
+						}
+					} else if srcTemplateTag != 0 && targetTemplateCarrier {
+						closedSet.annotationArgTag = srcTemplateTag
+					}
+				}
+				if targetRepeatWrapperLHS >= 0 && ctx.lr0RepeatSourceGen[targetRepeatWrapperLHS] == repeatRecursiveEpoch {
+					closedSet.annotationArgTag |= 1 << 24
+				}
+				if targetConditionalCarrier &&
+					(itemSet.annotationArgTag&conditionalTypeContextTag != 0 ||
+						(sym == ctx.conditionalTypeExtendsSym && sym != ctx.conditionalTypePlainQmarkSym && sourceConditionalTypeEntry)) {
+					closedSet.annotationArgTag |= conditionalTypeContextTag
+				}
+			}
 
 			// Find existing state with same core, or create new.
 			targetIdx := -1
@@ -166,6 +298,7 @@ func (ctx *lrContext) buildLR0() {
 				}
 			}
 			if targetIdx < 0 {
+				closedSet = ctx.retainLR0ItemSet(closedSet)
 				targetIdx = len(ctx.lalrLR0ItemSets)
 				ctx.lalrLR0ItemSets = append(ctx.lalrLR0ItemSets, closedSet)
 				totalCoreEntries += len(closedSet.cores)
@@ -190,17 +323,17 @@ func (ctx *lrContext) buildLR0() {
 					}
 					return
 				}
+			} else {
+				ctx.lr0ClosureScratch = closedSet.cores[:0]
 			}
 
 			// Record transition.
-			if ctx.transitions[stateIdx] == nil {
-				ctx.transitions[stateIdx] = make(map[int]int, len(syms))
-			}
-			ctx.transitions[stateIdx][sym] = targetIdx
+			ctx.addTransition(stateIdx, sym, targetIdx)
 
 			// After appending to itemSets, re-read pointer in case of slice realloc.
 			itemSet = &ctx.lalrLR0ItemSets[stateIdx]
 		}
+		ctx.sortStateTransitions(stateIdx)
 		ctx.gotoSymbolsScratch = syms[:0]
 
 		_ = tokenCount // used implicitly via lr0Closure
@@ -218,7 +351,10 @@ func (ctx *lrContext) lr0Closure(kernel []coreItem) lr0ItemSet {
 	}
 	ctx.dot0Dirty = ctx.dot0Dirty[:0]
 
-	cores := make([]lr0CoreEntry, 0, len(kernel)*2)
+	cores := ctx.lr0ClosureScratch[:0]
+	if cap(cores) < len(kernel)*2 {
+		cores = make([]lr0CoreEntry, 0, len(kernel)*2)
+	}
 
 	// Add kernel items.
 	for _, ki := range kernel {
@@ -266,15 +402,6 @@ func (ctx *lrContext) lr0Closure(kernel []coreItem) lr0ItemSet {
 			return cores[i].dot() < cores[j].dot()
 		})
 	}
-	// LR0 states are retained until lookahead computation finishes. For large
-	// grammars, append growth leaves substantial spare capacity on these slices,
-	// so copy them down to exact size before storing them on the context.
-	if cap(cores) != len(cores) {
-		tight := make([]lr0CoreEntry, len(cores))
-		copy(tight, cores)
-		cores = tight
-	}
-
 	set := lr0ItemSet{
 		cores: cores,
 	}
@@ -285,6 +412,17 @@ func (ctx *lrContext) lr0Closure(kernel []coreItem) lr0ItemSet {
 	}
 	set.coreHash = ch
 
+	return set
+}
+
+func (ctx *lrContext) retainLR0ItemSet(set lr0ItemSet) lr0ItemSet {
+	if len(set.cores) == 0 {
+		ctx.lr0ClosureScratch = set.cores[:0]
+		return set
+	}
+	tight := ctx.retainLR0Cores(set.cores)
+	ctx.lr0ClosureScratch = set.cores[:0]
+	set.cores = tight
 	return set
 }
 
@@ -306,9 +444,10 @@ func (ctx *lrContext) computeLALRLookaheads() {
 	type stateSymPair struct{ state, sym, target int }
 	var ntPairs []stateSymPair
 	for state, trans := range ctx.transitions {
-		for sym, target := range trans {
+		for _, edge := range trans {
+			sym := int(edge.sym)
 			if sym >= tokenCount {
-				ntPairs = append(ntPairs, stateSymPair{state, sym, target})
+				ntPairs = append(ntPairs, stateSymPair{state, sym, int(edge.target)})
 			}
 		}
 	}
@@ -348,11 +487,10 @@ func (ctx *lrContext) computeLALRLookaheads() {
 	for i, nt := range ntTrans {
 		dr[i] = newBitset(tokenCount)
 		q := nt.target // target state
-		if trans, ok := ctx.transitions[q]; ok {
-			for sym := range trans {
-				if sym < tokenCount {
-					dr[i].add(sym)
-				}
+		for _, edge := range ctx.transitionRow(q) {
+			sym := int(edge.sym)
+			if sym < tokenCount {
+				dr[i].add(sym)
 			}
 		}
 	}
@@ -372,18 +510,17 @@ func (ctx *lrContext) computeLALRLookaheads() {
 	reads := make([][]uint32, numTrans)
 	for i, nt := range ntTrans {
 		q := nt.target
-		if trans, ok := ctx.transitions[q]; ok {
-			var nullableSyms []int
-			for sym := range trans {
-				if sym >= tokenCount && ctx.nullables[sym] {
-					nullableSyms = append(nullableSyms, sym)
-				}
+		var nullableSyms []int
+		for _, edge := range ctx.transitionRow(q) {
+			sym := int(edge.sym)
+			if sym >= tokenCount && ctx.nullables[sym] {
+				nullableSyms = append(nullableSyms, sym)
 			}
-			sort.Ints(nullableSyms)
-			for _, sym := range nullableSyms {
-				if j, ok := ntTransIndex[[2]int{q, sym}]; ok {
-					reads[i] = append(reads[i], uint32(j))
-				}
+		}
+		sort.Ints(nullableSyms)
+		for _, sym := range nullableSyms {
+			if j, ok := ntTransIndex[[2]int{q, sym}]; ok {
+				reads[i] = append(reads[i], uint32(j))
 			}
 		}
 	}
@@ -481,13 +618,8 @@ func (ctx *lrContext) computeLALRLookaheads() {
 					}
 					nextIncludeIdx++
 				}
-				if trans, ok := ctx.transitions[curState]; ok {
-					if next, ok := trans[sym]; ok {
-						curState = next
-					} else {
-						valid = false
-						break
-					}
+				if next, ok := ctx.transitionTarget(curState, sym); ok {
+					curState = next
 				} else {
 					valid = false
 					break
@@ -567,23 +699,21 @@ func (ctx *lrContext) computeLALRLookaheads() {
 	augProd := &ng.Productions[ng.AugmentProdID]
 	if len(augProd.RHS) > 0 {
 		// Find the state reached from state 0 via the start symbol.
-		if trans, ok := ctx.transitions[0]; ok {
-			if targetState, ok := trans[augProd.RHS[0]]; ok {
-				augSet := &ctx.lalrLR0ItemSets[targetState]
-				if idx, ok := augSet.coreLookup(ng.AugmentProdID, len(augProd.RHS)); ok {
-					laByCore := reduceLookaheads[targetState]
-					if laByCore == nil {
-						laByCore = make(map[int]bitset)
-						reduceLookaheads[targetState] = laByCore
-					}
-					if existing, ok := laByCore[idx]; ok {
-						existing.add(0)
-						laByCore[idx] = existing
-					} else {
-						la := ctx.allocLookaheadBitset()
-						la.add(0)
-						laByCore[idx] = la
-					}
+		if targetState, ok := ctx.transitionTarget(0, augProd.RHS[0]); ok {
+			augSet := &ctx.lalrLR0ItemSets[targetState]
+			if idx, ok := augSet.coreLookup(ng.AugmentProdID, len(augProd.RHS)); ok {
+				laByCore := reduceLookaheads[targetState]
+				if laByCore == nil {
+					laByCore = make(map[int]bitset)
+					reduceLookaheads[targetState] = laByCore
+				}
+				if existing, ok := laByCore[idx]; ok {
+					existing.add(0)
+					laByCore[idx] = existing
+				} else {
+					la := ctx.allocLookaheadBitset()
+					la.add(0)
+					laByCore[idx] = la
 				}
 			}
 		}
@@ -749,7 +879,7 @@ func countAdjacencyEdges(rel [][]uint32) int {
 	return total
 }
 
-func countTransitionEdges(transitions map[int]map[int]int) int {
+func countTransitionEdges(transitions []lrTransitionRow) int {
 	total := 0
 	for _, edges := range transitions {
 		total += len(edges)

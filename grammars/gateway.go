@@ -43,6 +43,14 @@ type ParsePolicy struct {
 	// language detection. Return false to skip the file.
 	ShouldParse func(path string, size int64, modTime time.Time) bool
 
+	// SkipTreeParse, if non-nil, is called for candidate files that pass
+	// ShouldParse. Return true to read the file (populating Source) but
+	// skip the tree-sitter parse (Tree will be nil, Err will be nil).
+	// This is useful for large generated files where the consumer wants
+	// the raw source bytes for lightweight extraction without paying for
+	// a full AST parse.
+	SkipTreeParse func(path string, size int64) bool
+
 	// OnProgress, if non-nil, receives progress events during the walk.
 	OnProgress func(ProgressEvent)
 }
@@ -301,6 +309,7 @@ func WalkAndParse(ctx context.Context, root string, policy ParsePolicy) (<-chan 
 				FileNum: num,
 			})
 
+			skipTree := policy.SkipTreeParse != nil && policy.SkipTreeParse(p, fileSize)
 			isLarge := fileSize >= policy.LargeFileThreshold
 
 			if isLarge {
@@ -324,7 +333,12 @@ func WalkAndParse(ctx context.Context, root string, policy ParsePolicy) (<-chan 
 				// Wait for in-flight workers to finish before parsing inline.
 				wg.Wait()
 
-				pf := parseOne(p, lang, fileSize)
+				var pf ParsedFile
+				if skipTree {
+					pf = readOnly(p, lang, fileSize)
+				} else {
+					pf = parseOne(p, lang, fileSize)
+				}
 				if pf.Err != nil {
 					mu.Lock()
 					stats.FilesFailed++
@@ -354,7 +368,7 @@ func WalkAndParse(ctx context.Context, root string, policy ParsePolicy) (<-chan 
 				sem <- struct{}{}
 				wg.Add(1)
 
-				go func(filePath string, entry *LangEntry, size int64, fileNum int) {
+				go func(filePath string, entry *LangEntry, size int64, fileNum int, readOnlyMode bool) {
 					defer wg.Done()
 
 					// Check for cancellation before doing work.
@@ -370,7 +384,12 @@ func WalkAndParse(ctx context.Context, root string, policy ParsePolicy) (<-chan 
 						FileNum: fileNum,
 					})
 
-					pf := parseOne(filePath, entry, size)
+					var pf ParsedFile
+					if readOnlyMode {
+						pf = readOnly(filePath, entry, size)
+					} else {
+						pf = parseOne(filePath, entry, size)
+					}
 					if pf.Err != nil {
 						mu.Lock()
 						stats.FilesFailed++
@@ -385,7 +404,7 @@ func WalkAndParse(ctx context.Context, root string, policy ParsePolicy) (<-chan 
 					// Send BEFORE releasing semaphore (critical for backpressure).
 					ch <- pf
 					<-sem
-				}(p, lang, fileSize, num)
+				}(p, lang, fileSize, num, skipTree)
 			}
 
 			return nil
@@ -450,6 +469,28 @@ func checkBinaryFile(path string) (binary bool, err error) {
 		return false, nil
 	}
 	return isBinary(buf[:n]), nil
+}
+
+// readOnly reads a file without parsing it, returning a ParsedFile with
+// Source populated but Tree nil. Used when SkipTreeParse returns true.
+func readOnly(path string, lang *LangEntry, size int64) ParsedFile {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return ParsedFile{
+			Path:   path,
+			Lang:   lang,
+			Size:   size,
+			Err:    err,
+			IsRead: false,
+		}
+	}
+	return ParsedFile{
+		Path:   path,
+		Lang:   lang,
+		Source: src,
+		Size:   size,
+		IsRead: true,
+	}
 }
 
 // parseOne reads and parses a single file, returning a ParsedFile.
