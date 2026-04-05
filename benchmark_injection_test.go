@@ -70,7 +70,7 @@ func BenchmarkInjectionParser_ParseIncremental(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		_ = res
+		oldResult = res
 	}
 }
 
@@ -90,6 +90,7 @@ func TestInjectionParser_ArenaReuseBetweenParses(t *testing.T) {
 	source, ip, langName := setupBench()
 
 	gotreesitter.EnableArenaProfile(true)
+	defer gotreesitter.EnableArenaProfile(false)
 
 	// First parse
 	ip.Parse(source, langName)
@@ -123,14 +124,16 @@ func TestInjectionParser_ArenaReuseBetweenIncrementalParses(t *testing.T) {
 	}
 
 	gotreesitter.EnableArenaProfile(true)
+	defer gotreesitter.EnableArenaProfile(false)
 
 	// Reset profile after warmup
 	gotreesitter.ResetArenaProfile()
 
 	// Do 100 incremental parses
 	newSource := []byte(string(source) + "\n")
+	result := firstResult
 	for i := 0; i < 100; i++ {
-		_, err := ip.ParseIncremental(newSource, langName, firstResult)
+		result, err = ip.ParseIncremental(newSource, langName, result)
 		if err != nil {
 			t.Fatal(err)
 		}
