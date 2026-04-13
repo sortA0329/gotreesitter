@@ -18,11 +18,12 @@ func TestLookupActionIndexSmallUsesDenseTokenRows(t *testing.T) {
 		},
 	}
 
+	smallTokenLookup := buildSmallTokenLookup(lang)
 	p := &Parser{
 		language:         lang,
 		smallBase:        int(lang.LargeStateCount),
-		smallLookup:      buildSmallLookup(lang),
-		smallTokenLookup: buildSmallTokenLookup(lang),
+		smallLookup:      buildSmallLookup(lang, smallTokenLookup),
+		smallTokenLookup: smallTokenLookup,
 	}
 
 	if got, want := p.lookupActionIndexSmall(1, 1), uint16(11); got != want {
@@ -39,6 +40,9 @@ func TestLookupActionIndexSmallUsesDenseTokenRows(t *testing.T) {
 	}
 	if len(p.smallTokenLookup) != 1 || len(p.smallTokenLookup[0]) != 14 {
 		t.Fatalf("smallTokenLookup row missing or wrong size: %+v", p.smallTokenLookup)
+	}
+	if len(p.smallLookup) != 1 || len(p.smallLookup[0]) != 1 {
+		t.Fatalf("smallLookup should retain only nonterminals for dense token rows: %+v", p.smallLookup)
 	}
 }
 
@@ -58,11 +62,12 @@ func TestLookupActionIndexSmallUsesFullTokenRowsForOtherLanguages(t *testing.T) 
 		},
 	}
 
+	smallTokenLookup := buildSmallTokenLookup(lang)
 	p := &Parser{
 		language:         lang,
 		smallBase:        int(lang.LargeStateCount),
-		smallLookup:      buildSmallLookup(lang),
-		smallTokenLookup: buildSmallTokenLookup(lang),
+		smallLookup:      buildSmallLookup(lang, smallTokenLookup),
+		smallTokenLookup: smallTokenLookup,
 	}
 
 	if got, want := p.lookupActionIndexSmall(1, 9), uint16(11); got != want {
@@ -76,5 +81,8 @@ func TestLookupActionIndexSmallUsesFullTokenRowsForOtherLanguages(t *testing.T) 
 	}
 	if len(p.smallTokenLookup) != 1 || len(p.smallTokenLookup[0]) != int(lang.TokenCount) {
 		t.Fatalf("smallTokenLookup should use full token row for non-COBOL languages: %+v", p.smallTokenLookup)
+	}
+	if len(p.smallLookup) != 1 || len(p.smallLookup[0]) != 1 {
+		t.Fatalf("smallLookup should retain only nonterminals for dense token rows: %+v", p.smallLookup)
 	}
 }

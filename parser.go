@@ -241,8 +241,8 @@ func NewParser(lang *Language) *Parser {
 		}
 		p.smallBase = int(lang.LargeStateCount)
 		if len(lang.SmallParseTableMap) > 0 && len(lang.SmallParseTable) > 0 {
-			p.smallLookup = buildSmallLookup(lang)
 			p.smallTokenLookup = buildSmallTokenLookup(lang)
+			p.smallLookup = buildSmallLookup(lang, p.smallTokenLookup)
 		}
 		p.reduceAliasSeq = buildReduceAliasSequences(lang)
 		p.aliasTargetSymbol = buildAliasTargetSymbols(lang)

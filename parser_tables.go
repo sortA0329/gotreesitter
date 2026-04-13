@@ -5,7 +5,7 @@ import "sort"
 const smallTokenDenseThreshold = 8
 const cobolSmallTokenDenseThreshold = 12
 
-func buildSmallLookup(lang *Language) [][]smallActionPair {
+func buildSmallLookup(lang *Language, smallTokenLookup [][]uint16) [][]smallActionPair {
 	out := make([][]smallActionPair, len(lang.SmallParseTableMap))
 	table := lang.SmallParseTable
 	for smallIdx, offset := range lang.SmallParseTableMap {
@@ -17,14 +17,30 @@ func buildSmallLookup(lang *Language) [][]smallActionPair {
 		pos++
 		total := 0
 		countPos := pos
+		denseTokenRow := smallIdx < len(smallTokenLookup) && len(smallTokenLookup[smallIdx]) > 0
+		tokenCount := int(lang.TokenCount)
 		for i := uint16(0); i < groupCount; i++ {
 			if countPos+1 >= len(table) {
 				total = 0
 				break
 			}
 			symbolCount := int(table[countPos+1])
-			total += symbolCount
-			countPos += 2 + symbolCount
+			countPos += 2
+			if !denseTokenRow {
+				total += symbolCount
+				countPos += symbolCount
+				continue
+			}
+			for j := 0; j < symbolCount; j++ {
+				if countPos >= len(table) {
+					break
+				}
+				sym := int(table[countPos])
+				if sym >= tokenCount {
+					total++
+				}
+				countPos++
+			}
 		}
 		if total == 0 {
 			continue
@@ -42,7 +58,10 @@ func buildSmallLookup(lang *Language) [][]smallActionPair {
 				if pos >= len(table) {
 					break
 				}
-				pairs = append(pairs, smallActionPair{sym: table[pos], val: val})
+				sym := table[pos]
+				if !denseTokenRow || int(sym) >= tokenCount {
+					pairs = append(pairs, smallActionPair{sym: sym, val: val})
+				}
 				pos++
 			}
 		}
