@@ -120,6 +120,12 @@ func (pp *ParserPool) release(p *Parser) {
 	}
 	// Keep parser state scrubbed before re-adding to the shared pool.
 	pp.applyDefaults(p)
+	// Release *Node refs so the last-used arena can be GC'd.
+	p.reuseCursor.releaseNodeRefs()
+	p.reuseScratch.releaseNodeRefs()
+	// Drop the recovery sub-parser so its reuseCursor *Node refs (and the
+	// arena they pin) are released.  It is cheap to recreate on next use.
+	p.recoveryParser = nil
 	pp.pool.Put(p)
 }
 
