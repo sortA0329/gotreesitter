@@ -9,6 +9,13 @@ import (
 func TestRepairNoLookaheadLexModes(t *testing.T) {
 	t.Cleanup(func() { PurgeEmbeddedLanguageCache() })
 
+	// The no-lookahead repair logic writes ^uint16(0) sentinel LexState
+	// values into the last few LexModes entries (one per repaired state).
+	// Use a tail-relative offset so the fixture survives blob regens that
+	// add new states ahead of the sentinels. Negative `state` means
+	// "len(LexModes) + state" — i.e. -4 is the fourth-from-last entry,
+	// which is the first repaired sentinel slot for grammars that repair
+	// four no-lookahead states.
 	tests := []struct {
 		name  string
 		load  func() []gotreesitter.LexMode
@@ -17,7 +24,7 @@ func TestRepairNoLookaheadLexModes(t *testing.T) {
 		{
 			name:  "scala",
 			load:  func() []gotreesitter.LexMode { return ScalaLanguage().LexModes },
-			state: 21248,
+			state: -4,
 		},
 		{
 			name:  "rust",
@@ -29,11 +36,16 @@ func TestRepairNoLookaheadLexModes(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			lexModes := tc.load()
-			if tc.state >= len(lexModes) {
-				t.Fatalf("state %d out of range for %s", tc.state, tc.name)
+			idx := tc.state
+			if idx < 0 {
+				idx = len(lexModes) + idx
 			}
-			if got := lexModes[tc.state].LexState; got != ^uint16(0) {
-				t.Fatalf("LexModes[%d].LexState = %d, want %d", tc.state, got, ^uint16(0))
+			if idx < 0 || idx >= len(lexModes) {
+				t.Fatalf("state %d (resolved %d) out of range for %s (len=%d)",
+					tc.state, idx, tc.name, len(lexModes))
+			}
+			if got := lexModes[idx].LexState; got != ^uint16(0) {
+				t.Fatalf("LexModes[%d].LexState = %d, want %d", idx, got, ^uint16(0))
 			}
 		})
 	}
