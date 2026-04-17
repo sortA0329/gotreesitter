@@ -198,7 +198,17 @@ func TestGoTokenSourceHandlesUnterminatedRawString(t *testing.T) {
 }
 
 func TestGoTokenSourceParsesCasgstatusStyleIfPrintBlock(t *testing.T) {
+	// GoTokenSource was calibrated to the ts2go-compiled Go blob's symbol
+	// layout. As of 0.14.0 the default blob is grammargen-compiled with a
+	// different layout (auto-semi split into distinct terminals,
+	// `blank_identifier` as a non-terminal, etc.), and the custom lexer is
+	// no longer the registered default. Driving it against the grammargen
+	// blob produces a degraded parse by design. Skip when that's the blob
+	// we're running against; run when callers supply a ts2go Go blob.
 	lang := GoLanguage()
+	if _, ok := lang.SymbolByName("source_file_token1"); !ok {
+		t.Skip("GoTokenSource is ts2go-specific; current Go blob is grammargen-compiled (no source_file_token1)")
+	}
 	src := []byte(`package runtime
 
 func casgstatus(gp *g, oldval, newval uint32) {

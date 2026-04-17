@@ -18,8 +18,13 @@ func TestDetectLanguageGo(t *testing.T) {
 	if entry.Name != "go" {
 		t.Fatalf("expected language name %q, got %q", "go", entry.Name)
 	}
-	if entry.TokenSourceFactory == nil {
-		t.Fatal("expected Go language to register a TokenSourceFactory")
+	// Go no longer registers a default TokenSourceFactory as of 0.14.0 — the
+	// grammargen-compiled blob ships DFA tables that parse Go on their own,
+	// and the hand-tuned GoTokenSource was calibrated to ts2go's symbol
+	// layout. GoTokenSource remains available via the public API for
+	// callers that carry a ts2go-compiled Go blob.
+	if entry.TokenSourceFactory != nil {
+		t.Fatal("Go now uses the DFA backend by default; no TokenSourceFactory should be registered")
 	}
 }
 
@@ -99,10 +104,14 @@ func parseSupportForLang(t *testing.T, name string) ParseSupport {
 	return ParseSupport{}
 }
 
-func TestAuditParseSupportIncludesGoCustomTokenSource(t *testing.T) {
+func TestAuditParseSupportUsesDFAForGo(t *testing.T) {
+	// As of 0.14.0 Go uses the DFA backend baked into the grammargen-compiled
+	// blob rather than the hand-tuned GoTokenSource, which was calibrated to
+	// ts2go's different symbol layout. Previously named
+	// TestAuditParseSupportIncludesGoCustomTokenSource.
 	report := parseSupportForLang(t, "go")
-	if report.Backend != ParseBackendTokenSource {
-		t.Fatalf("expected go backend %q, got %q", ParseBackendTokenSource, report.Backend)
+	if report.Backend != ParseBackendDFA {
+		t.Fatalf("expected go backend %q, got %q", ParseBackendDFA, report.Backend)
 	}
 }
 

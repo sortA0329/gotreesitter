@@ -22,14 +22,19 @@ func TestHighlightParserGoRealFile(t *testing.T) {
 	if lang == nil {
 		t.Fatal("go language is nil")
 	}
-	if entry.TokenSourceFactory == nil {
-		t.Fatal("go token source factory is nil")
-	}
 
 	parser := gotreesitter.NewParser(lang)
-	tree, err := parser.ParseWithTokenSource(src, entry.TokenSourceFactory(src, lang))
+	var tree *gotreesitter.Tree
+	if entry.TokenSourceFactory != nil {
+		// ts2go Go blob path — custom lexer registered.
+		tree, err = parser.ParseWithTokenSource(src, entry.TokenSourceFactory(src, lang))
+	} else {
+		// grammargen Go blob path (default in 0.14.0+). The baked DFA parses
+		// Go without a custom lexer.
+		tree, err = parser.Parse(src)
+	}
 	if err != nil {
-		t.Fatalf("ParseWithTokenSource: %v", err)
+		t.Fatalf("parse: %v", err)
 	}
 	defer tree.Release()
 
@@ -44,9 +49,13 @@ func TestHighlightParserGoRealFile(t *testing.T) {
 		t.Fatalf("parse root has error=true (runtime=%s)", tree.ParseRuntime().Summary())
 	}
 
-	hl, err := gotreesitter.NewHighlighter(lang, entry.HighlightQuery, gotreesitter.WithTokenSourceFactory(func(source []byte) gotreesitter.TokenSource {
-		return entry.TokenSourceFactory(source, lang)
-	}))
+	hlOpts := []gotreesitter.HighlighterOption{}
+	if entry.TokenSourceFactory != nil {
+		hlOpts = append(hlOpts, gotreesitter.WithTokenSourceFactory(func(source []byte) gotreesitter.TokenSource {
+			return entry.TokenSourceFactory(source, lang)
+		}))
+	}
+	hl, err := gotreesitter.NewHighlighter(lang, entry.HighlightQuery, hlOpts...)
 	if err != nil {
 		t.Fatalf("NewHighlighter: %v", err)
 	}

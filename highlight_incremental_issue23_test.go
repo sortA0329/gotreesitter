@@ -17,10 +17,17 @@ import (
 func TestIssue23_IncrementalHighlightAfterSequentialDeletions(t *testing.T) {
 	lang := grammars.GoLanguage()
 	entry := grammars.DetectLanguage("test.go")
-	hl, err := gotreesitter.NewHighlighter(lang, entry.HighlightQuery,
-		gotreesitter.WithTokenSourceFactory(func(src []byte) gotreesitter.TokenSource {
+	opts := []gotreesitter.HighlighterOption{}
+	if entry.TokenSourceFactory != nil {
+		// Prefer the registered token source factory when one exists (ts2go
+		// Go blob carries a ts2go-calibrated factory). The grammargen blob
+		// shipped in 0.14.0 does not register a custom factory and uses the
+		// baked DFA; leave opts empty in that case.
+		opts = append(opts, gotreesitter.WithTokenSourceFactory(func(src []byte) gotreesitter.TokenSource {
 			return entry.TokenSourceFactory(src, lang)
 		}))
+	}
+	hl, err := gotreesitter.NewHighlighter(lang, entry.HighlightQuery, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}

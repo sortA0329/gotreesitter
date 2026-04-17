@@ -45,15 +45,26 @@ func findNamedChild(lang *gotreesitter.Language, node *gotreesitter.Node, typeNa
 }
 
 // parseGo is a test helper that creates a parser, lexes and parses Go source.
+// Uses the custom GoTokenSource when the current Go blob is ts2go-compiled
+// (detected by presence of the `source_file_token1` anonymous composite
+// symbol); otherwise falls back to the DFA baked into the grammargen blob.
 func parseGo(t *testing.T, src string) (*gotreesitter.Tree, *gotreesitter.Language) {
 	t.Helper()
 	lang := grammars.GoLanguage()
 	parser := gotreesitter.NewParser(lang)
 	srcBytes := []byte(src)
-	ts := mustGoTokenSource(t, srcBytes, lang)
-	tree, err := parser.ParseWithTokenSource(srcBytes, ts)
+	var (
+		tree *gotreesitter.Tree
+		err  error
+	)
+	if _, ok := lang.SymbolByName("source_file_token1"); ok {
+		ts := mustGoTokenSource(t, srcBytes, lang)
+		tree, err = parser.ParseWithTokenSource(srcBytes, ts)
+	} else {
+		tree, err = parser.Parse(srcBytes)
+	}
 	if err != nil {
-		t.Fatalf("ParseWithTokenSource failed: %v", err)
+		t.Fatalf("parse failed: %v", err)
 	}
 	if tree.RootNode() == nil {
 		t.Fatal("parse returned nil root")
@@ -224,8 +235,15 @@ func TestParseGoNoErrors(t *testing.T) {
 }
 
 func TestParseGoTokenSource(t *testing.T) {
-	// Verify the token source produces the expected token sequence.
+	// Verify the token source produces the expected token sequence. Only
+	// meaningful against ts2go's Go blob — GoTokenSource was calibrated to
+	// that symbol layout. Skip when the current blob is grammargen (default
+	// in 0.14.0+); GoTokenSource remains usable via the public API for
+	// callers carrying their own ts2go Go blob.
 	lang := grammars.GoLanguage()
+	if _, ok := lang.SymbolByName("source_file_token1"); !ok {
+		t.Skip("GoTokenSource is ts2go-specific; current Go blob is grammargen-compiled")
+	}
 	src := []byte("package main\n")
 	ts := mustGoTokenSource(t, src, lang)
 	semiSyms := lang.TokenSymbolsByName(";")
@@ -443,6 +461,12 @@ func main() {
 
 func TestParseGoIncrementalWithTokenSourceReusesSubtrees(t *testing.T) {
 	lang := grammars.GoLanguage()
+	// This test drives GoTokenSource incremental reuse, which is ts2go-
+	// specific (the custom lexer's symbol map doesn't match grammargen).
+	// Skip when the default blob is grammargen.
+	if _, ok := lang.SymbolByName("source_file_token1"); !ok {
+		t.Skip("GoTokenSource is ts2go-specific; current Go blob is grammargen-compiled")
+	}
 	parser := gotreesitter.NewParser(lang)
 
 	src := []byte(`package main
@@ -525,6 +549,11 @@ func main() {
 
 func TestParseGoIncrementalRangeClauseReturnEdit(t *testing.T) {
 	lang := grammars.GoLanguage()
+	// Drives GoTokenSource incremental reuse; ts2go-specific. Skip when
+	// the default Go blob is grammargen.
+	if _, ok := lang.SymbolByName("source_file_token1"); !ok {
+		t.Skip("GoTokenSource is ts2go-specific; current Go blob is grammargen-compiled")
+	}
 
 	parseWithReturnDigit := func(t *testing.T, digit byte) {
 		t.Helper()

@@ -263,12 +263,17 @@ func effectiveFullParseInitialMaxStacks(lang *Language, initialMaxStacks int) in
 			initialMaxStacks = 2
 		}
 	case "go":
-		// Go's grammar triggers GLR ambiguity on type assertions, composite
-		// literals, and generic-like syntax in generated protobuf files.
-		// The default cap of 8 causes exponential stack blowup on large files.
-		// A tight default keeps parsing fast; retry widening handles edge cases.
-		if initialMaxStacks == maxGLRStacks {
-			initialMaxStacks = 2
+		// Under the ts2go Go blob the initial cap was held at 2 because cap=8
+		// caused exponential blowup on large files — and the retry-with-widening
+		// cycle handled edge cases. Our grammargen-compiled Go blob (shipped as
+		// of #35) has a markedly different GLR conflict profile thanks to LR(1)
+		// state splitting, so the blowup no longer applies; cap=2 now triggers
+		// the retry cycle on most real-world Go files (parser.go, parser_reduce.go,
+		// parser_test.go / query_test.go styles). Raising the default to 32
+		// matches the pattern used for Ruby ("avoids an expensive retry-with-
+		// widening cycle on every parse, cutting memory usage roughly in half").
+		if initialMaxStacks < 32 {
+			initialMaxStacks = 32
 		}
 	case "ruby":
 		// Ruby's ambiguous syntax (optional parentheses, flexible method calls,
