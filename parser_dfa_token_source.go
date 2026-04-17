@@ -50,6 +50,10 @@ type dfaTokenSource struct {
 	// emissions so tokenization always makes forward progress.
 	zeroWidthPos   int
 	zeroWidthCount int
+
+	// noPool skips pool return on Close; set for token sources whose lifetime
+	// is nested inside an active parse (e.g. recovery reparsing).
+	noPool bool
 }
 
 const maxConsecutiveZeroWidthTokens = 4
@@ -67,16 +71,7 @@ var dfaTokenSourcePool = sync.Pool{
 	},
 }
 
-func acquireDFATokenSource(lexer *Lexer, language *Language, lookupActionIndex func(state StateID, sym Symbol) uint16, hasKeywordState []bool) *dfaTokenSource {
-	ts := dfaTokenSourcePool.Get().(*dfaTokenSource)
-	// Preserve pooled scratch slices across the struct reset below so they can
-	// be reused without reallocation on the next parse.
-	savedMasked := ts.maskedScratch
-	*ts = dfaTokenSource{
-		extZeroPos:   -1,
-		zeroWidthPos: -1,
-	}
-	ts.maskedScratch = savedMasked
+func initDFATokenSource(ts *dfaTokenSource, lexer *Lexer, language *Language, lookupActionIndex func(state StateID, sym Symbol) uint16, hasKeywordState []bool) {
 	ts.lexer = lexer
 	ts.language = language
 	ts.state = 0
@@ -90,6 +85,29 @@ func acquireDFATokenSource(lexer *Lexer, language *Language, lookupActionIndex f
 	if language != nil && language.ExternalScanner != nil {
 		ts.externalPayload = language.ExternalScanner.Create()
 	}
+}
+
+func acquireDFATokenSource(lexer *Lexer, language *Language, lookupActionIndex func(state StateID, sym Symbol) uint16, hasKeywordState []bool) *dfaTokenSource {
+	ts := dfaTokenSourcePool.Get().(*dfaTokenSource)
+	// Preserve pooled scratch slices across the struct reset below so they can
+	// be reused without reallocation on the next parse.
+	savedMasked := ts.maskedScratch
+	*ts = dfaTokenSource{
+		extZeroPos:   -1,
+		zeroWidthPos: -1,
+	}
+	ts.maskedScratch = savedMasked
+	initDFATokenSource(ts, lexer, language, lookupActionIndex, hasKeywordState)
+	return ts
+}
+
+func newDFATokenSourceDirect(lexer *Lexer, language *Language, lookupActionIndex func(state StateID, sym Symbol) uint16, hasKeywordState []bool) *dfaTokenSource {
+	ts := &dfaTokenSource{
+		extZeroPos:   -1,
+		zeroWidthPos: -1,
+		noPool:       true,
+	}
+	initDFATokenSource(ts, lexer, language, lookupActionIndex, hasKeywordState)
 	return ts
 }
 
@@ -134,25 +152,10 @@ func (d *dfaTokenSource) Reset(source []byte) {
 }
 
 func (d *dfaTokenSource) Close() {
-	if d.language == nil || d.language.ExternalScanner == nil || d.externalPayload == nil {
-		// still recycle the token source instance
-		d.lexer = nil
-		d.language = nil
-		d.lookupActionIndex = nil
-		d.hasKeywordState = nil
-		d.glrStates = nil
-		d.extZeroPos = -1
-		d.extZeroState = 0
-		d.zeroWidthPos = -1
-		d.zeroWidthCount = 0
-		d.lastExternalTokenStartByte = 0
-		d.lastExternalTokenEndByte = 0
-		d.lastExternalTokenValid = false
-		dfaTokenSourcePool.Put(d)
-		return
+	if d.language != nil && d.language.ExternalScanner != nil && d.externalPayload != nil {
+		d.language.ExternalScanner.Destroy(d.externalPayload)
+		d.externalPayload = nil
 	}
-	d.language.ExternalScanner.Destroy(d.externalPayload)
-	d.externalPayload = nil
 	d.lexer = nil
 	d.language = nil
 	d.lookupActionIndex = nil
@@ -165,7 +168,9 @@ func (d *dfaTokenSource) Close() {
 	d.lastExternalTokenStartByte = 0
 	d.lastExternalTokenEndByte = 0
 	d.lastExternalTokenValid = false
-	dfaTokenSourcePool.Put(d)
+	if !d.noPool {
+		dfaTokenSourcePool.Put(d)
+	}
 }
 
 // DebugDFA enables trace logging for DFA token production.

@@ -64,7 +64,7 @@ func (p *Parser) dfaReparseFactory() normalizationTokenSourceFactory {
 	}
 	return func(source []byte) (TokenSource, error) {
 		lexer := NewLexer(p.language.LexStates, source)
-		return acquireDFATokenSource(lexer, p.language, p.lookupActionIndex, p.hasKeywordState), nil
+		return newDFATokenSourceDirect(lexer, p.language, p.lookupActionIndex, p.hasKeywordState), nil
 	}
 }
 
