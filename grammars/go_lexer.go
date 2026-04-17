@@ -735,9 +735,23 @@ func (ts *GoTokenSource) buildMaps() error {
 		return fmt.Errorf("go lexer: identifier token symbol not found")
 	}
 	ts.identifierSymbol = identifierSyms[0]
-	ts.blankIdentifierSymbol = tokenSym("blank_identifier")
+	// `blank_identifier` is a terminal in ts2go's Go grammar but a non-terminal
+	// in grammargen's, so a hard lookup fails on grammargen blobs. The lexer
+	// never actually emits this symbol (`_` goes out as a plain identifier),
+	// so a soft lookup keeps backward compatibility with ts2go blobs without
+	// breaking grammargen blobs.
+	if syms := ts.lang.TokenSymbolsByName("blank_identifier"); len(syms) > 0 {
+		ts.blankIdentifierSymbol = syms[0]
+	}
 	if autoSemiSyms := ts.lang.TokenSymbolsByName("source_file_token1"); len(autoSemiSyms) > 0 {
 		ts.autoSemicolonSymbol = autoSemiSyms[0]
+	} else if semicolonSyms := ts.lang.TokenSymbolsByName(";"); len(semicolonSyms) > 0 {
+		// ts2go collapses the `\n | ; | \x00` auto-semi alternatives into one
+		// anonymous composite `source_file_token1`. grammargen preserves the
+		// three as distinct terminals — emitting plain `;` is accepted at the
+		// same positions. This fallback keeps GoTokenSource usable on either
+		// backend for downstream callers who opt back in via the public API.
+		ts.autoSemicolonSymbol = semicolonSyms[0]
 	}
 
 	// Go's grammar aliases "new" and "make" to additional identifier token IDs.
