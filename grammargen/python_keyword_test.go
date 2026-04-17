@@ -34,9 +34,24 @@ func TestPythonKeywordIdentificationIncludesSoftKeywords(t *testing.T) {
 }
 
 func TestPythonReservedWordsSurviveNormalization(t *testing.T) {
+	// Python's grammar.json contains a top-level reserved.global block but
+	// never uses RESERVED wrappers. As of the Go-parity fix, ImportGrammarJSON
+	// now drops reserved word sets in that case because the runtime
+	// buildReservedWordTables path mismatches tree-sitter's semantic and
+	// actively harms parsing when every reserved word is a hard keyword that
+	// the grammar already lexes directly. To keep this test exercising the
+	// normalization path, re-attach a synthetic reserved word set that mirrors
+	// what grammar.json advertises.
 	gram := loadPythonGrammarJSONForTest(t)
 	if len(gram.ReservedWordSets) == 0 {
-		t.Fatal("imported grammar has no reserved word sets")
+		gram.ReservedWordSets = []ReservedWordSet{{
+			Name: "global",
+			Rules: []*Rule{
+				Str("if"),
+				Str("except"),
+				Str("await"),
+			},
+		}}
 	}
 
 	ng, err := Normalize(gram)
@@ -70,7 +85,20 @@ func TestPythonReservedWordsSurviveNormalization(t *testing.T) {
 }
 
 func TestPythonGenerateLanguageEmitsReservedWords(t *testing.T) {
+	// See TestPythonReservedWordsSurviveNormalization: re-attach a synthetic
+	// reserved set so generator coverage is retained after ImportGrammarJSON
+	// auto-drops the sets in the absence of RESERVED wrappers.
 	gram := loadPythonGrammarJSONForTest(t)
+	if len(gram.ReservedWordSets) == 0 {
+		gram.ReservedWordSets = []ReservedWordSet{{
+			Name: "global",
+			Rules: []*Rule{
+				Str("if"),
+				Str("except"),
+				Str("await"),
+			},
+		}}
+	}
 
 	lang, err := GenerateLanguage(gram)
 	if err != nil {

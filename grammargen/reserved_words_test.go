@@ -8,10 +8,18 @@ import (
 )
 
 func TestImportGrammarJSONReservedWordSets(t *testing.T) {
+	// When a grammar declares reserved word sets AND uses RESERVED wrappers
+	// somewhere, ImportGrammarJSON preserves the sets for generator consumption.
+	// When only the top-level "reserved" block is present without any
+	// RESERVED usages in rules, the sets are dropped because our current
+	// buildReservedWordTables path mismatches tree-sitter's semantic and
+	// actively harms parsing for grammars where every reserved word is a
+	// hard keyword the LR grammar already handles directly.
 	data := []byte(`{
 		"name": "reserved_import",
 		"rules": {
-			"source_file": {"type": "SYMBOL", "name": "identifier"},
+			"source_file": {"type": "SYMBOL", "name": "stmt"},
+			"stmt": {"type": "RESERVED", "context_name": "global", "content": {"type": "SYMBOL", "name": "identifier"}},
 			"identifier": {"type": "PATTERN", "value": "[a-z]+"}
 		},
 		"extras": [],
@@ -45,6 +53,39 @@ func TestImportGrammarJSONReservedWordSets(t *testing.T) {
 	}
 	if g.ReservedWordSets[1].Name != "property" {
 		t.Fatalf("second reserved set = %q, want %q", g.ReservedWordSets[1].Name, "property")
+	}
+}
+
+func TestImportGrammarJSONReservedWordSetsDroppedWithoutRESERVED(t *testing.T) {
+	// Without RESERVED usages, reserved word sets are dropped to match
+	// tree-sitter's semantic (a no-op global reserved list when no per-context
+	// reservation is in effect).
+	data := []byte(`{
+		"name": "reserved_import_bare",
+		"rules": {
+			"source_file": {"type": "SYMBOL", "name": "identifier"},
+			"identifier": {"type": "PATTERN", "value": "[a-z]+"}
+		},
+		"extras": [],
+		"conflicts": [],
+		"externals": [],
+		"inline": [],
+		"supertypes": [],
+		"word": "identifier",
+		"reserved": {
+			"global": [
+				{"type": "STRING", "value": "if"}
+			]
+		},
+		"precedences": []
+	}`)
+
+	g, err := ImportGrammarJSON(data)
+	if err != nil {
+		t.Fatalf("ImportGrammarJSON failed: %v", err)
+	}
+	if len(g.ReservedWordSets) != 0 {
+		t.Fatalf("expected reserved word sets to be dropped (no RESERVED usage), got %d", len(g.ReservedWordSets))
 	}
 }
 
