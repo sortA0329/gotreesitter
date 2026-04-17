@@ -481,6 +481,8 @@ Test suite covers: smoke tests (206 grammars), golden S-expression snapshots, hi
 
 ## Roadmap
 
+v0.14.x — Go grammar now shipped as a grammargen-compiled blob (our own pure-Go LR(1) state-splitting compiler), eliminating a dead-end state inherited from tree-sitter-go that wrapped several valid Go files in ERROR. Combined with arena-retention, retry-lifecycle, and initial-sizing fixes, warm-reuse heap allocation across a six-file self-parse benchmark dropped ~36% (498 → 320 MB/iter); cold-case dropped ~57%.
+
 v0.12.x — 206 grammars (all OK), 116 external scanners, pure-Go runtime plus `grammargen`, ABI 15 support including reserved-word sets, GLR parser, incremental reparsing with external scanner checkpoints, query engine, tree cursor, highlighting, tagging, injection parser, typed query codegen, CST rewriter, parser pool, arena memory budgets, and structural parity against 100+ curated C reference grammars.
 
 Next:
