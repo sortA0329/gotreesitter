@@ -86,7 +86,11 @@ func releaseParserScratch(s *parserScratch, skipGSSClear bool) {
 	const maxRetainedNodeLinkStack = 256 * 1024
 	if cap(s.nodeLinks) > maxRetainedNodeLinkStack {
 		s.nodeLinks = nil
-	} else if len(s.nodeLinks) > 0 {
+	} else if cap(s.nodeLinks) > 0 {
+		// Clear the full capacity, not just [:len]. wireParentLinksWithScratch
+		// returns the scratch slice as stack[:0], so len=0 but cap>0 with live
+		// *Node pointers in the backing array. Clearing [:len] is a no-op here.
+		clear(s.nodeLinks[:cap(s.nodeLinks)])
 		s.nodeLinks = s.nodeLinks[:0]
 	}
 	const maxRetainedStackCullScratch = 256
