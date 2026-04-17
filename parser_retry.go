@@ -395,13 +395,37 @@ func (p *Parser) retryFullParse(source []byte, initialMaxStacks int, tree *Tree,
 		retryMaxStacks = maxStacksOverride
 	}
 
+	// Each runRetry() produces a fresh Tree + arena. When a candidate loses
+	// the compare, release its arena back to the pool immediately so later
+	// runRetry() calls in this same retryFullParse can reuse it; otherwise
+	// the loser's arena only returns to the pool at GC finalize time, which
+	// starves every retry in a warm loop of reusable capacity. Never release
+	// the incoming `tree` — it belongs to the caller.
+	release := func(t *Tree) {
+		if t == nil || t == tree {
+			return
+		}
+		t.Release()
+	}
+	replaceBest := func(best **Tree, candidate *Tree) {
+		if candidate == nil {
+			return
+		}
+		if preferRetryTree(candidate, *best) {
+			if *best != candidate {
+				release(*best)
+			}
+			*best = candidate
+			return
+		}
+		release(candidate)
+	}
+
 	bestTree := tree
 	if shouldRunInitialFullParseMergeRetry(tree) {
 		if initialMergePerKey := fullParseRetryMergePerKeyOverride(tree, len(source), initialMaxStacks); initialMergePerKey > 0 {
 			mergeRetryTree := runRetry(initialMaxStacks, initialMergePerKey, 0)
-			if preferRetryTree(mergeRetryTree, bestTree) {
-				bestTree = mergeRetryTree
-			}
+			replaceBest(&bestTree, mergeRetryTree)
 			if treeParseClean(bestTree) {
 				return bestTree
 			}
@@ -414,29 +438,52 @@ func (p *Parser) retryFullParse(source []byte, initialMaxStacks int, tree *Tree,
 	}
 	if maxStacksOverride > 0 || maxNodesOverride > 0 {
 		retryTree := runRetry(retryMaxStacks, 0, maxNodesOverride)
-		if preferRetryTree(retryTree, bestTree) {
-			bestTree = retryTree
-		}
+		// nodeRetryTree is read below for stop-reason inspection, so we hold
+		// a pointer to it without handing it through replaceBest until the
+		// retry sequence is done. If it doesn't end up bestTree, we release
+		// it at function exit via the sentinel below.
 		nodeRetryTree = retryTree
 		if extraNodeLimit := fullParseRetrySecondaryNodeLimitOverride(retryTree, len(source)); extraNodeLimit > 0 {
-			nodeRetryTree = runRetry(retryMaxStacks, 0, extraNodeLimit)
-			if preferRetryTree(nodeRetryTree, bestTree) {
-				bestTree = nodeRetryTree
+			secondaryTree := runRetry(retryMaxStacks, 0, extraNodeLimit)
+			// Fold the primary retry into bestTree before we overwrite
+			// nodeRetryTree, so the loser's arena is returned.
+			if retryTree != nil {
+				if preferRetryTree(retryTree, bestTree) {
+					if bestTree != retryTree {
+						release(bestTree)
+					}
+					bestTree = retryTree
+				} else if retryTree != bestTree {
+					release(retryTree)
+				}
 			}
+			nodeRetryTree = secondaryTree
+			replaceBest(&bestTree, secondaryTree)
+		} else {
+			replaceBest(&bestTree, retryTree)
 		}
 	}
 
 	if treeParseClean(bestTree) {
+		if nodeRetryTree != nil && nodeRetryTree != bestTree && nodeRetryTree != tree {
+			release(nodeRetryTree)
+		}
 		return bestTree
 	}
 	maxMergePerKeyOverride := fullParseRetryMergePerKeyOverride(nodeRetryTree, len(source), initialMaxStacks)
 	if maxMergePerKeyOverride == 0 {
+		if nodeRetryTree != nil && nodeRetryTree != bestTree && nodeRetryTree != tree {
+			release(nodeRetryTree)
+		}
 		return bestTree
 	}
 	mergeRetryTree := runRetry(retryMaxStacks, maxMergePerKeyOverride, maxNodesOverride)
-	if preferRetryTree(mergeRetryTree, bestTree) {
-		bestTree = mergeRetryTree
+	// nodeRetryTree is no longer needed; drop it before potentially replacing
+	// bestTree so we don't leak it if it was also the incumbent.
+	if nodeRetryTree != nil && nodeRetryTree != bestTree && nodeRetryTree != tree {
+		release(nodeRetryTree)
 	}
+	replaceBest(&bestTree, mergeRetryTree)
 	return bestTree
 }
 
