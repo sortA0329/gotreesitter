@@ -369,6 +369,7 @@ make_clone_block() {
     [perl]="https://github.com/tree-sitter-perl/tree-sitter-perl.git"
     [erlang]="https://github.com/WhatsApp/tree-sitter-erlang.git"
     [d]="https://github.com/CyberShadow/tree-sitter-d.git"
+    [dart]="https://github.com/UserNobody14/tree-sitter-dart.git"
   )
 
   # Map grammar names to repo directory names (some differ).

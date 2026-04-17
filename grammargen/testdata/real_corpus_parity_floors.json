@@ -1,16 +1,16 @@
 {
-  "version": 14,
-  "generated_at": "2026-03-08T08:15:00Z",
-  "commit_sha": "279f617",
+  "version": 15,
+  "generated_at": "2026-04-17T03:20:46Z",
+  "commit_sha": "f5ded69",
   "corpus_root": "/tmp/grammar_parity",
   "profile": "aggressive",
   "max_cases": 25,
   "max_sample_bytes": 524288,
-  "grammar_count": 49,
-  "total_eligible": 915,
-  "total_no_error": 915,
-  "total_sexpr_parity": 685,
-  "total_deep_parity": 682,
+  "grammar_count": 53,
+  "total_eligible": 1019,
+  "total_no_error": 970,
+  "total_sexpr_parity": 745,
+  "total_deep_parity": 740,
   "metrics": {
     "bash": {
       "eligible": 25,
@@ -48,6 +48,12 @@
       "sexpr_parity": 7,
       "deep_parity": 7
     },
+    "dart": {
+      "eligible": 29,
+      "no_error": 9,
+      "sexpr_parity": 7,
+      "deep_parity": 4
+    },
     "diff": {
       "eligible": 14,
       "no_error": 14,
@@ -83,6 +89,12 @@
       "no_error": 25,
       "sexpr_parity": 13,
       "deep_parity": 13
+    },
+    "erlang": {
+      "eligible": 25,
+      "no_error": 24,
+      "sexpr_parity": 20,
+      "deep_parity": 20
     },
     "forth": {
       "eligible": 25,
@@ -180,6 +192,12 @@
       "sexpr_parity": 25,
       "deep_parity": 25
     },
+    "kotlin": {
+      "eligible": 25,
+      "no_error": 14,
+      "sexpr_parity": 11,
+      "deep_parity": 11
+    },
     "lua": {
       "eligible": 25,
       "no_error": 25,
@@ -257,6 +275,12 @@
       "no_error": 16,
       "sexpr_parity": 16,
       "deep_parity": 16
+    },
+    "rust": {
+      "eligible": 25,
+      "no_error": 20,
+      "sexpr_parity": 12,
+      "deep_parity": 12
     },
     "scala": {
       "eligible": 25,
