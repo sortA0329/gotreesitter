@@ -9,22 +9,28 @@ import (
 )
 
 // External token indexes for the rust grammar.
+// NOTE: index 1 (string_close) was introduced in tree-sitter-rust 0.24.2
+// (upstream commit b3e615d) as part of string literal error-recovery fix.
 const (
-	rustTokStringContent       = 0 // "string_content"
-	rustTokRawStringStart      = 1 // "_raw_string_literal_start"
-	rustTokRawStringContent    = 2 // "string_content" (raw variant)
-	rustTokRawStringEnd        = 3 // "_raw_string_literal_end"
-	rustTokFloatLiteral        = 4 // "float_literal"
-	rustTokOuterDocMarker      = 5 // "outer_doc_comment_marker"
-	rustTokInnerDocMarker      = 6 // "inner_doc_comment_marker"
-	rustTokBlockCommentContent = 7 // "_block_comment_content"
-	rustTokDocComment          = 8 // "doc_comment"
-	rustTokErrorSentinel       = 9 // "_error_sentinel"
+	rustTokStringContent       = 0  // "string_content"
+	rustTokStringClose         = 1  // "string_close" (closing `"` of string literal)
+	rustTokRawStringStart      = 2  // "_raw_string_literal_start"
+	rustTokRawStringContent    = 3  // "string_content" (raw variant)
+	rustTokRawStringEnd        = 4  // "_raw_string_literal_end"
+	rustTokFloatLiteral        = 5  // "float_literal"
+	rustTokOuterDocMarker      = 6  // "outer_doc_comment_marker"
+	rustTokInnerDocMarker      = 7  // "inner_doc_comment_marker"
+	rustTokBlockCommentContent = 8  // "_block_comment_content"
+	rustTokDocComment          = 9  // "doc_comment"
+	rustTokErrorSentinel       = 10 // "_error_sentinel"
 )
 
 // Concrete symbol IDs from the generated rust grammar ExternalSymbols.
+// (Symbol 147 = string_close alias `"`, inserted between string_content and
+// _raw_string_literal_start; all downstream symbols shift by +1.)
 const (
-	rustSymStringContent       gotreesitter.Symbol = 147
+	rustSymStringContent       gotreesitter.Symbol = 146
+	rustSymStringClose         gotreesitter.Symbol = 147
 	rustSymRawStringStart      gotreesitter.Symbol = 148
 	rustSymRawStringContent    gotreesitter.Symbol = 149
 	rustSymRawStringEnd        gotreesitter.Symbol = 150
@@ -94,8 +100,24 @@ func (RustExternalScanner) Scan(payload any, lexer *gotreesitter.ExternalLexer, 
 	}
 
 	// String content (but not when float literal is also valid).
+	// When process_string returns false (lookahead already at '"' or '\' or EOF
+	// and no content was consumed), fall through so STRING_CLOSE can consume
+	// the closing quote. This mirrors the upstream C scanner's behaviour
+	// introduced in tree-sitter-rust 0.24.2.
 	if rustValid(validSymbols, rustTokStringContent) && !rustValid(validSymbols, rustTokFloatLiteral) {
-		return rustProcessString(lexer)
+		if rustProcessString(lexer) {
+			return true
+		}
+	}
+
+	// String close: closing `"` of a string literal. Emitting as an external
+	// token (instead of a plain '"') lets the parser recover from unterminated
+	// strings more gracefully.
+	if rustValid(validSymbols, rustTokStringClose) && lexer.Lookahead() == '"' {
+		lexer.Advance(false)
+		lexer.SetResultSymbol(rustSymStringClose)
+		lexer.MarkEnd()
+		return true
 	}
 
 	// Line doc content.
