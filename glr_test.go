@@ -17,6 +17,29 @@ func TestMergeStacksRemovesDead(t *testing.T) {
 	}
 }
 
+func TestNodeEquivCacheDepthKeyDoesNotAlias(t *testing.T) {
+	var scratch glrMergeScratch
+	scratch.beginEquivEpoch()
+
+	a := NewLeafNode(1, true, 0, 1, Point{}, Point{Column: 1})
+	b := NewLeafNode(1, true, 0, 1, Point{}, Point{Column: 1})
+
+	storeNodeEquivCache(&scratch, a, b, glrNodeEquivCacheMaxDepth, true)
+	if hit, ok := lookupNodeEquivCache(&scratch, a, b, glrNodeEquivCacheMaxDepth); !ok || !hit {
+		t.Fatalf("lookup at max cache depth = (%v, %v), want (true, true)", hit, ok)
+	}
+
+	tooDeep := glrNodeEquivCacheMaxDepth + 1
+	if hit, ok := lookupNodeEquivCache(&scratch, a, b, tooDeep); ok || hit {
+		t.Fatalf("lookup above max cache depth = (%v, %v), want (false, false)", hit, ok)
+	}
+
+	storeNodeEquivCache(&scratch, a, b, tooDeep, false)
+	if hit, ok := lookupNodeEquivCache(&scratch, a, b, glrNodeEquivCacheMaxDepth); !ok || !hit {
+		t.Fatalf("out-of-range store changed max-depth entry: (%v, %v), want (true, true)", hit, ok)
+	}
+}
+
 func TestMergeStacksSameTopState(t *testing.T) {
 	s1 := newGLRStack(StateID(5))
 	s1.score = 10

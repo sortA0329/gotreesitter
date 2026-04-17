@@ -11,6 +11,20 @@ const (
 	csharpMaxTopLevelChunkRecoverySpans       = 128
 )
 
+func normalizeCSharpCompatibility(root *Node, source []byte, p *Parser, lang *Language) {
+	normalizeCSharpRecoveredTopLevelChunks(root, source, p)
+	normalizeCSharpRecoveredNamespaces(root, source, lang)
+	normalizeCSharpRecoveredTypeDeclarations(root, source, lang)
+	normalizeCollapsedNamedLeafChildren(root, lang, "implicit_type", "var")
+	normalizeCSharpUnicodeIdentifierSpans(root, source, lang)
+	normalizeCSharpQueryExpressions(root, source, p)
+	normalizeCSharpInvocationStatements(root, source, lang)
+	normalizeCSharpDereferenceLogicalAndCasts(root, source, lang)
+	normalizeCSharpConditionalIsPatternExpressions(root, lang)
+	normalizeCSharpTypeConstraintKeywords(root, lang)
+	normalizeCSharpSwitchTupleCasePatterns(root, lang)
+}
+
 func normalizeCSharpRecoveredTopLevelChunks(root *Node, source []byte, p *Parser) {
 	if root == nil || p == nil || p.language == nil || p.language.Name != "c_sharp" || p.skipRecoveryReparse || len(source) == 0 || root.ownerArena == nil {
 		return

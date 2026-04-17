@@ -2,6 +2,27 @@ package gotreesitter
 
 import "bytes"
 
+func normalizeJavaScriptCompatibility(root *Node, source []byte, lang *Language) {
+	normalizeJavaScriptProgramStart(root, lang)
+	normalizeJavaScriptTypeScriptOptionalChainLeaves(root, lang)
+	normalizeJavaScriptTypeScriptCallPrecedence(root, lang)
+	normalizeJavaScriptTypeScriptUnaryPrecedence(root, lang)
+	normalizeJavaScriptTypeScriptBinaryPrecedence(root, lang)
+	normalizeJavaScriptTrailingContinueComments(root, source, lang)
+	normalizeJavaScriptTopLevelExpressionStatementBounds(root, lang)
+	normalizeJavaScriptTopLevelObjectLiterals(root, lang)
+}
+
+func normalizeTypeScriptTreeCompatibility(root *Node, source []byte, lang *Language) {
+	normalizeJavaScriptTypeScriptOptionalChainLeaves(root, lang)
+	normalizeJavaScriptTypeScriptCallPrecedence(root, lang)
+	normalizeJavaScriptTypeScriptUnaryPrecedence(root, lang)
+	normalizeJavaScriptTypeScriptBinaryPrecedence(root, lang)
+	normalizeTypeScriptRecoveredNamespaceRoot(root, source, lang)
+	normalizeTypeScriptCompatibility(root, source, lang)
+	normalizeCollapsedNamedLeafChildren(root, lang, "existential_type", "*")
+}
+
 func normalizeJavaScriptTopLevelObjectLiterals(root *Node, lang *Language) {
 	if root == nil || lang == nil || lang.Name != "javascript" || root.Type(lang) != "program" {
 		return

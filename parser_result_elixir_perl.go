@@ -1,5 +1,11 @@
 package gotreesitter
 
+func normalizePerlCompatibility(root *Node, source []byte, lang *Language) {
+	normalizePerlJoinAssignmentLists(root, source, lang)
+	normalizePerlPushExpressionLists(root, source, lang)
+	normalizePerlReturnExpressionLists(root, lang)
+}
+
 func normalizeElixirNestedCallTargetFields(root *Node, lang *Language) {
 	if root == nil || lang == nil || lang.Name != "elixir" {
 		return

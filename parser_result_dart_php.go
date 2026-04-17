@@ -1,5 +1,16 @@
 package gotreesitter
 
+func normalizeDartCompatibility(root *Node, source []byte, lang *Language) {
+	normalizeDartConstructorSignatureKinds(root, source, lang)
+	normalizeDartSingleTypeArgumentFreeCalls(root, lang)
+	normalizeDartSwitchExpressionBodyFields(root, lang)
+}
+
+func normalizePHPCompatibility(root *Node, source []byte, lang *Language) {
+	normalizePHPSingletonTypeWrappers(root, lang)
+	normalizePHPStaticFunctionFragments(root, source, lang)
+}
+
 func normalizePHPSingletonTypeWrappers(root *Node, lang *Language) {
 	if root == nil || lang == nil || lang.Name != "php" {
 		return

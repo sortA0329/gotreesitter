@@ -481,13 +481,15 @@ Test suite covers: smoke tests (206 grammars), golden S-expression snapshots, hi
 
 ## Roadmap
 
+v0.15.x — Large-repo consumer safety and parser-maintenance release. `ParsePolicy.ShouldSkipDir` lets gateway callers prune generated/vendor directories before descent, the GLR node-equivalence cache is smaller and checks epoch first for L2-friendly lookups, `Tree.Edit` avoids scanning unchanged right-side siblings when there is no tail shift, and parser-result compatibility normalization now keeps language-specific call sequences beside the relevant `parser_result_*.go` helpers. This line also carries the post-0.14 tier-1 grammar refreshes and reserved-word import fixes.
+
 v0.14.x — Go grammar now shipped as a grammargen-compiled blob (our own pure-Go LR(1) state-splitting compiler), eliminating a dead-end state inherited from tree-sitter-go that wrapped several valid Go files in ERROR. Combined with arena retention/initial-sizing fixes, retry-lifecycle cleanup, and a GLR cap update keyed to the new grammar's conflict profile, warm-reuse heap allocation across a six-file self-parse benchmark dropped ~54% (498 → 229 MB/iter); cold-case dropped ~61%.
 
 v0.12.x — 206 grammars (all OK), 116 external scanners, pure-Go runtime plus `grammargen`, ABI 15 support including reserved-word sets, GLR parser, incremental reparsing with external scanner checkpoints, query engine, tree cursor, highlighting, tagging, injection parser, typed query codegen, CST rewriter, parser pool, arena memory budgets, and structural parity against 100+ curated C reference grammars.
 
 Next:
 - Full-parse `grammargen` performance work that keeps the recent incremental wins without regressing the main DFA benchmark
-- C# parser-result merge cleanup and the remaining recovery/parity backlog on top-level chunks, attributes, and type bodies
+- Remaining parser-result recovery/parity backlog on high-value C#, Rust, Scala, TypeScript, and Python corpus cases
 - The next highest-value parser/`grammargen` parity language after YAML and C# stabilization
 - Table-size and codegen compaction work for Unicode-heavy grammars
 

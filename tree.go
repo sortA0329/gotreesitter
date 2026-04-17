@@ -1352,7 +1352,7 @@ func editNodeWithDelta(n *Node, edit InputEdit, byteDelta, rowDelta, colDelta in
 		}
 		if c.startByte >= edit.OldEndByte {
 			if !hasTailShift {
-				continue
+				break
 			}
 			shiftSubtreeNodeAfterEdit(c, edit, byteDelta, rowDelta, colDelta, shiftScratch)
 			continue

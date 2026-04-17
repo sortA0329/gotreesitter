@@ -2,6 +2,25 @@ package gotreesitter
 
 import "bytes"
 
+func normalizeScalaCompatibility(root *Node, source []byte, lang *Language) {
+	normalizeScalaObjectTemplateBodyFragments(root, source, lang)
+	normalizeScalaTemplateBodyObjectFragments(root, source, lang)
+	normalizeScalaTemplateBodyRecoveredMembers(root, source, lang)
+	normalizeScalaRecoveredObjectTemplateBodies(root, source, lang)
+	normalizeScalaSplitFunctionDefinitions(root, source, lang)
+	normalizeScalaTopLevelClassFragments(root, source, lang)
+	normalizeScalaCompilationUnitRoot(root, source, lang)
+	normalizeScalaDefinitionFields(root, source, lang)
+	normalizeScalaTemplateBodyFunctionAnnotations(root, source, lang)
+	normalizeScalaImportPathFields(root, lang)
+	normalizeScalaTemplateBodyFunctionEnds(root, source, lang)
+	normalizeScalaTrailingCommentOwnership(root, source, lang)
+	normalizeScalaFunctionModifierFields(root, lang)
+	normalizeScalaInterpolatedStringTail(root, source, lang)
+	normalizeScalaCaseClauseEnds(root, source, lang)
+	normalizeRootEOFNewlineSpan(root, source, lang)
+}
+
 func normalizeScalaCompilationUnitRoot(root *Node, source []byte, lang *Language) {
 	if root == nil || lang == nil || lang.Name != "scala" || root.Type(lang) != "ERROR" {
 		return

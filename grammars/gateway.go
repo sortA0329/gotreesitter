@@ -36,6 +36,11 @@ type ParsePolicy struct {
 	// SkipDirs lists directory base names to skip entirely during the walk.
 	SkipDirs []string
 
+	// ShouldSkipDir, if non-nil, is called for each directory before descent.
+	// The root directory is never skipped. Return true to skip the directory
+	// and all descendants.
+	ShouldSkipDir func(path string) bool
+
 	// SkipExtensions lists file suffixes (e.g., ".min.js") to skip.
 	SkipExtensions []string
 
@@ -168,7 +173,7 @@ func DefaultPolicy() ParsePolicy {
 // walk is fully complete.
 //
 // Pipeline:
-//  1. Walk with filepath.WalkDir, skipping SkipDirs and SkipExtensions.
+//  1. Walk with filepath.WalkDir, skipping SkipDirs, ShouldSkipDir, and SkipExtensions.
 //  2. Detect language via [DetectLanguage]; skip unknown files.
 //  3. Skip binary files (NUL byte in first 8 KB).
 //  4. Call ShouldParse hook if set; skip if it returns false.
@@ -244,6 +249,9 @@ func WalkAndParse(ctx context.Context, root string, policy ParsePolicy) (<-chan 
 			if d.IsDir() {
 				base := filepath.Base(p)
 				if _, skip := skipDirSet[base]; skip && p != root {
+					return filepath.SkipDir
+				}
+				if policy.ShouldSkipDir != nil && p != root && policy.ShouldSkipDir(p) {
 					return filepath.SkipDir
 				}
 				return nil

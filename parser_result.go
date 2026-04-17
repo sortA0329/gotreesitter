@@ -540,51 +540,21 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, p *Parser) {
 	case "bash":
 		normalizeBashProgramVariableAssignments(root, lang)
 	case "c":
-		normalizeCTranslationUnitRoot(root, lang)
-		normalizeCPreprocessorDirectiveShapes(root, source, lang)
-		normalizeCDeclarationBounds(root, source, lang)
-		normalizeCBuiltinPrimitiveTypeIdentifiers(root, source, lang)
-		normalizeCVariadicParameterEllipsis(root, lang)
-		normalizeCSizeofUnknownTypeIdentifiers(root, source, lang)
-		normalizeCCastUnknownTypeIdentifiers(root, source, lang)
-		normalizeCBareTypeIdentifierExpressionStatements(root, source, lang)
-		normalizeCPreprocNewlineSpans(root, source, lang)
-		normalizeCPointerAssignmentPrecedence(root, lang)
+		normalizeCCompatibility(root, source, lang)
 	case "c_sharp":
-		normalizeCSharpRecoveredTopLevelChunks(root, source, p)
-		normalizeCSharpRecoveredNamespaces(root, source, lang)
-		normalizeCSharpRecoveredTypeDeclarations(root, source, lang)
-		normalizeCollapsedNamedLeafChildren(root, lang, "implicit_type", "var")
-		normalizeCSharpUnicodeIdentifierSpans(root, source, lang)
-		normalizeCSharpQueryExpressions(root, source, p)
-		normalizeCSharpInvocationStatements(root, source, lang)
-		normalizeCSharpDereferenceLogicalAndCasts(root, source, lang)
-		normalizeCSharpConditionalIsPatternExpressions(root, lang)
-		normalizeCSharpTypeConstraintKeywords(root, lang)
-		normalizeCSharpSwitchTupleCasePatterns(root, lang)
+		normalizeCSharpCompatibility(root, source, p, lang)
 	case "caddy":
 		normalizeTopLevelTrailingLineBreakSpan(root, source, lang)
 	case "cobol", "COBOL":
-		normalizeCobolLeadingAreaStart(root, source, lang)
-		normalizeCobolTopLevelDefinitionEnd(root, source, lang)
-		normalizeCobolDivisionSiblingEnds(root, source, lang)
-		normalizeCobolPeriodChildren(root, source, lang)
+		normalizeCobolCompatibility(root, source, lang)
 	case "comment":
 		normalizeCommentTrailingExtraTrivia(root, source, lang)
 	case "cooklang":
 		normalizeCooklangTrailingStepTail(root, source, lang)
 	case "d":
-		normalizeDSourceFileLeadingTrivia(root, source, lang)
-		normalizeDModuleDefinitionBounds(root, lang)
-		normalizeDCallExpressionTemplateTypes(root, lang)
-		normalizeDCallExpressionPropertyTypes(root, lang)
-		normalizeDCallExpressionSimpleTypeCallees(root, lang)
-		normalizeDVariableTypeQualifiers(root, lang)
-		normalizeDVariableStorageClassWrappers(root, lang)
+		normalizeDCompatibility(root, source, lang)
 	case "dart":
-		normalizeDartConstructorSignatureKinds(root, source, lang)
-		normalizeDartSingleTypeArgumentFreeCalls(root, lang)
-		normalizeDartSwitchExpressionBodyFields(root, lang)
+		normalizeDartCompatibility(root, source, lang)
 	case "elixir":
 		normalizeElixirNestedCallTargetFields(root, lang)
 	case "erlang":
@@ -593,32 +563,17 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, p *Parser) {
 		normalizeFortranStatementLineBreaks(root, source, lang)
 		normalizeTopLevelTrailingLineBreakSpan(root, source, lang)
 	case "go":
-		normalizeGoSourceFileRoot(root, source, p)
-		normalizeGoCompatibility(root, source, lang)
-		normalizeRootEOFNewlineSpan(root, source, lang)
+		normalizeGoReturnedTreeCompatibility(root, source, p, lang)
 	case "haskell":
-		normalizeHaskellImportsSpan(root, source, lang)
-		normalizeHaskellZeroWidthTokens(root, lang)
-		normalizeHaskellRootImportField(root, lang)
-		normalizeHaskellDeclarationsSpan(root, source, lang)
-		normalizeHaskellLocalBindsStarts(root, source, lang)
-		normalizeHaskellQuasiquoteStarts(root, source, lang)
+		normalizeHaskellCompatibility(root, source, lang)
 	case "hcl":
 		normalizeHCLConfigFileRoot(root, lang)
 	case "html":
-		normalizeHTMLRecoveredNestedCustomTags(root, lang)
-		normalizeHTMLRecoveredNestedCustomTagRanges(root, source, lang)
+		normalizeHTMLCompatibility(root, source, lang)
 	case "ini":
 		normalizeIniSectionStarts(root, lang)
 	case "javascript":
-		normalizeJavaScriptProgramStart(root, lang)
-		normalizeJavaScriptTypeScriptOptionalChainLeaves(root, lang)
-		normalizeJavaScriptTypeScriptCallPrecedence(root, lang)
-		normalizeJavaScriptTypeScriptUnaryPrecedence(root, lang)
-		normalizeJavaScriptTypeScriptBinaryPrecedence(root, lang)
-		normalizeJavaScriptTrailingContinueComments(root, source, lang)
-		normalizeJavaScriptTopLevelExpressionStatementBounds(root, lang)
-		normalizeJavaScriptTopLevelObjectLiterals(root, lang)
+		normalizeJavaScriptCompatibility(root, source, lang)
 	case "lua":
 		normalizeLuaChunkLocalDeclarationFields(root, source, lang)
 	case "make":
@@ -631,64 +586,30 @@ func normalizeKnownSpanAttribution(root *Node, source []byte, p *Parser) {
 		normalizePascalTopLevelProgramEnd(root, source, lang)
 		normalizePascalTrailingExtraTrivia(root, source, lang)
 	case "perl":
-		normalizePerlJoinAssignmentLists(root, source, lang)
-		normalizePerlPushExpressionLists(root, source, lang)
-		normalizePerlReturnExpressionLists(root, lang)
+		normalizePerlCompatibility(root, source, lang)
 	case "php":
-		normalizePHPSingletonTypeWrappers(root, lang)
-		normalizePHPStaticFunctionFragments(root, source, lang)
+		normalizePHPCompatibility(root, source, lang)
 	case "powershell":
 		normalizePowerShellProgramShape(root, source, lang)
 	case "pug":
 		normalizeTopLevelTrailingLineBreakSpan(root, source, lang)
 	case "python":
-		normalizePythonTrailingSelfCalls(root, source, lang)
-		normalizePythonPrintStatements(root, source, lang)
-		normalizePythonInterpolationPatterns(root, lang)
-		normalizeCollapsedNamedLeafChildren(root, lang, "pass_statement", "pass")
-		normalizePythonStringContinuationEscapes(root, source, lang)
+		normalizePythonCompatibility(root, source, lang)
 	case "rst":
 		normalizeRSTTopLevelSectionEnd(root, source, lang)
 	case "rust":
-		normalizeRustRecoveredPatternStatementsRoot(root, source, p)
-		normalizeRustRecoveredFunctionItems(root, source, lang)
-		normalizeRustRecoveredStructExpressionRoot(root, source, lang)
-		normalizeRustDotRangeExpressions(root, source, lang)
-		normalizeRustTokenBindingPatterns(root, source, lang)
-		normalizeRustRecoveredTokenTrees(root, source, lang)
-		normalizeRustSourceFileRoot(root, source, lang)
+		normalizeRustCompatibility(root, source, p, lang)
 	case "ruby":
 		normalizeRubyThenStarts(root, lang)
 		normalizeRubyTopLevelModuleBounds(root, source, lang)
 	case "scala":
-		normalizeScalaObjectTemplateBodyFragments(root, source, lang)
-		normalizeScalaTemplateBodyObjectFragments(root, source, lang)
-		normalizeScalaTemplateBodyRecoveredMembers(root, source, lang)
-		normalizeScalaRecoveredObjectTemplateBodies(root, source, lang)
-		normalizeScalaSplitFunctionDefinitions(root, source, lang)
-		normalizeScalaTopLevelClassFragments(root, source, lang)
-		normalizeScalaCompilationUnitRoot(root, source, lang)
-		normalizeScalaDefinitionFields(root, source, lang)
-		normalizeScalaTemplateBodyFunctionAnnotations(root, source, lang)
-		normalizeScalaImportPathFields(root, lang)
-		normalizeScalaTemplateBodyFunctionEnds(root, source, lang)
-		normalizeScalaTrailingCommentOwnership(root, source, lang)
-		normalizeScalaFunctionModifierFields(root, lang)
-		normalizeScalaInterpolatedStringTail(root, source, lang)
-		normalizeScalaCaseClauseEnds(root, source, lang)
-		normalizeRootEOFNewlineSpan(root, source, lang)
+		normalizeScalaCompatibility(root, source, lang)
 	case "sql":
 		normalizeSQLRecoveredSelectRoot(root, lang)
 	case "svelte":
 		normalizeSvelteTrailingExtraTrivia(root, source, lang)
 	case "tsx", "typescript":
-		normalizeJavaScriptTypeScriptOptionalChainLeaves(root, lang)
-		normalizeJavaScriptTypeScriptCallPrecedence(root, lang)
-		normalizeJavaScriptTypeScriptUnaryPrecedence(root, lang)
-		normalizeJavaScriptTypeScriptBinaryPrecedence(root, lang)
-		normalizeTypeScriptRecoveredNamespaceRoot(root, source, lang)
-		normalizeTypeScriptCompatibility(root, source, lang)
-		normalizeCollapsedNamedLeafChildren(root, lang, "existential_type", "*")
+		normalizeTypeScriptTreeCompatibility(root, source, lang)
 	case "yaml":
 		normalizeYAMLRecoveredRoot(root, source, lang)
 	case "zig":

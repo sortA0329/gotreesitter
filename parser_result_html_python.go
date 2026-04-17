@@ -1,5 +1,18 @@
 package gotreesitter
 
+func normalizeHTMLCompatibility(root *Node, source []byte, lang *Language) {
+	normalizeHTMLRecoveredNestedCustomTags(root, lang)
+	normalizeHTMLRecoveredNestedCustomTagRanges(root, source, lang)
+}
+
+func normalizePythonCompatibility(root *Node, source []byte, lang *Language) {
+	normalizePythonTrailingSelfCalls(root, source, lang)
+	normalizePythonPrintStatements(root, source, lang)
+	normalizePythonInterpolationPatterns(root, lang)
+	normalizeCollapsedNamedLeafChildren(root, lang, "pass_statement", "pass")
+	normalizePythonStringContinuationEscapes(root, source, lang)
+}
+
 func normalizeHTMLRecoveredNestedCustomTags(root *Node, lang *Language) {
 	if root == nil || lang == nil || lang.Name != "html" || root.Type(lang) != "ERROR" || len(root.children) < 5 {
 		return

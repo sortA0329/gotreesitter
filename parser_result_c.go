@@ -2,6 +2,19 @@ package gotreesitter
 
 import "strings"
 
+func normalizeCCompatibility(root *Node, source []byte, lang *Language) {
+	normalizeCTranslationUnitRoot(root, lang)
+	normalizeCPreprocessorDirectiveShapes(root, source, lang)
+	normalizeCDeclarationBounds(root, source, lang)
+	normalizeCBuiltinPrimitiveTypeIdentifiers(root, source, lang)
+	normalizeCVariadicParameterEllipsis(root, lang)
+	normalizeCSizeofUnknownTypeIdentifiers(root, source, lang)
+	normalizeCCastUnknownTypeIdentifiers(root, source, lang)
+	normalizeCBareTypeIdentifierExpressionStatements(root, source, lang)
+	normalizeCPreprocNewlineSpans(root, source, lang)
+	normalizeCPointerAssignmentPrecedence(root, lang)
+}
+
 func normalizeCTranslationUnitRoot(root *Node, lang *Language) {
 	if root == nil || lang == nil || root.Type(lang) != "ERROR" {
 		return

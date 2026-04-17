@@ -2,6 +2,32 @@ package gotreesitter
 
 import "strings"
 
+func normalizeCobolCompatibility(root *Node, source []byte, lang *Language) {
+	normalizeCobolLeadingAreaStart(root, source, lang)
+	normalizeCobolTopLevelDefinitionEnd(root, source, lang)
+	normalizeCobolDivisionSiblingEnds(root, source, lang)
+	normalizeCobolPeriodChildren(root, source, lang)
+}
+
+func normalizeDCompatibility(root *Node, source []byte, lang *Language) {
+	normalizeDSourceFileLeadingTrivia(root, source, lang)
+	normalizeDModuleDefinitionBounds(root, lang)
+	normalizeDCallExpressionTemplateTypes(root, lang)
+	normalizeDCallExpressionPropertyTypes(root, lang)
+	normalizeDCallExpressionSimpleTypeCallees(root, lang)
+	normalizeDVariableTypeQualifiers(root, lang)
+	normalizeDVariableStorageClassWrappers(root, lang)
+}
+
+func normalizeHaskellCompatibility(root *Node, source []byte, lang *Language) {
+	normalizeHaskellImportsSpan(root, source, lang)
+	normalizeHaskellZeroWidthTokens(root, lang)
+	normalizeHaskellRootImportField(root, lang)
+	normalizeHaskellDeclarationsSpan(root, source, lang)
+	normalizeHaskellLocalBindsStarts(root, source, lang)
+	normalizeHaskellQuasiquoteStarts(root, source, lang)
+}
+
 func normalizeCobolLeadingAreaStart(root *Node, source []byte, lang *Language) {
 	if root == nil || lang == nil || (lang.Name != "cobol" && lang.Name != "COBOL") || len(source) == 0 {
 		return

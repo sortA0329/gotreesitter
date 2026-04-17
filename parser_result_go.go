@@ -2,6 +2,12 @@ package gotreesitter
 
 import "bytes"
 
+func normalizeGoReturnedTreeCompatibility(root *Node, source []byte, p *Parser, lang *Language) {
+	normalizeGoSourceFileRoot(root, source, p)
+	normalizeGoCompatibility(root, source, lang)
+	normalizeRootEOFNewlineSpan(root, source, lang)
+}
+
 func normalizeGoSourceFileRoot(root *Node, source []byte, p *Parser) {
 	if root == nil || p == nil || p.language == nil || p.language.Name != "go" || root.Type(p.language) != "ERROR" {
 		return

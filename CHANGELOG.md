@@ -9,6 +9,25 @@ for tags and release notes while still in `0.x`.
 
 - Nothing yet.
 
+## [0.15.0] - 2026-04-17
+
+### Added
+- `ParsePolicy.ShouldSkipDir` lets gateway consumers prune a directory before descending into it. This is intended for large generated/vendor trees where even file discovery and language detection can create avoidable memory pressure.
+
+### Changed
+- Parser-result compatibility normalization now keeps language-specific dispatch sequences in the `parser_result_*.go` files instead of centralizing every per-language call chain in `parser_result.go`.
+- Tier-1 grammar pins and blobs refreshed after the v0.14.0 release line, including Kotlin, Rust, Dart, Elixir, Erlang, OCaml, PHP, Ruby, and Swift follow-ups while keeping the Scala lock pin on the known-good ref.
+- Grammargen real-corpus parity floor data now includes four additional grammars from the current focus board.
+
+### Fixed
+- `ImportGrammarJSON` now drops reserved-word sets when the imported grammar does not expose a `RESERVED` wrapper, avoiding stale reserved metadata on grammars that should not carry it.
+- Rust scanner support now ports `string_close` external-token handling for the refreshed lock pin.
+- Scala LexModes fixtures now compare tail-relative layout after reverting the problematic lock pin.
+
+### Performance
+- GLR node-equivalence cache now fits more comfortably in L2 by reducing the cache size and checking the epoch before touching the rest of a cache slot.
+- `Tree.Edit` stops scanning already-sorted right-side siblings when an edit has no tail shift to apply.
+
 ## [0.14.0] - 2026-04-17
 
 ### Changed
@@ -318,7 +337,12 @@ Warm-reuse throughput ~10 % higher. 206-grammar parity green under `GTS_PARITY_M
 - Initial standalone pure-Go runtime module.
 - External scanner VM foundation and base parser/lexer/tree infrastructure.
 
-[Unreleased]: https://github.com/odvcencio/gotreesitter/compare/v0.12.2...HEAD
+[Unreleased]: https://github.com/odvcencio/gotreesitter/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/odvcencio/gotreesitter/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/odvcencio/gotreesitter/compare/v0.13.4...v0.14.0
+[0.13.4]: https://github.com/odvcencio/gotreesitter/compare/v0.13.3...v0.13.4
+[0.13.3]: https://github.com/odvcencio/gotreesitter/compare/v0.13.0...v0.13.3
+[0.13.0]: https://github.com/odvcencio/gotreesitter/compare/v0.12.2...v0.13.0
 [0.12.2]: https://github.com/odvcencio/gotreesitter/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/odvcencio/gotreesitter/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/odvcencio/gotreesitter/compare/v0.11.2...v0.12.0

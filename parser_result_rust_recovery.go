@@ -1,5 +1,15 @@
 package gotreesitter
 
+func normalizeRustCompatibility(root *Node, source []byte, p *Parser, lang *Language) {
+	normalizeRustRecoveredPatternStatementsRoot(root, source, p)
+	normalizeRustRecoveredFunctionItems(root, source, lang)
+	normalizeRustRecoveredStructExpressionRoot(root, source, lang)
+	normalizeRustDotRangeExpressions(root, source, lang)
+	normalizeRustTokenBindingPatterns(root, source, lang)
+	normalizeRustRecoveredTokenTrees(root, source, lang)
+	normalizeRustSourceFileRoot(root, source, lang)
+}
+
 func normalizeRustTokenBindingPatterns(root *Node, source []byte, lang *Language) {
 	if root == nil || lang == nil || lang.Name != "rust" || len(source) == 0 {
 		return

@@ -249,6 +249,52 @@ func TestWalkAndParseSkipDirs(t *testing.T) {
 	}
 }
 
+func TestWalkAndParseShouldSkipDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "root.go"), "package main\n")
+
+	skipDir := filepath.Join(dir, "skip", "nested")
+	if err := os.MkdirAll(skipDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(skipDir, "ignored.go"), "package ignored\n")
+
+	keepDir := filepath.Join(dir, "keep")
+	if err := os.MkdirAll(keepDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(keepDir, "kept.go"), "package keep\n")
+
+	policy := DefaultPolicy()
+	policy.MaxConcurrent = 1
+	policy.ChannelBuffer = 2
+	policy.ShouldSkipDir = func(path string) bool {
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return false
+		}
+		return filepath.ToSlash(rel) == "skip"
+	}
+	ch, statsFn := WalkAndParse(context.Background(), dir, policy)
+
+	var bases []string
+	for pf := range ch {
+		bases = append(bases, filepath.Base(pf.Path))
+		pf.Close()
+	}
+	stats := statsFn()
+
+	if stats.FilesFound != 2 {
+		t.Fatalf("FilesFound = %d, want 2; files: %v", stats.FilesFound, bases)
+	}
+	if !containsString(bases, "root.go") || !containsString(bases, "kept.go") {
+		t.Fatalf("expected root.go and kept.go, got %v", bases)
+	}
+	if containsString(bases, "ignored.go") {
+		t.Fatalf("expected ignored.go to be pruned, got %v", bases)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // SkipExtensions
 // ---------------------------------------------------------------------------
@@ -827,4 +873,13 @@ func writeFile(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
