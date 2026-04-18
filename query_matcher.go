@@ -10,10 +10,18 @@ type queryChildStepInfo struct {
 // matchSteps matches a contiguous slice of steps starting at stepIdx
 // against the given node at the expected depth.
 func (q *Query) matchSteps(steps []QueryStep, stepIdx int, node *Node, lang *Language, source []byte, captures *[]QueryCapture) bool {
-	return q.matchStepsWithParent(steps, stepIdx, node, nil, -1, lang, source, captures)
+	return q.matchStepsWithPredicates(steps, stepIdx, node, lang, source, nil, captures)
 }
 
 func (q *Query) matchStepsWithParent(steps []QueryStep, stepIdx int, node *Node, parent *Node, childIdx int, lang *Language, source []byte, captures *[]QueryCapture) bool {
+	return q.matchStepsWithParentPredicates(steps, stepIdx, node, parent, childIdx, lang, source, nil, captures)
+}
+
+func (q *Query) matchStepsWithPredicates(steps []QueryStep, stepIdx int, node *Node, lang *Language, source []byte, predicates []QueryPredicate, captures *[]QueryCapture) bool {
+	return q.matchStepsWithParentPredicates(steps, stepIdx, node, nil, -1, lang, source, predicates, captures)
+}
+
+func (q *Query) matchStepsWithParentPredicates(steps []QueryStep, stepIdx int, node *Node, parent *Node, childIdx int, lang *Language, source []byte, predicates []QueryPredicate, captures *[]QueryCapture) bool {
 	if stepIdx >= len(steps) {
 		return false
 	}
@@ -21,7 +29,7 @@ func (q *Query) matchStepsWithParent(steps []QueryStep, stepIdx int, node *Node,
 	step := &steps[stepIdx]
 
 	if len(step.alternatives) > 0 {
-		if !q.matchAlternationStep(step, node, parent, childIdx, lang, source, captures) {
+		if !q.matchAlternationStep(step, node, parent, childIdx, lang, source, predicates, captures) {
 			return false
 		}
 	} else {
@@ -30,6 +38,9 @@ func (q *Query) matchStepsWithParent(steps []QueryStep, stepIdx int, node *Node,
 			return false
 		}
 		q.appendCaptureIDs(step.captureIDs, step.captureID, node, captures)
+		if !q.predicatesStillViable(predicates, *captures, source) {
+			return false
+		}
 	}
 
 	// Find child steps (steps at depth = step.depth + 1) that are direct
@@ -63,7 +74,7 @@ func (q *Query) matchStepsWithParent(steps []QueryStep, stepIdx int, node *Node,
 			})
 		}
 	}
-	return q.matchChildSteps(node, steps, childSteps, lang, source, captures)
+	return q.matchChildSteps(node, steps, childSteps, lang, source, predicates, captures)
 }
 
 func (q *Query) appendCaptureIDs(ids []int, legacyID int, node *Node, captures *[]QueryCapture) {
@@ -172,6 +183,7 @@ func (q *Query) matchChildSteps(
 	childSteps []queryChildStepInfo,
 	lang *Language,
 	source []byte,
+	predicates []QueryPredicate,
 	captures *[]QueryCapture,
 ) bool {
 	children := parent.Children()
@@ -196,7 +208,7 @@ func (q *Query) matchChildSteps(
 	return q.matchChildStepsRecursive(
 		parent, children, namedPosByIndex, parentLastNamedPos,
 		steps, childSteps, 0, 0, false, -1,
-		lang, source, captures,
+		lang, source, predicates, captures,
 	)
 }
 
@@ -213,6 +225,7 @@ func (q *Query) matchChildStepsRecursive(
 	prevLastNamedPos int,
 	lang *Language,
 	source []byte,
+	predicates []QueryPredicate,
 	captures *[]QueryCapture,
 ) bool {
 	if childPos >= len(childSteps) {
@@ -266,18 +279,17 @@ func (q *Query) matchChildStepsRecursive(
 		return false
 	}
 
-	// When this is the final child step and it requires exactly one match,
-	// accumulate captures from all matching sibling candidates. This matches
-	// tree-sitter query behavior for patterns like:
-	//   (flow_mapping (_ key: (...) @property))
-	// where each sibling pair should contribute captures.
-	if childPos == len(childSteps)-1 && minCount == 1 && maxCount == 1 && !step.anchorBefore && !step.anchorAfter {
+	// Final child steps without match predicates intentionally aggregate
+	// structurally matching siblings into one match; predicate-bearing patterns
+	// need normal backtracking so invalid candidates do not leak captures or
+	// block later ones.
+	if !predicatesCanRejectMatch(predicates) && childPos == len(childSteps)-1 && minCount == 1 && maxCount == 1 && !step.anchorBefore && !step.anchorAfter {
 		any := false
 		checkpoint := len(*captures)
 		for _, childIdx := range candidateIndices {
 			child := children[childIdx]
 			childCheckpoint := len(*captures)
-			if !q.matchStepWithRollbackAtParent(steps, cs.stepIdx, child, parent, childIdx, lang, source, captures) {
+			if !q.matchStepWithRollbackAtParentPredicates(steps, cs.stepIdx, child, parent, childIdx, lang, source, nil, captures) {
 				*captures = (*captures)[:childCheckpoint]
 				continue
 			}
@@ -340,7 +352,7 @@ func (q *Query) matchChildStepsRecursive(
 				return q.matchChildStepsRecursive(
 					parent, children, namedPosByIndex, parentLastNamedPos,
 					steps, childSteps, childPos+1, nextIdx, nextPrevHasNamed, nextPrevLastNamedPos,
-					lang, source, captures,
+					lang, source, predicates, captures,
 				)
 			}
 
@@ -351,8 +363,7 @@ func (q *Query) matchChildStepsRecursive(
 				child := children[childIdx]
 
 				childCheckpoint := len(*captures)
-				if !q.matchStepWithRollbackAtParent(steps, cs.stepIdx, child, parent, childIdx, lang, source, captures) {
-					*captures = (*captures)[:childCheckpoint]
+				if !q.matchStepWithRollbackAtParentPredicates(steps, cs.stepIdx, child, parent, childIdx, lang, source, predicates, captures) {
 					continue
 				}
 
@@ -395,7 +406,7 @@ func (q *Query) matchChildStepsRecursive(
 	return false
 }
 
-func (q *Query) matchAlternationStep(step *QueryStep, node *Node, parent *Node, childIdx int, lang *Language, source []byte, captures *[]QueryCapture) bool {
+func (q *Query) matchAlternationStep(step *QueryStep, node *Node, parent *Node, childIdx int, lang *Language, source []byte, predicates []QueryPredicate, captures *[]QueryCapture) bool {
 	hasStepCaptures := len(step.captureIDs) > 0 || step.captureID >= 0
 	nodeSymbol := lang.PublicSymbol(node.Symbol())
 	nodeNamed := node.IsNamed()
@@ -449,7 +460,7 @@ func (q *Query) matchAlternationStep(step *QueryStep, node *Node, parent *Node, 
 				continue
 			}
 
-			if q.matchAlternationBranch(step, alt, node, lang, source, captures, hasStepCaptures) {
+			if q.matchAlternationBranch(step, alt, node, lang, source, predicates, captures, hasStepCaptures) {
 				return true
 			}
 
@@ -472,7 +483,7 @@ func (q *Query) matchAlternationStep(step *QueryStep, node *Node, parent *Node, 
 		if !q.alternativeFieldMatches(&alt, node, parent, childIdx, lang) {
 			continue
 		}
-		if q.matchAlternationBranch(step, &alt, node, lang, source, captures, hasStepCaptures) {
+		if q.matchAlternationBranch(step, &alt, node, lang, source, predicates, captures, hasStepCaptures) {
 			return true
 		}
 	}
@@ -518,6 +529,7 @@ func (q *Query) matchAlternationBranch(
 	node *Node,
 	lang *Language,
 	source []byte,
+	predicates []QueryPredicate,
 	captures *[]QueryCapture,
 	hasStepCaptures bool,
 ) bool {
@@ -525,15 +537,19 @@ func (q *Query) matchAlternationBranch(
 		// Fast path: no alternation-level captures and no branch predicates.
 		// matchStepWithRollback already protects captures from failed branches.
 		if !hasStepCaptures && len(alt.predicates) == 0 {
-			return q.matchStepWithRollback(alt.steps, 0, node, lang, source, captures)
+			return q.matchStepWithRollbackPredicates(alt.steps, 0, node, lang, source, predicates, captures)
 		}
 
 		checkpoint := len(*captures)
 		if hasStepCaptures {
 			// Captures on the alternation itself apply regardless of chosen branch.
 			q.appendCaptureIDs(step.captureIDs, step.captureID, node, captures)
+			if !q.predicatesStillViable(predicates, *captures, source) {
+				*captures = (*captures)[:checkpoint]
+				return false
+			}
 		}
-		if !q.matchStepWithRollback(alt.steps, 0, node, lang, source, captures) {
+		if !q.matchStepWithRollbackPredicates(alt.steps, 0, node, lang, source, predicates, captures) {
 			*captures = (*captures)[:checkpoint]
 			return false
 		}
@@ -548,10 +564,19 @@ func (q *Query) matchAlternationBranch(
 	if !hasStepCaptures && len(alt.captureIDs) == 0 && alt.captureID < 0 {
 		return true
 	}
+	checkpoint := len(*captures)
 	if hasStepCaptures {
 		q.appendCaptureIDs(step.captureIDs, step.captureID, node, captures)
+		if !q.predicatesStillViable(predicates, *captures, source) {
+			*captures = (*captures)[:checkpoint]
+			return false
+		}
 	}
 	q.appendCaptureIDs(alt.captureIDs, alt.captureID, node, captures)
+	if !q.predicatesStillViable(predicates, *captures, source) {
+		*captures = (*captures)[:checkpoint]
+		return false
+	}
 	return true
 }
 

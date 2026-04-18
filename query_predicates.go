@@ -284,6 +284,108 @@ func (q *Query) matchesPredicates(predicates []QueryPredicate, captures []QueryC
 	return true
 }
 
+func (q *Query) predicatesStillViable(predicates []QueryPredicate, captures []QueryCapture, source []byte) bool {
+	if len(predicates) == 0 {
+		return true
+	}
+
+	for _, pred := range predicates {
+		switch pred.kind {
+		case predicateEq, predicateNotEq:
+			left, ok := captureText(pred.leftCapture, captures, source)
+			if !ok {
+				continue
+			}
+			right := pred.literal
+			if pred.rightCapture != "" {
+				var okRight bool
+				right, okRight = captureText(pred.rightCapture, captures, source)
+				if !okRight {
+					continue
+				}
+			}
+			if pred.kind == predicateEq && left != right {
+				return false
+			}
+			if pred.kind == predicateNotEq && left == right {
+				return false
+			}
+
+		case predicateMatch, predicateLuaMatch:
+			left, ok := captureText(pred.leftCapture, captures, source)
+			if !ok {
+				continue
+			}
+			if pred.regex == nil || !pred.regex.MatchString(left) {
+				return false
+			}
+
+		case predicateNotMatch:
+			left, ok := captureText(pred.leftCapture, captures, source)
+			if !ok {
+				continue
+			}
+			if pred.regex != nil && pred.regex.MatchString(left) {
+				return false
+			}
+
+		case predicateAnyOf:
+			left, ok := captureText(pred.leftCapture, captures, source)
+			if !ok {
+				continue
+			}
+			matched := false
+			for _, v := range pred.values {
+				if left == v {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return false
+			}
+
+		case predicateNotAnyOf:
+			left, ok := captureText(pred.leftCapture, captures, source)
+			if !ok {
+				continue
+			}
+			for _, v := range pred.values {
+				if left == v {
+					return false
+				}
+			}
+
+		case predicateIsExported:
+			text, ok := captureText(pred.leftCapture, captures, source)
+			if !ok {
+				continue
+			}
+			if text == "" {
+				return false
+			}
+			r, _ := utf8.DecodeRuneInString(text)
+			if r == utf8.RuneError || !unicode.IsUpper(r) {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+func predicatesCanRejectMatch(predicates []QueryPredicate) bool {
+	for _, pred := range predicates {
+		switch pred.kind {
+		case predicateSet, predicateOffset, predicateSelectAdjacent, predicateStrip:
+			continue
+		default:
+			return true
+		}
+	}
+	return false
+}
+
 // applyDirectives applies capture-modifying directives (#select-adjacent!,
 // #strip!) to the captures list after a match has been accepted.
 func (q *Query) applyDirectives(predicates []QueryPredicate, captures []QueryCapture, source []byte) []QueryCapture {

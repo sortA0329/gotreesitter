@@ -739,7 +739,7 @@ func (q *Query) matchPattern(pat *Pattern, node *Node, lang *Language, source []
 	}
 
 	var captures []QueryCapture
-	ok := q.matchSteps(pat.steps, 0, node, lang, source, &captures)
+	ok := q.matchStepsWithPredicates(pat.steps, 0, node, lang, source, pat.predicates, &captures)
 	if !ok {
 		return nil, false
 	}
@@ -756,7 +756,7 @@ func (q *Query) matchPatternIntoBuffer(pat *Pattern, node *Node, lang *Language,
 	}
 
 	start := len(captures)
-	if !q.matchSteps(pat.steps, 0, node, lang, source, &captures) {
+	if !q.matchStepsWithPredicates(pat.steps, 0, node, lang, source, pat.predicates, &captures) {
 		return captures[:start], false
 	}
 
@@ -770,12 +770,20 @@ func (q *Query) matchPatternIntoBuffer(pat *Pattern, node *Node, lang *Language,
 }
 
 func (q *Query) matchStepWithRollback(steps []QueryStep, stepIdx int, node *Node, lang *Language, source []byte, captures *[]QueryCapture) bool {
-	return q.matchStepWithRollbackAtParent(steps, stepIdx, node, nil, -1, lang, source, captures)
+	return q.matchStepWithRollbackPredicates(steps, stepIdx, node, lang, source, nil, captures)
+}
+
+func (q *Query) matchStepWithRollbackPredicates(steps []QueryStep, stepIdx int, node *Node, lang *Language, source []byte, predicates []QueryPredicate, captures *[]QueryCapture) bool {
+	return q.matchStepWithRollbackAtParentPredicates(steps, stepIdx, node, nil, -1, lang, source, predicates, captures)
 }
 
 func (q *Query) matchStepWithRollbackAtParent(steps []QueryStep, stepIdx int, node *Node, parent *Node, childIdx int, lang *Language, source []byte, captures *[]QueryCapture) bool {
+	return q.matchStepWithRollbackAtParentPredicates(steps, stepIdx, node, parent, childIdx, lang, source, nil, captures)
+}
+
+func (q *Query) matchStepWithRollbackAtParentPredicates(steps []QueryStep, stepIdx int, node *Node, parent *Node, childIdx int, lang *Language, source []byte, predicates []QueryPredicate, captures *[]QueryCapture) bool {
 	checkpoint := len(*captures)
-	if q.matchStepsWithParent(steps, stepIdx, node, parent, childIdx, lang, source, captures) {
+	if q.matchStepsWithParentPredicates(steps, stepIdx, node, parent, childIdx, lang, source, predicates, captures) {
 		return true
 	}
 	*captures = (*captures)[:checkpoint]
