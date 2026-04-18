@@ -9,6 +9,16 @@ for tags and release notes while still in `0.x`.
 
 - Nothing yet.
 
+## [0.15.1] - 2026-04-18
+
+### Fixed
+- Query matching now backtracks when structurally valid child candidates fail predicates, fixing Starlark nested-dictionary predicate cases.
+- Full arena reset now clears full node backing arrays so stale node pointers cannot keep released tree memory live after GC.
+- Retry parsing now releases the original tree when a retry result wins, returning the losing arena promptly instead of waiting for GC/finalization.
+
+### Performance
+- The GLR node-equivalence cache hardening is now on the main release line, including the smaller L2-friendly cache and depth-key guard.
+
 ## [0.15.0] - 2026-04-17
 
 ### Added
@@ -337,7 +347,8 @@ Warm-reuse throughput ~10 % higher. 206-grammar parity green under `GTS_PARITY_M
 - Initial standalone pure-Go runtime module.
 - External scanner VM foundation and base parser/lexer/tree infrastructure.
 
-[Unreleased]: https://github.com/odvcencio/gotreesitter/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/odvcencio/gotreesitter/compare/v0.15.1...HEAD
+[0.15.1]: https://github.com/odvcencio/gotreesitter/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/odvcencio/gotreesitter/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/odvcencio/gotreesitter/compare/v0.13.4...v0.14.0
 [0.13.4]: https://github.com/odvcencio/gotreesitter/compare/v0.13.3...v0.13.4
