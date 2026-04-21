@@ -11,6 +11,7 @@ scannertest
 ts2go
 tsquery
 parity_report
+benchgate
 
 # Logs
 *.log
@@ -42,3 +43,9 @@ Thumbs.db
 
 # Worktrees
 .worktrees/
+
+# Private working notes
+.claude/
+docs/blog-outlines/
+docs/plans/
+docs/superpowers/
