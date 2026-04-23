@@ -47,20 +47,40 @@ func parseMemoryBudget(sourceLen int) int64 {
 }
 
 func parseFullArenaNodeCapacity(sourceLen, hint int) int {
-	base := nodeCapacityForClass(arenaClassFull)
-	if hint > 0 {
-		if hint < base {
-			return base
-		}
-		limit := parseNodeLimit(sourceLen)
-		if sourceLen <= 0 {
-			return max(base, hint)
-		}
-		if hint > limit {
-			return max(base, limit)
-		}
-		return hint
+	target := parseFullArenaInitialNodeCapacity(sourceLen)
+	if hint <= 0 || hint < target {
+		return target
 	}
+	limit := parseFullArenaHintLimit(sourceLen)
+	if hint > limit {
+		return max(target, limit)
+	}
+	return max(target, hint)
+}
+
+func parseFullArenaHintLimit(sourceLen int) int {
+	base := nodeCapacityForClass(arenaClassFull)
+	if sourceLen <= 0 {
+		return base
+	}
+	// Hints are learned from previous parses on the same Parser. In a ParserPool,
+	// a parser that just handled a large file can later be checked out for a much
+	// smaller file. Cap the reusable hint by the current source size so normal
+	// concurrent full parses do not inherit a stale large-file preallocation.
+	// sourceLen (bytes) is used directly as a loose upper bound on node count —
+	// grammars produce well under 1 node per byte, so this is a conservative
+	// ceiling, intentionally roomier than parseFullArenaInitialNodeCapacity
+	// (sourceLen/4) so useful same-size hints fall between initial and limit.
+	limit := sourceLen
+	retainedFullNodes := nodeCapacityForBytes(maxRetainedFullNodeBytes)
+	if limit > retainedFullNodes {
+		limit = retainedFullNodes
+	}
+	return max(base, limit)
+}
+
+func parseFullArenaInitialNodeCapacity(sourceLen int) int {
+	base := nodeCapacityForClass(arenaClassFull)
 	if sourceLen <= 0 {
 		return base
 	}
