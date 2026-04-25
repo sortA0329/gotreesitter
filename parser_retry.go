@@ -296,6 +296,23 @@ func fullParseInitialMaxStacks(lang *Language, conflictWidth int) int {
 	return initialMaxStacks
 }
 
+func effectiveParseMergePerKeyCap(lang *Language, mergePerKeyCap int, incremental bool) int {
+	if lang == nil || incremental {
+		return mergePerKeyCap
+	}
+	switch lang.Name {
+	case "javascript", "typescript":
+		// Plain JS/TS can develop many near-equivalent GLR survivors on large
+		// runtime bundles. Keeping more than four alternatives per merge key
+		// causes merge-equivalence checks to dominate without improving the
+		// accepted tree; retry widening should not undo this language cap.
+		if mergePerKeyCap > 4 {
+			return 4
+		}
+	}
+	return mergePerKeyCap
+}
+
 func fullParseUsesDeterministicExternalConflicts(lang *Language) bool {
 	return lang != nil &&
 		lang.ExternalScanner != nil &&
