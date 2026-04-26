@@ -7,12 +7,28 @@ for tags and release notes while still in `0.x`.
 
 ## [Unreleased]
 
+- Nothing yet.
+
+## [0.15.3] - 2026-04-26
+
+Parser stability and harness release.
+
 ### Added
 - C/C++ lexer bridge now accepts `#embed` directive lines and
   `__has_embed(...)` conditional feature-test forms (including parameter
   variants) without parse errors.
+- Scoped Canopy harness runner under `cgo_harness/docker/`. The wrapper mounts
+  the host Canopy binary into the Docker harness, applies memory/CPU/PID caps,
+  uses a host-side timeout watchdog, and scopes analysis to one package with
+  generated blobs/worktrees excluded by default.
 
 ### Changed
+- `ts2go` batch execution is parallelized, reducing generated-grammar
+  conversion wall time on multi-core machines.
+- External scanner adaptation now tolerates source/target external-symbol count
+  mismatches. `AdaptExternalScannerByExternalOrder` can match shared symbols by
+  name, leave unpaired target symbols disabled, and size the source-valid bitmap
+  to the source scanner rather than assuming equal external lists.
 - Moved cgo harness sample/profile fixtures under `testdata` directories and
   updated the harness docs and scripts to use the new paths.
 - GLR stack culling now shares the keyed retention path across full and
@@ -36,6 +52,19 @@ for tags and release notes while still in `0.x`.
   removed the print-only disassembly lexer probe from the normal test suite.
 - Removed the duplicate legacy GLR stack-retention selector from parser
   internals.
+
+### Fixed
+- Re-landed the arena-retention and repo-cleanup fixes from the recovered
+  main-line commits after the accidental reset.
+
+### Performance
+- JavaScript and TypeScript full parses cap merge survivors per key at 4. Large
+  JS bundles can otherwise keep too many near-equivalent GLR branches alive and
+  spend most parse time in merge-equivalence checks. Incremental parsing and TSX
+  keep their existing budgets.
+- Markdown and markdown_inline full parses use tighter initial GLR stacks and a
+  higher markdown-specific node budget. Dense inline-heavy markdown now prunes
+  early without forcing repeated node-limit retries on normal documents.
 
 ## [0.15.2] - 2026-04-21
 
@@ -390,7 +419,9 @@ Warm-reuse throughput ~10 % higher. 206-grammar parity green under `GTS_PARITY_M
 - Initial standalone pure-Go runtime module.
 - External scanner VM foundation and base parser/lexer/tree infrastructure.
 
-[Unreleased]: https://github.com/odvcencio/gotreesitter/compare/v0.15.1...HEAD
+[Unreleased]: https://github.com/odvcencio/gotreesitter/compare/v0.15.3...HEAD
+[0.15.3]: https://github.com/odvcencio/gotreesitter/compare/v0.15.2...v0.15.3
+[0.15.2]: https://github.com/odvcencio/gotreesitter/compare/v0.15.1...v0.15.2
 [0.15.1]: https://github.com/odvcencio/gotreesitter/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/odvcencio/gotreesitter/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/odvcencio/gotreesitter/compare/v0.13.4...v0.14.0
