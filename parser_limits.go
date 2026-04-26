@@ -14,14 +14,31 @@ func parseStackDepth(sourceLen int) int {
 // parseNodeLimit returns the maximum number of Node allocations allowed.
 // This is the hard ceiling that prevents OOM regardless of iteration count.
 func parseNodeLimit(sourceLen int) int {
-	// Keep the default budget high enough for large full-parse corpora so
-	// correctness gates can run without relying on external scale overrides.
-	// The 300k floor avoids premature truncation on small/medium inputs
-	// during short-lived ambiguity spikes and malformed-input recovery.
-	// The sourceLen*52 budget avoids first-pass node-limit retries on the
-	// default synthetic Go full-parse workload while staying materially below
-	// the diagnostic 2x override used for deeper corpus investigations.
-	limit := max(300_000, sourceLen*52)
+	return parseNodeLimitForLanguage(sourceLen, nil)
+}
+
+// parseNodeLimitForLanguage is parseNodeLimit with a per-language budget tuned
+// for grammars that allocate unusually many nodes per input byte. The default
+// sourceLen*52 budget is calibrated against the synthetic Go full-parse
+// workload; grammars with heavy GLR fanout (notably tree-sitter-markdown's
+// inline code-span / emphasis / latex-span / strikethrough external scanner
+// and its ambiguous block/inline split) can legitimately consume 150+ nodes
+// per byte on dense real-world inputs. Raising only the per-byte factor for
+// those grammars avoids forcing two full-parse retries on every small doc
+// while preserving the OOM ceiling for other languages.
+func parseNodeLimitForLanguage(sourceLen int, lang *Language) int {
+	perByte := 52
+	if lang != nil {
+		switch lang.Name {
+		case "markdown", "markdown_inline":
+			// Measured on the mdpp zero-cgo-parsing.mdpp corpus: 11 KB input
+			// drove ~1.9M node allocations (~170/byte). 200/byte keeps the
+			// first parse inside the ceiling without retry churn and still
+			// bounds pathological inputs.
+			perByte = 200
+		}
+	}
+	limit := max(300_000, sourceLen*perByte)
 	scale := parseNodeLimitScaleFactor()
 	if scale <= 1 {
 		return limit

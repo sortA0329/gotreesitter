@@ -1455,7 +1455,7 @@ func (p *Parser) parseInternal(source []byte, ts TokenSource, reuse *reuseCursor
 
 	maxIter := parseIterations(len(source))
 	maxDepth := parseStackDepth(len(source))
-	maxNodes := parseNodeLimit(len(source))
+	maxNodes := parseNodeLimitForLanguage(len(source), p.language)
 	if maxNodesOverride > maxNodes {
 		maxNodes = maxNodesOverride
 	}

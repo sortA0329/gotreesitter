@@ -284,6 +284,18 @@ func effectiveFullParseInitialMaxStacks(lang *Language, initialMaxStacks int) in
 		if initialMaxStacks < 32 {
 			initialMaxStacks = 32
 		}
+	case "markdown", "markdown_inline":
+		// Dense inline-heavy markdown (mixed **bold**/*em*/`code`/tables/
+		// footnotes) converges on the winning branch very quickly. Wider
+		// steady-state survivor budgets keep equivalent GLR branches alive
+		// through the whole parse, and the stack-merge phase dominates CPU
+		// (~70% cum in pprof). A tight initial cap of 4 forces early pruning
+		// (50x speed-up on the mdpp zero-cgo-parsing.mdpp corpus while keeping
+		// link_reference_definition disambiguation working) and still lets the
+		// retry-widen cycle handle genuinely harder inputs.
+		if initialMaxStacks == maxGLRStacks {
+			initialMaxStacks = 4
+		}
 	}
 	return initialMaxStacks
 }
